@@ -1,0 +1,131 @@
+name: 02_edit_workflow
+setup:
+  - mkdir: /tmp/photon-fixtures
+  - run: >-
+      .venv/bin/python -c "from PIL import Image;
+      img = Image.new('RGB', (400, 200), (220, 0, 0));
+      [img.putpixel((x, y), (0, 0, 220)) for x in range(200, 400) for y in range(200)];
+      img.save('/tmp/photon-fixtures/split.png')"
+
+steps:
+  # --- Edits are applied to the displayed image, not just reported ---
+  - cmd: file.open
+    args:
+      path: /tmp/photon-fixtures/split.png
+    assert:
+      - property: width
+        equals: 400
+      - property: height
+        equals: 200
+
+  - cmd: edit.set
+    args:
+      rotate: 90
+    assert:
+      - property: rotation
+        equals: 90
+      - property: stack_len
+        equals: 1
+
+  - cmd: window.state
+    assert:
+      - property: canvas.rotation
+        equals: 90
+
+  # Flip must reach the canvas too (regression: canvas ignored flip entirely)
+  - cmd: view.flip
+    args:
+      axis: h
+    assert:
+      - property: flip_h
+        equals: true
+      - property: flip_v
+        equals: false
+
+  # --- Undo/redo restores real state, not just the stack ---
+  - cmd: edit.undo
+    assert:
+      - property: undone
+        equals: true
+      - property: flip_h
+        equals: false
+      - property: rotation
+        equals: 90
+
+  - cmd: edit.undo
+    assert:
+      - property: undone
+        equals: true
+      - property: rotation
+        equals: 0
+      - property: stack_len
+        equals: 0
+
+  - cmd: edit.redo
+    assert:
+      - property: redone
+        equals: true
+      - property: rotation
+        equals: 90
+
+  - cmd: edit.redo
+    assert:
+      - property: redone
+        equals: true
+      - property: flip_h
+        equals: true
+
+  # --- Undo past the end must not corrupt state ---
+  - cmd: wait
+    args:
+      condition: view.rotation == 90
+      timeout: 5
+
+  - cmd: edit.reset
+    assert:
+      - property: rotation
+        equals: 0
+      - property: flip_h
+        equals: false
+      - property: stack_len
+        equals: 0
+
+  # --- Resize is part of the edit stack and is baked into the copy ---
+  - cmd: edit.set
+    args:
+      resize:
+        max: 100
+    assert:
+      - property: resize_max
+        equals: 100
+
+  - cmd: file.save_copy
+    args:
+      path: /tmp/photon-fixtures/split-edited.png
+    assert:
+      - property: width
+        equals: 100
+      - property: height
+        equals: 50
+
+  - cmd: file.info
+    assert:
+      - property: format
+        contains: PNG
+
+  - cmd: shot
+    args:
+      name: edit_workflow
+    assert:
+      - property: blank
+        equals: false
+
+  # No errors logged during the whole workflow
+  - cmd: log.errors
+    args:
+      n: 20
+      exclude:
+        - cmd.error
+    assert:
+      - property: errors
+        equals: []

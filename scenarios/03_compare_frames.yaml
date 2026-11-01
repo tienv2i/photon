@@ -1,0 +1,337 @@
+name: 03_compare_frames
+requires_feature: compare
+setup:
+  - mkdir: /tmp/photon-fixtures
+  - run: >-
+      .venv/bin/python -c "from PIL import Image;
+      img = Image.new('RGB', (400, 200), (220, 0, 0));
+      [img.putpixel((x, y), (0, 0, 220)) for x in range(200, 400) for y in range(200)];
+      img.save('/tmp/photon-fixtures/split.png')"
+  - run: >-
+      .venv/bin/python -c "from PIL import Image;
+      Image.new('RGB', (200, 100), (0, 190, 0)).save('/tmp/photon-fixtures/ref.png')"
+  - run: printf 'not an image' > /tmp/photon-fixtures/broken.png
+
+steps:
+  # --- Reset any state left by a previous run (the app is long-lived) ---
+  - cmd: view.compare
+    args:
+      enabled: false
+  - cmd: compare.clear
+  - cmd: frame.activate
+    args:
+      frame: main
+
+  # --- The main frame is active after opening an image ---
+  - cmd: file.open
+    args:
+      path: /tmp/photon-fixtures/split.png
+    assert:
+      - property: width
+        equals: 400
+
+  - cmd: frame.state
+    assert:
+      - property: active
+        equals: main
+      - property: frames.main.active
+        equals: true
+      - property: frames.compare.active
+        equals: false
+      - property: frames.main.width
+        equals: 400
+
+  # =====================================================================
+  # Toolbar on the MAIN frame: every button changes main only.
+  # =====================================================================
+
+  # Zoom in
+  - cmd: ui.click
+    args:
+      widget: bottom_zoom_in
+      x: 10
+      y: 10
+  - cmd: frame.state
+    assert:
+      - property: frames.main.fit
+        equals: false
+      - property: frames.main.zoom
+        greater_than: 1.0
+      - property: frames.compare.zoom
+        equals: 1.0
+
+  # Fit
+  - cmd: ui.click
+    args:
+      widget: bottom_fit
+      x: 10
+      y: 10
+  - cmd: frame.state
+    assert:
+      - property: frames.main.fit
+        equals: true
+      - property: frames.compare.zoom
+        equals: 1.0
+      - property: frames.compare.fit
+        equals: false
+
+  # Rotate right (document edit on the main frame)
+  - cmd: ui.click
+    args:
+      widget: bottom_rotate_right
+      x: 10
+      y: 10
+  - cmd: frame.state
+    assert:
+      - property: frames.main.rotation
+        equals: 90
+      - property: frames.compare.rotation
+        equals: 0
+  - cmd: window.state
+    assert:
+      - property: canvas.rotation
+        equals: 90
+      - property: compare_pane.rotation
+        equals: 0
+
+  # Rotate left (back to 0)
+  - cmd: ui.click
+    args:
+      widget: bottom_rotate_left
+      x: 10
+      y: 10
+  - cmd: frame.state
+    assert:
+      - property: frames.main.rotation
+        equals: 0
+
+  # =====================================================================
+  # Compare frame: placing the reference image activates it.
+  # =====================================================================
+  - cmd: view.compare
+    args:
+      enabled: true
+  - cmd: compare.set_image
+    args:
+      path: /tmp/photon-fixtures/ref.png
+    assert:
+      - property: active
+        equals: true
+      - property: path
+        contains: ref.png
+      - property: width
+        equals: 200
+
+  - cmd: frame.state
+    assert:
+      - property: active
+        equals: compare
+      - property: frames.compare.active
+        equals: true
+      - property: frames.main.active
+        equals: false
+
+  # Zoom in on the reference only
+  - cmd: ui.click
+    args:
+      widget: bottom_zoom_in
+      x: 10
+      y: 10
+  - cmd: frame.state
+    assert:
+      - property: frames.compare.zoom
+        greater_than: 0.5
+      - property: frames.compare.fit
+        equals: false
+      - property: frames.main.fit
+        equals: true
+
+  # Fit the reference only
+  - cmd: ui.click
+    args:
+      widget: bottom_fit
+      x: 10
+      y: 10
+  - cmd: frame.state
+    assert:
+      - property: frames.compare.fit
+        equals: true
+
+  # Rotate the reference only: this is display-only, never a document edit
+  - cmd: ui.click
+    args:
+      widget: bottom_rotate_right
+      x: 10
+      y: 10
+  - cmd: frame.state
+    assert:
+      - property: frames.compare.rotation
+        equals: 90
+      - property: frames.main.rotation
+        equals: 0
+  - cmd: window.state
+    assert:
+      - property: canvas.rotation
+        equals: 0
+      - property: compare_pane.rotation
+        equals: 90
+
+  # Zoom out on the reference only
+  - cmd: ui.click
+    args:
+      widget: bottom_zoom_out
+      x: 10
+      y: 10
+  - cmd: frame.state
+    assert:
+      - property: frames.compare.fit
+        equals: false
+      - property: frames.main.fit
+        equals: true
+
+  # =====================================================================
+  # Clicking a frame changes the active frame (real UI path)
+  # =====================================================================
+  - cmd: ui.click
+    args:
+      widget: canvas
+      x: 40
+      y: 40
+  - cmd: frame.state
+    assert:
+      - property: active
+        equals: main
+
+  - cmd: ui.click
+    args:
+      widget: bottom_rotate_right
+      x: 10
+      y: 10
+  - cmd: frame.state
+    assert:
+      - property: frames.main.rotation
+        equals: 90
+      - property: frames.compare.rotation
+        equals: 90
+
+  # Click the compare frame back
+  - cmd: ui.click
+    args:
+      widget: compare_canvas
+      x: 40
+      y: 40
+  - cmd: frame.state
+    assert:
+      - property: active
+        equals: compare
+
+  # =====================================================================
+  # Explicit frame targeting (view.* {"frame": ...})
+  # =====================================================================
+  - cmd: view.reset
+    args:
+      frame: main
+    assert:
+      - property: frame
+        equals: main
+      - property: rotation
+        equals: 0
+  - cmd: frame.state
+    assert:
+      - property: frames.compare.rotation
+        equals: 90
+
+  - cmd: view.rotate
+    args:
+      degrees: 180
+      frame: compare
+    assert:
+      - property: frame
+        equals: compare
+      - property: rotation
+        equals: 270
+
+  # Pan clamping still applies per frame
+  - cmd: view.zoom
+    args:
+      factor: 4.0
+      frame: compare
+  - cmd: view.pan
+    args:
+      dx: 100000
+      dy: 100000
+      frame: compare
+    assert:
+      - property: at_limit
+        equals: true
+      - property: frame
+        equals: compare
+  - cmd: frame.state
+    assert:
+      - property: frames.main.offset_x
+        equals: 0
+
+  # =====================================================================
+  # Hiding the compare frame returns focus to main
+  # =====================================================================
+  - cmd: view.compare
+    args:
+      enabled: false
+  - cmd: frame.state
+    assert:
+      - property: active
+        equals: main
+  - cmd: compare.state
+    assert:
+      - property: visible
+        equals: false
+      - property: path
+        contains: ref.png
+
+  - cmd: view.compare
+    args:
+      enabled: true
+  - cmd: compare.state
+    assert:
+      - property: visible
+        equals: true
+      - property: path
+        contains: ref.png
+      - property: rotation
+        equals: 270
+
+  # =====================================================================
+  # Screenshots + log
+  # =====================================================================
+  - cmd: shot
+    args:
+      name: compare_frames
+    assert:
+      - property: blank
+        equals: false
+
+  - cmd: log.errors
+    args:
+      n: 30
+      exclude:
+        - cmd.error
+    assert:
+      - property: errors
+        equals: []
+
+  # --- A corrupt / missing reference must fail loudly, not silently ---
+  # (kept last: failed commands are themselves recorded in the log)
+  - cmd: compare.set_image
+    args:
+      path: /tmp/photon-fixtures/broken.png
+    expect_fail: true
+  - cmd: compare.set_image
+    args:
+      path: /tmp/photon-fixtures/missing.png
+    expect_fail: true
+
+  # The reference image survives the failed loads.
+  - cmd: compare.state
+    assert:
+      - property: path
+        contains: ref.png

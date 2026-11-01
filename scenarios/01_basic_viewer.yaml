@@ -1,0 +1,192 @@
+name: 01_basic_viewer
+setup:
+  - mkdir: /tmp/photon-fixtures
+  - mkdir: /tmp/opencode
+  - run: >-
+      .venv/bin/python -c "from PIL import Image;
+      Image.new('RGB', (1600, 1200), (30, 120, 200)).save('/tmp/photon-fixtures/test.jpg')"
+
+steps:
+  # Open image
+  - cmd: file.open
+    args:
+      path: /tmp/photon-fixtures/test.jpg
+    assert:
+      - property: path
+        equals: /tmp/photon-fixtures/test.jpg
+      - property: width
+        greater_than: 0
+      - property: height
+        greater_than: 0
+
+  # Get file info
+  - cmd: file.info
+    assert:
+      - property: format
+        contains: JPEG
+
+  # Image must be fitted to the window right after opening
+  - cmd: window.state
+    assert:
+      - property: canvas.fit
+        equals: true
+      - property: canvas.zoom
+        less_than: 1
+      - property: canvas.rotation
+        equals: 0
+
+  # Bottom viewer toolbar: centred, exact button order, no delete button
+  - cmd: toolbar.state
+    assert:
+      - property: centered
+        equals: true
+      - property: bottom
+        equals:
+          - bottom_zoom_in
+          - bottom_zoom_out
+          - bottom_fit
+          - bottom_prev
+          - bottom_fullscreen
+          - bottom_next
+          - bottom_compare
+          - bottom_rotate_left
+          - bottom_rotate_right
+      - property: bottom
+        not_contains: bottom_delete
+      # Compare is temporarily hidden (core/features.py): the button exists
+      # but is not shown. Flip this assertion together with the feature flag.
+      - property: bottom_visible
+        not_contains: bottom_compare
+
+  # Rotate 90 degrees
+  - cmd: view.rotate
+    args:
+      degrees: 90
+    assert:
+      - property: rotation
+        equals: 90
+
+  # Rotate another 90 (total 180)
+  - cmd: view.rotate
+    args:
+      degrees: 90
+    assert:
+      - property: rotation
+        equals: 180
+
+  # Compare view is hidden for now: no pane, no state change
+  - cmd: window.state
+    assert:
+      - property: compare
+        equals: false
+      - property: compare_pane.visible
+        equals: false
+
+  # Reset view
+  - cmd: view.reset
+    assert:
+      - property: rotation
+        equals: 0
+      - property: zoom
+        equals: 1.0
+
+  # Show Edit Tools reveals BOTH side panels (left + right) together
+  - cmd: sidebar.show
+    args:
+      side: both
+      visible: false
+    assert:
+      - property: visible
+        equals: false
+
+  - cmd: toolbar.click
+    args:
+      button: edit_tools
+    assert:
+      - property: clicked
+        equals: edit_tools
+
+  - cmd: sidebar.state
+    args:
+      side: both
+    assert:
+      - property: left
+        equals: true
+      - property: right
+        equals: true
+      - property: visible
+        equals: true
+
+  # Clicking Show Edit Tools again hides both panels
+  - cmd: toolbar.click
+    args:
+      button: edit_tools
+
+  - cmd: sidebar.state
+    args:
+      side: both
+    assert:
+      - property: visible
+        equals: false
+      - property: left
+        equals: false
+      - property: right
+        equals: false
+
+  # Show both panels again for the screenshot
+  - cmd: sidebar.show
+    args:
+      side: both
+      visible: true
+    assert:
+      - property: visible
+        equals: true
+
+  # Take screenshot
+  - cmd: shot
+    args:
+      name: viewer
+    assert:
+      - property: blank
+        equals: false
+
+  # Get recent events
+  - cmd: ui.events
+    args:
+      n: 10
+    assert:
+      - property: events
+        not_equals: []
+
+  # Full screen toggle (state reported by window.state)
+  - cmd: view.fullscreen
+    args:
+      enabled: true
+    assert:
+      - property: fullscreen
+        equals: true
+
+  - cmd: wait
+    args:
+      condition: window.fullscreen == true
+      timeout: 5
+
+  - cmd: window.state
+    assert:
+      - property: fullscreen
+        equals: true
+
+  - cmd: view.fullscreen
+    args:
+      enabled: false
+    assert:
+      - property: fullscreen
+        equals: false
+
+  # Check app info
+  - cmd: app.info
+    assert:
+      - property: version
+        equals: 0.1.0
+      - property: headless
+        equals: false

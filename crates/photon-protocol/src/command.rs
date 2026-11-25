@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ApplyTarget, BatchOperation, BatchOutput, BatchSource, BlendMode, BrushSettings, CanvasAnchor,
-    ClientKind, DrawShapeKind, GradientColorMode, GradientKind, Language, LayerEffect, LayoutState,
-    LiquifyMode, LiveStrokeKind, MoveDirection, PROTOCOL_VERSION, ResizeMode, SelectionBooleanOp,
-    SelectionModifyOp, SelectionShape, ShapeFillMode, Theme, TranslateSettings, TranslationBlock,
-    VectorPathNode, Workspace, default_half_f32, default_one_f32, default_opaque_alpha,
+    ClientKind, DrawShapeKind, GradientColorMode, GradientKind, HealingMode, Language, LayerEffect,
+    LayerTransformSpec, LayoutState, LiquifyMode, LiveStrokeKind, MoveDirection, PROTOCOL_VERSION,
+    PluginParamValue, ResizeMode, SelectionBooleanOp, SelectionModifyOp, SelectionShape,
+    ShapeFillMode, Theme, TranslateSettings, TranslationBlock, VectorPathNode, Workspace,
+    default_brush_hardness, default_half_f32, default_one_f32, default_opaque_alpha,
 };
 
 fn default_protocol() -> u32 {
@@ -268,6 +269,12 @@ pub enum Command {
         fill_mode: ShapeFillMode,
         #[serde(default)]
         closed: bool,
+        #[serde(default)]
+        color: Option<[u8; 3]>,
+        #[serde(default)]
+        radius: Option<f32>,
+        #[serde(default)]
+        opacity: Option<f32>,
     },
     EditorFloodFill {
         x: u32,
@@ -275,6 +282,12 @@ pub enum Command {
         tolerance: u8,
         #[serde(default = "default_true")]
         contiguous: bool,
+        #[serde(default)]
+        color: Option<[u8; 3]>,
+        #[serde(default)]
+        opacity: Option<f32>,
+        #[serde(default)]
+        sample_all_layers: bool,
     },
     EditorDrawGradient {
         start: [f32; 2],
@@ -283,6 +296,51 @@ pub enum Command {
         kind: GradientKind,
         #[serde(default)]
         color_mode: GradientColorMode,
+        #[serde(default)]
+        fg_color: Option<[u8; 3]>,
+        #[serde(default)]
+        bg_color: Option<[u8; 3]>,
+        #[serde(default)]
+        opacity: Option<f32>,
+        #[serde(default)]
+        reverse: bool,
+        #[serde(default)]
+        dither: bool,
+    },
+    EditorHealingStroke {
+        points: Vec<[f64; 2]>,
+        #[serde(default)]
+        mode: HealingMode,
+        radius: f32,
+        #[serde(default = "default_brush_hardness")]
+        hardness: f32,
+        #[serde(default = "default_one_f32")]
+        strength: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<[f64; 2]>,
+    },
+    EditorDenoise {
+        strength: f32,
+        #[serde(default = "default_half_f32")]
+        detail_preserve: f32,
+        #[serde(default)]
+        target: ApplyTarget,
+    },
+    EditorTransformLayer {
+        #[serde(default)]
+        layer_id: Option<u64>,
+        transform: LayerTransformSpec,
+    },
+    EditorCopyPixels {
+        #[serde(default)]
+        merged: bool,
+    },
+    EditorCutPixels,
+    EditorPastePixels {
+        #[serde(default)]
+        png_bytes: Option<Vec<u8>>,
+        #[serde(default)]
+        into_selection: bool,
     },
     EditorLayerAdd {
         #[serde(default)]
@@ -439,6 +497,30 @@ pub enum Command {
     DeletePermanently {
         paths: Vec<String>,
     },
+    PasteImageBytes {
+        folder: String,
+        #[serde(default)]
+        filename_hint: String,
+        png_bytes: Vec<u8>,
+    },
+    PluginRefresh,
+    PluginSetEnabled {
+        id: String,
+        enabled: bool,
+    },
+    PluginInstall {
+        source_dir: String,
+    },
+    PluginUninstall {
+        id: String,
+    },
+    PluginRun {
+        id: String,
+        #[serde(default)]
+        params: BTreeMap<String, PluginParamValue>,
+        #[serde(default)]
+        target: ApplyTarget,
+    },
     ViewerTranslate {
         path: String,
         #[serde(default)]
@@ -531,6 +613,12 @@ impl Command {
             Self::EditorDrawShape { .. } => "editor_draw_shape",
             Self::EditorFloodFill { .. } => "editor_flood_fill",
             Self::EditorDrawGradient { .. } => "editor_draw_gradient",
+            Self::EditorHealingStroke { .. } => "editor_healing_stroke",
+            Self::EditorDenoise { .. } => "editor_denoise",
+            Self::EditorTransformLayer { .. } => "editor_transform_layer",
+            Self::EditorCopyPixels { .. } => "editor_copy_pixels",
+            Self::EditorCutPixels => "editor_cut_pixels",
+            Self::EditorPastePixels { .. } => "editor_paste_pixels",
             Self::EditorLayerAdd { .. } => "editor_layer_add",
             Self::EditorLayerAddEffect { .. } => "editor_layer_add_effect",
             Self::EditorLayerUpdateEffect { .. } => "editor_layer_update_effect",
@@ -574,6 +662,12 @@ impl Command {
             Self::MoveTo { .. } => "move_to",
             Self::Trash { .. } => "trash",
             Self::DeletePermanently { .. } => "delete_permanently",
+            Self::PasteImageBytes { .. } => "paste_image_bytes",
+            Self::PluginRefresh => "plugin_refresh",
+            Self::PluginSetEnabled { .. } => "plugin_set_enabled",
+            Self::PluginInstall { .. } => "plugin_install",
+            Self::PluginUninstall { .. } => "plugin_uninstall",
+            Self::PluginRun { .. } => "plugin_run",
             Self::ViewerTranslate { .. } => "viewer_translate",
             Self::ViewerSaveTranslation { .. } => "viewer_save_translation",
             Self::ViewerDeleteTranslation { .. } => "viewer_delete_translation",
@@ -614,6 +708,7 @@ pub enum Query {
     Tasks,
     UiTree,
     Schema,
+    EditorClipboardPng,
 }
 
 /// Outcome of submitting an `Envelope` to the gateway.
@@ -800,4 +895,72 @@ pub fn protocol_schemas() -> serde_json::Value {
         "response": schemars::schema_for!(CommandResponse),
         "event": schemars::schema_for!(Event),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_fill_gradient_shape_commands_deserialize_with_defaults() {
+        let fill: Command =
+            serde_json::from_str(r#"{"type":"editor_flood_fill","x":10,"y":20,"tolerance":12}"#)
+                .unwrap();
+        assert_eq!(fill.name(), "editor_flood_fill");
+
+        let grad: Command = serde_json::from_str(
+            r#"{"type":"editor_draw_gradient","start":[0.0,0.0],"end":[10.0,10.0]}"#,
+        )
+        .unwrap();
+        assert_eq!(grad.name(), "editor_draw_gradient");
+
+        let shape: Command =
+            serde_json::from_str(r#"{"type":"editor_draw_shape","kind":"rect"}"#).unwrap();
+        assert_eq!(shape.name(), "editor_draw_shape");
+    }
+
+    #[test]
+    fn new_commands_and_schemas_build_cleanly() {
+        let cmds = [
+            Command::EditorDenoise {
+                strength: 0.5,
+                detail_preserve: 0.5,
+                target: ApplyTarget::ActiveLayer,
+            },
+            Command::EditorTransformLayer {
+                layer_id: None,
+                transform: LayerTransformSpec::default(),
+            },
+            Command::EditorCopyPixels { merged: true },
+            Command::EditorCutPixels,
+            Command::EditorPastePixels {
+                png_bytes: None,
+                into_selection: false,
+            },
+            Command::PasteImageBytes {
+                folder: "/tmp".into(),
+                filename_hint: "paste.png".into(),
+                png_bytes: vec![1, 2, 3],
+            },
+            Command::PluginRefresh,
+            Command::PluginSetEnabled {
+                id: "demo".into(),
+                enabled: false,
+            },
+            Command::PluginInstall {
+                source_dir: "/tmp/demo".into(),
+            },
+            Command::PluginUninstall { id: "demo".into() },
+            Command::PluginRun {
+                id: "demo".into(),
+                params: BTreeMap::new(),
+                target: ApplyTarget::ActiveLayer,
+            },
+        ];
+        for cmd in &cmds {
+            assert!(!cmd.name().is_empty());
+        }
+        let schemas = protocol_schemas();
+        assert!(schemas.get("command").is_some());
+    }
 }

@@ -1,0 +1,108 @@
+{
+  "apiVersion": 1,
+  "id": "photon.ai_inpaint.onnx",
+  "name": "AI Watermark Remover (YOLO Detector + LaMa / MI-GAN)",
+  "version": "2.0.0",
+  "entry": {
+    "command": "bin/photon-plugin-ai-inpaint",
+    "args": [],
+    "protocol": "jsonl-stdio"
+  },
+  "permissions": {
+    "network": false,
+    "gpu": false
+  },
+  "models": [
+    {
+      "id": "watermark-yolo26",
+      "name": "YOLO26 Watermark Detector (Fast, 9.8 MB)",
+      "tier": "detector",
+      "file": "watermark-yolo26.onnx",
+      "sizeBytes": 9804990,
+      "sha256": "",
+      "url": "https://huggingface.co/ayan4m1/Watermark-Detection-YOLO26-ONNX/resolve/main/onnx/model.onnx"
+    },
+    {
+      "id": "watermark-yolo11",
+      "name": "YOLO11 Watermark Detector (Balanced, 11 MB)",
+      "tier": "detector",
+      "file": "watermark-yolo11.onnx",
+      "sizeBytes": 11068970,
+      "sha256": "",
+      "url": "https://huggingface.co/ayan4m1/Watermark-Detection-YOLO11-ONNX/resolve/main/onnx/model.onnx"
+    },
+    {
+      "id": "migan-pipeline-v2",
+      "name": "MI-GAN v2 Inpainter (Fast CPU, 28 MB)",
+      "tier": "inpaint",
+      "file": "migan-pipeline-v2.onnx",
+      "sizeBytes": 28079181,
+      "sha256": "",
+      "url": "https://huggingface.co/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx"
+    },
+    {
+      "id": "lama-fp32",
+      "name": "LaMa FFC Inpainter (High Quality, 208 MB)",
+      "tier": "inpaint",
+      "file": "lama-fp32.onnx",
+      "sizeBytes": 208044816,
+      "sha256": "",
+      "url": "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx"
+    }
+  ],
+  "capabilities": [
+    {
+      "action": "editor.ai_inpaint",
+      "workspace": "editor",
+      "label": "AI Watermark Remover (Detector + LaMa / MI-GAN)",
+      "output": "image"
+    }
+  ],
+  "quickActions": [
+    {
+      "id": "ai-dewatermark-yolo26-migan",
+      "label": "AI Remove watermark (YOLO26 + MI-GAN — Fast)",
+      "action": "editor.ai_inpaint",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "detectorModel": "watermark-yolo26",
+        "inpainterModel": "migan-pipeline-v2",
+        "confidence": 0.45,
+        "maskPadding": 8
+      }
+    },
+    {
+      "id": "ai-dewatermark-yolo26-lama",
+      "label": "AI Remove watermark (YOLO26 + LaMa — High Quality)",
+      "action": "editor.ai_inpaint",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "detectorModel": "watermark-yolo26",
+        "inpainterModel": "lama-fp32",
+        "confidence": 0.35,
+        "maskPadding": 8
+      }
+    },
+    {
+      "id": "ai-dewatermark-yolo11-migan",
+      "label": "AI Remove watermark (YOLO11 + MI-GAN)",
+      "action": "editor.ai_inpaint",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "detectorModel": "watermark-yolo11",
+        "inpainterModel": "migan-pipeline-v2",
+        "confidence": 0.35,
+        "maskPadding": 8
+      }
+    }
+  ]
+}

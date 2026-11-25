@@ -2,18 +2,24 @@
 
 ## Desktop / Headless Executable (`photon`)
 ```sh
-photon                         # Start GUI in Browser workspace
+photon                         # Start GUI in Browser workspace (maximized on first run)
 photon browse /path/to/dir     # Open folder in Browser
 photon view /path/to/a.jpg ... # Open image(s) in Viewer
 photon edit /path/to/a.jpg     # Open image directly in Editor
 photon /path/to/a.jpg          # Alias for `view`
 photon --headless              # Run Core + Local IPC without GUI window
-photon --safe-mode             # Factory defaults in memory + software renderer
+photon --safe-mode             # Factory defaults in memory + software renderer (tiny-skia)
 photon --reset-layout          # Reset layout preferences (backups config.json)
 photon --reset-config          # Reset all settings (backups config.json)
 photon --lang <en|vi|system>   # Override initial UI language
 photon --new-window [path...]  # Open standalone window instead of forwarding to running instance
 ```
+
+### Environment Variables
+- `PHOTON_PROFILE=dev|prod` — Override profile in debug builds (`prod` vs `dev`).
+- `PHOTON_SANDBOX_DIR=<path>` — Isolate config, state, cache, logs, journal, data/plugins, and IPC socket inside `<path>`.
+- `PHOTON_PLUGINS_DIR=<path>` — Override the plugin discovery directory (`<data_dir>/plugins`).
+- `PHOTON_MODELS_DIR=<path>` — Override the model lookup directory used by AI/OCR `jsonl-stdio` plugins.
 
 ## Control & Agent Debug CLI (`photonctl`)
 Global flags: `--socket <PATH>` (override IPC socket path), `--json` (compact JSON output for scripts/agents).
@@ -24,8 +30,12 @@ photonctl open /path/to/photo.png
 photonctl open-folder ~/Pictures
 photonctl edit /path/to/photo.png
 photonctl workspace viewer
-photonctl dispatch '{"type":"editor_rotate","degrees":90}' --expected-revision 4
+photonctl dispatch '{"type":"editor_rotate","degrees":90,"target":"whole_image"}' --expected-revision 4
+photonctl dispatch '{"type":"plugin_refresh"}'
+photonctl dispatch '{"type":"plugin_run","id":"photon.utils","params":{"action":"utils.strip_exif"}}'
 photonctl query state
+photonctl query meta
+photonctl query clipboard        # Inspect EditorPixelClipboard dimensions, offsets & PNG bytes
 photonctl schema
 photonctl events --limit 20
 

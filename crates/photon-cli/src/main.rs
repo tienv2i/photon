@@ -98,6 +98,7 @@ enum QueryArg {
     Tasks,
     UiTree,
     Schema,
+    Clipboard,
 }
 
 #[derive(Subcommand)]
@@ -207,6 +208,7 @@ async fn run(cli: Cli, paths: &AppPaths, socket: &Path) -> Result<(), String> {
                 QueryArg::Tasks => Query::Tasks,
                 QueryArg::UiTree => Query::UiTree,
                 QueryArg::Schema => Query::Schema,
+                QueryArg::Clipboard => Query::EditorClipboardPng,
             };
             print_query(socket, q, cli.json).await
         }

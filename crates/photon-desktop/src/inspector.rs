@@ -273,6 +273,26 @@ pub fn build_ui_tree(
                 value: None,
             });
             widgets.push(SemanticWidgetNode {
+                id: "browser.menu.plugins.manage".to_owned(),
+                role: "menu_item".to_owned(),
+                label: tr(lang, "action-manage-plugins"),
+                workspace: ws,
+                enabled: true,
+                visible: true,
+                bounds: None,
+                value: None,
+            });
+            widgets.push(SemanticWidgetNode {
+                id: "browser.menu.plugins.reload".to_owned(),
+                role: "menu_item".to_owned(),
+                label: tr(lang, "action-reload-plugins"),
+                workspace: ws,
+                enabled: true,
+                visible: true,
+                bounds: None,
+                value: None,
+            });
+            widgets.push(SemanticWidgetNode {
                 id: "browser.menu.window".to_owned(),
                 role: "menu_button".to_owned(),
                 label: tr(lang, "menu-window"),
@@ -896,6 +916,16 @@ pub fn build_ui_tree(
                     "tool-gradient",
                     EditorTool::Gradient,
                 ),
+                (
+                    "editor.tool.healing_brush",
+                    "tool-healing-brush",
+                    EditorTool::HealingBrush,
+                ),
+                (
+                    "editor.tool.transform",
+                    "tool-transform",
+                    EditorTool::Transform,
+                ),
             ] {
                 widgets.push(SemanticWidgetNode {
                     id: id.to_owned(),
@@ -1075,6 +1105,86 @@ pub fn build_ui_tree(
                 visible: true,
                 bounds: None,
                 value: None,
+            });
+            widgets.push(SemanticWidgetNode {
+                id: "editor.menu.filter.denoise".to_owned(),
+                role: "menu_item".to_owned(),
+                label: tr(lang, "menu-filter-denoise"),
+                workspace: ws,
+                enabled: has_doc,
+                visible: true,
+                bounds: None,
+                value: None,
+            });
+            widgets.push(SemanticWidgetNode {
+                id: "editor.menu.plugins".to_owned(),
+                role: "menu_button".to_owned(),
+                label: tr(lang, "menu-plugins"),
+                workspace: ws,
+                enabled: true,
+                visible: true,
+                bounds: None,
+                value: None,
+            });
+            widgets.push(SemanticWidgetNode {
+                id: "editor.menu.plugins.manage".to_owned(),
+                role: "menu_item".to_owned(),
+                label: tr(lang, "action-manage-plugins"),
+                workspace: ws,
+                enabled: true,
+                visible: true,
+                bounds: None,
+                value: None,
+            });
+            widgets.push(SemanticWidgetNode {
+                id: "editor.menu.plugins.reload".to_owned(),
+                role: "menu_item".to_owned(),
+                label: tr(lang, "action-reload-plugins"),
+                workspace: ws,
+                enabled: true,
+                visible: true,
+                bounds: None,
+                value: None,
+            });
+            widgets.push(SemanticWidgetNode {
+                id: "editor.zoom_in".to_owned(),
+                role: "button".to_owned(),
+                label: tr(lang, "action-zoom-in"),
+                workspace: ws,
+                enabled: has_doc,
+                visible: true,
+                bounds: None,
+                value: Some(format!("{zoom:.2}")),
+            });
+            widgets.push(SemanticWidgetNode {
+                id: "editor.zoom_out".to_owned(),
+                role: "button".to_owned(),
+                label: tr(lang, "action-zoom-out"),
+                workspace: ws,
+                enabled: has_doc,
+                visible: true,
+                bounds: None,
+                value: Some(format!("{zoom:.2}")),
+            });
+            widgets.push(SemanticWidgetNode {
+                id: "editor.zoom_fit".to_owned(),
+                role: "button".to_owned(),
+                label: tr(lang, "action-fit"),
+                workspace: ws,
+                enabled: has_doc,
+                visible: true,
+                bounds: None,
+                value: Some(format!("{zoom:.2}")),
+            });
+            widgets.push(SemanticWidgetNode {
+                id: "editor.zoom_actual".to_owned(),
+                role: "button".to_owned(),
+                label: tr(lang, "action-actual-ratio"),
+                workspace: ws,
+                enabled: has_doc,
+                visible: true,
+                bounds: None,
+                value: Some(format!("{zoom:.2}")),
             });
             widgets.push(SemanticWidgetNode {
                 id: "editor.menu.select".to_owned(),
@@ -1500,6 +1610,12 @@ pub fn build_ui_tree(
         }
     }
 
+    let gpu_adapter = match gpu_backend {
+        "tiny-skia" => "tiny-skia (software)".to_owned(),
+        "headless" => "headless".to_owned(),
+        _ => "iced_wgpu".to_owned(),
+    };
+
     UiTreeSnapshot {
         revision: snapshot.meta.revision,
         workspace: ws,
@@ -1512,7 +1628,7 @@ pub fn build_ui_tree(
             pan_x,
             pan_y,
             gpu_backend: gpu_backend.to_owned(),
-            gpu_adapter: "iced_wgpu".to_owned(),
+            gpu_adapter,
         },
         widgets,
     }

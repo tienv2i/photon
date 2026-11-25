@@ -93,7 +93,7 @@ settings-theme = Giao diện
 settings-theme-dark = Tối
 settings-theme-light = Sáng
 settings-language = Ngôn ngữ giao diện
-settings-system-open = Khi mở ảnh từ hệ thống
+settings-system-open = Mở tệp ảnh (Mở trực tiếp)
 settings-open-fit = Vừa ảnh
 settings-open-fullscreen = Toàn màn hình
 settings-open-remembered = Theo kích thước cũ
@@ -654,7 +654,7 @@ tooltip-tool-draw-polygon = Công cụ vẽ đa giác (U)
 tooltip-tool-draw-polyline = Công cụ vẽ đường gấp khúc (U)
 tooltip-tool-shape-group = Công cụ vẽ hình & đường thẳng (U)
 tooltip-tool-bezier-pen = Công cụ Bút Bezier (P)
-tooltip-tool-paint-bucket = Công cụ Thùng sơn (G)
+tooltip-tool-paint-bucket = Công cụ Thùng sơn (F)
 tooltip-tool-gradient = Công cụ Chuyển sắc (G)
 tooltip-tool-fill-group = Thùng sơn / Chuyển sắc (G)
 
@@ -682,3 +682,133 @@ gradient-fg-transparent = Màu chính -> Trong suốt
 
 label-flood-fill-tolerance = Dung sai
 label-flood-fill-contiguous = Liền kề
+
+# Trình chỉnh đường cong (Curves) & mẫu thiết lập sẵn
+action-reset-channel = Đặt lại kênh
+label-curve-points = { $count } điểm điều khiển
+label-curve-in = Vào
+label-curve-out = Ra
+label-curve-in-out = Vào: { $in } · Ra: { $out }
+hint-curve-usage = Nhấp để thêm · Kéo để di chuyển · Chuột phải để xóa
+curve-preset-linear = Tuyến tính
+curve-preset-s-curve = Chữ S
+curve-preset-fade = Mờ phim (Fade)
+curve-preset-high-contrast = Tương phản cao
+curve-preset-negative = Âm bản
+
+# Cọ phục hồi, Chuyển sắc & Thùng sơn bổ sung
+tool-healing-brush = Cọ phục hồi (Healing)
+tooltip-tool-healing-brush = Công cụ Cọ phục hồi (J)
+label-healing-mode = Chế độ
+healing-mode-spot = Điểm (Spot)
+healing-mode-sampled = Lấy mẫu (Sampled)
+hint-healing-source = Giữ Alt+Nhấp lên ảnh để chọn điểm mẫu
+label-healing-source-set = Điểm mẫu: ({ $x }, { $y })
+label-healing-source-unset = Điểm mẫu: Chưa đặt
+label-gradient-reverse = Đảo ngược
+label-gradient-dither = Khử dải màu (Dither)
+op-healing = Cọ phục hồi
+op-draw-shape = Vẽ hình
+op-flood-fill = Đổ màu thùng sơn
+op-gradient = Tô chuyển sắc
+op-selection-clear = Xóa vùng chọn
+
+# Công cụ Biến đổi tự do (Transform)
+tool-transform = Biến đổi (Transform)
+tooltip-tool-transform = Biến đổi tự do (Ctrl+T)
+action-transform = Biến đổi tự do…
+label-transform-x = X
+label-transform-y = Y
+label-transform-width = Rộng (%)
+label-transform-height = Cao (%)
+label-transform-angle = Góc (°)
+label-transform-pivot = Tâm xoay
+label-transform-flip = Lật
+action-apply-transform = Áp dụng biến đổi
+action-cancel-transform = Hủy biến đổi
+op-transform-layer = Biến đổi lớp
+
+# Trình đơn Plugin, Quản lý Plugin & UiText từ Core
+action-manage-plugins = Quản lý Plugin…
+action-reload-plugins = Tải lại Plugin
+action-install-plugin = Cài đặt Plugin…
+action-uninstall-plugin = Gỡ cài đặt
+action-open-plugins-folder = Mở thư mục Plugin
+menu-plugins-no-enabled = Không có plugin nào đang bật
+dialog-manage-plugins-title = Quản lý Plugin
+dialog-plugin-params-title = Thông số Plugin
+label-plugin-search = Lọc plugin…
+label-plugin-parameters = Thông số
+label-plugin-permissions = Quyền hạn
+label-plugin-version = Phiên bản
+label-plugin-author = Tác giả
+label-plugin-capabilities = Chức năng
+label-plugin-enabled = Đang bật
+label-plugin-disabled = Đã tắt
+label-plugin-none-selected = Chọn một plugin để xem chi tiết
+label-plugin-no-permissions = Không yêu cầu quyền đặc biệt
+action-run-plugin = Chạy Plugin
+plugins-refreshed = Đã tải lại { $count } plugin
+plugin-enabled = Đã bật plugin { $name }
+plugin-disabled = Đã tắt plugin { $name }
+plugin-installed = Đã cài đặt plugin { $name }
+plugin-uninstalled = Đã gỡ cài đặt plugin { $name }
+plugin-executed = Plugin { $name } đã chạy xong
+plugin-failed = Plugin { $name } lỗi: { $error }
+plugin-not-found = Không tìm thấy plugin: { $id }
+plugin-invalid-manifest = Tệp cấu hình plugin không hợp lệ: { $error }
+op-plugin = Plugin: { $name }
+
+# Cửa sổ khởi động, Trình kết xuất, Khử răng cưa & Khử nhiễu
+settings-app-launch-window = Cửa sổ khởi động (Trình duyệt)
+settings-launch-maximized = Phóng đại (Maximized)
+settings-launch-remembered = Trạng thái trước đó
+settings-system-open-hint = Áp dụng khi mở trực tiếp tệp ảnh, không áp dụng khi mở ứng dụng từ menu
+settings-active-renderer = Trình kết xuất đang dùng
+renderer-gpu-wgpu = GPU (wgpu)
+renderer-software-tiny-skia = Phần mềm (tiny-skia)
+settings-restart-required-renderer = Cần khởi động lại để áp dụng thay đổi trình kết xuất
+settings-canvas-aa = Khử răng cưa khung vẽ
+aa-mode-crisp = Sắc nét (Crisp)
+aa-mode-smooth = Mượt (Smooth)
+aa-mode-high-quality = Chất lượng cao
+settings-viewport-denoise = Khử nhiễu khung nhìn
+denoise-mode-off = Tắt
+denoise-mode-light = Nhẹ
+denoise-mode-medium = Trung bình
+denoise-mode-strong = Mạnh
+menu-filter-denoise = Khử nhiễu…
+dialog-adjust-denoise = Khử nhiễu
+filter-denoise = Khử nhiễu
+label-preserve-detail = Giữ chi tiết
+op-denoise = Khử nhiễu
+
+# Bộ nhớ tạm Cắt / Chép / Dán
+action-cut = Cắt
+action-copy = Sao chép
+action-copy-merged = Sao chép gộp lớp
+action-paste = Dán
+action-paste-into-selection = Dán vào vùng chọn
+toast-pasted = Đã dán từ bộ nhớ tạm
+toast-cut = Đã cắt vào bộ nhớ tạm
+toast-copied = Đã chép vào bộ nhớ tạm
+toast-clipboard-empty = Bộ nhớ tạm không có ảnh
+op-cut-pixels = Cắt điểm ảnh
+op-paste-pixels = Dán điểm ảnh
+
+# Chú giải Thu phóng/Vừa khung/1:1 & Định dạng ảnh mở rộng
+tooltip-editor-actual-size = Kích thước thật 1:1 (1)
+tooltip-editor-zoom-percent = Tỉ lệ thu phóng hiện tại
+tooltip-editor-fit-zero = Vừa khung vẽ (0 / F)
+label-export-format = Định dạng
+format-ora = OpenRaster (.ora)
+format-psd = Photoshop (.psd)
+format-svg = Vector SVG (.svg)
+format-jxl = JPEG XL (.jxl)
+format-avif = AVIF (.avif)
+format-exr = OpenEXR (.exr)
+format-hdr = Radiance HDR (.hdr)
+format-ico = Biểu tượng (.ico)
+format-pnm = Netpbm (.ppm/.pgm/.pbm/.pam)
+format-farbfeld = Farbfeld (.ff)
+format-raw = Ảnh RAW máy ảnh

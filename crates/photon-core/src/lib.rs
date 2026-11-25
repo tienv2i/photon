@@ -8,6 +8,6 @@ pub mod replay;
 pub mod runtime;
 pub mod translate;
 
-pub use core::Core;
+pub use core::{Core, EditorPixelClipboard};
 pub use replay::{ReplayReport, ReplayStepResult, replay_journal_in_sandbox};
-pub use runtime::{CoreHandle, CoreRuntime};
+pub use runtime::{CoreHandle, CoreRuntime, EditorTransformFrames};

@@ -1,0 +1,114 @@
+{
+  "apiVersion": 1,
+  "id": "photon.upscale.onnx",
+  "name": "AI Upscale (ONNX)",
+  "version": "1.2.0",
+  "entry": {
+    "command": "bin/photon-plugin-upscale",
+    "args": [
+      "--device",
+      "${device}"
+    ],
+    "protocol": "jsonl-stdio"
+  },
+  "permissions": {
+    "network": false,
+    "gpu": true
+  },
+  "models": [
+    {
+      "id": "swin2sr-x2",
+      "name": "Swin2SR 2× (Fast)",
+      "tier": "upscale-2x",
+      "file": "swin2sr-x2.onnx",
+      "sizeBytes": 21471413,
+      "sha256": "",
+      "url": "https://huggingface.co/Xenova/swin2SR-classical-sr-x2-64/resolve/main/onnx/model_quantized.onnx"
+    },
+    {
+      "id": "realesr-general-x4v3",
+      "name": "Real-ESRGAN 4× Fast (General)",
+      "tier": "upscale-4x",
+      "file": "realesr-general-x4v3.onnx",
+      "sizeBytes": 4900000,
+      "sha256": "",
+      "url": "https://huggingface.co/thisismert/real-esrgan-onnx/resolve/main/onnx/realesr-general-x4v3.onnx"
+    },
+    {
+      "id": "realesrgan-x4plus-anime",
+      "name": "Real-ESRGAN 4× Anime",
+      "tier": "anime",
+      "file": "realesrgan-x4plus-anime.onnx",
+      "sizeBytes": 17900000,
+      "sha256": "",
+      "url": "https://huggingface.co/thisismert/real-esrgan-onnx/resolve/main/onnx/RealESRGAN_x4plus_anime_6B.onnx"
+    },
+    {
+      "id": "realesrgan-x4plus",
+      "name": "Real-ESRGAN 4× Plus (High)",
+      "tier": "upscale-4x",
+      "file": "realesrgan-x4plus.onnx",
+      "sizeBytes": 67000000,
+      "sha256": "",
+      "url": "https://huggingface.co/thisismert/real-esrgan-onnx/resolve/main/onnx/RealESRGAN_x4plus.onnx"
+    }
+  ],
+  "capabilities": [
+    {
+      "action": "editor.upscale",
+      "workspace": "editor",
+      "label": "AI Upscale",
+      "output": "rgba_image",
+      "params": [
+        {
+          "key": "tileSize",
+          "type": "int",
+          "min": 64,
+          "max": 512,
+          "default": 192
+        }
+      ]
+    }
+  ],
+  "quickActions": [
+    {
+      "id": "upscale-2x",
+      "label": "Upscale 2× (Fast)",
+      "action": "editor.upscale",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "modelId": "swin2sr-x2",
+        "tileSize": 192
+      }
+    },
+    {
+      "id": "upscale-4x-general",
+      "label": "Upscale 4× (General)",
+      "action": "editor.upscale",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "modelId": "realesr-general-x4v3",
+        "tileSize": 192
+      }
+    },
+    {
+      "id": "upscale-4x-anime",
+      "label": "Upscale 4× (Anime)",
+      "action": "editor.upscale",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "modelId": "realesrgan-x4plus-anime",
+        "tileSize": 192
+      }
+    }
+  ]
+}

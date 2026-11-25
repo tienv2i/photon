@@ -222,6 +222,33 @@ pub enum SystemOpenWindowMode {
     Remembered,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AppLaunchWindowMode {
+    Maximized,
+    #[default]
+    Remembered,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CanvasAntiAliasingMode {
+    Crisp,
+    #[default]
+    Smooth,
+    HighQuality,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewportDenoiseMode {
+    #[default]
+    Off,
+    Light,
+    Medium,
+    Strong,
+}
+
 fn default_editor_right_width() -> u32 {
     300
 }
@@ -251,6 +278,14 @@ pub struct LayoutState {
     pub editor_tool_tab: EditorToolTab,
     pub window_width: u32,
     pub window_height: u32,
+    #[serde(default)]
+    pub app_launch_window_mode: AppLaunchWindowMode,
+    #[serde(default = "crate::default_true")]
+    pub window_maximized: bool,
+    #[serde(default)]
+    pub canvas_anti_aliasing: CanvasAntiAliasingMode,
+    #[serde(default)]
+    pub viewport_denoise: ViewportDenoiseMode,
     pub browser_view_mode: BrowserViewMode,
     #[serde(default)]
     pub browser_sort_field: BrowserSortField,
@@ -281,6 +316,10 @@ impl Default for LayoutState {
             editor_tool_tab: EditorToolTab::default(),
             window_width: 1240,
             window_height: 800,
+            app_launch_window_mode: AppLaunchWindowMode::Remembered,
+            window_maximized: true,
+            canvas_anti_aliasing: CanvasAntiAliasingMode::Smooth,
+            viewport_denoise: ViewportDenoiseMode::Off,
             browser_view_mode: BrowserViewMode::Grid,
             browser_sort_field: BrowserSortField::Name,
             browser_sort_order: SortOrder::Asc,
@@ -471,5 +510,26 @@ mod tests {
         assert!(layout.panel("browser.explorer"));
         assert!(layout.panel("viewer.adjustments"));
         assert!(layout.panel("viewer.info"));
+    }
+
+    #[test]
+    fn startup_and_viewport_defaults_are_backward_compatible() {
+        let layout = LayoutState::default();
+        assert_eq!(
+            layout.app_launch_window_mode,
+            AppLaunchWindowMode::Remembered
+        );
+        assert!(layout.window_maximized);
+        assert_eq!(layout.canvas_anti_aliasing, CanvasAntiAliasingMode::Smooth);
+        assert_eq!(layout.viewport_denoise, ViewportDenoiseMode::Off);
+
+        let parsed: LayoutState = serde_json::from_str(r#"{"windowWidth":1000}"#).unwrap();
+        assert_eq!(
+            parsed.app_launch_window_mode,
+            AppLaunchWindowMode::Remembered
+        );
+        assert!(parsed.window_maximized);
+        assert_eq!(parsed.canvas_anti_aliasing, CanvasAntiAliasingMode::Smooth);
+        assert_eq!(parsed.viewport_denoise, ViewportDenoiseMode::Off);
     }
 }

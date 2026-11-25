@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "photon-plugin-ocr"
+version = "1.2.0"
+edition = "2021"
+license = "MIT"
+description = "Out-of-process OCR (Copy Text from Image) plugin for Photon using Tesseract + on-demand language packs"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif", "tiff"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

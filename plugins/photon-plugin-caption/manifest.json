@@ -1,0 +1,90 @@
+{
+  "apiVersion": 1,
+  "id": "photon.caption.onnx",
+  "name": "AI Image Captioner (WD14 v3 Tagger ONNX)",
+  "version": "2.0.0",
+  "entry": {
+    "command": "bin/photon-plugin-caption",
+    "args": [],
+    "protocol": "jsonl-stdio"
+  },
+  "permissions": {
+    "network": false,
+    "gpu": false
+  },
+  "models": [
+    {
+      "id": "wd-vit-tagger-v3",
+      "name": "WD-ViT Tagger v3 (Fast & Balanced)",
+      "tier": "caption",
+      "file": "wd-vit-tagger-v3.onnx",
+      "sizeBytes": 378536310,
+      "sha256": "",
+      "url": "https://huggingface.co/SmilingWolf/wd-vit-tagger-v3/resolve/main/model.onnx"
+    },
+    {
+      "id": "wd-swinv2-tagger-v3",
+      "name": "WD-SwinV2 Tagger v3 (High Accuracy)",
+      "tier": "caption",
+      "file": "wd-swinv2-tagger-v3.onnx",
+      "sizeBytes": 467460978,
+      "sha256": "",
+      "url": "https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3/resolve/main/model.onnx"
+    },
+    {
+      "id": "wd-v3-selected-tags",
+      "name": "WD v3 Tag Vocabulary (selected_tags.csv)",
+      "tier": "caption",
+      "file": "wd-v3-selected-tags.csv",
+      "sizeBytes": 308468,
+      "sha256": "",
+      "url": "https://huggingface.co/SmilingWolf/wd-vit-tagger-v3/resolve/main/selected_tags.csv"
+    }
+  ],
+  "capabilities": [
+    {
+      "action": "caption.generate_save",
+      "workspace": "viewer",
+      "label": "Generate & Save Caption (.txt)",
+      "output": "text"
+    },
+    {
+      "action": "editor.caption",
+      "workspace": "editor",
+      "label": "AI Caption & Tagging",
+      "output": "text"
+    }
+  ],
+  "quickActions": [
+    {
+      "id": "caption-wd-vit-save",
+      "label": "Generate & save caption (.txt — WD-ViT v3)",
+      "action": "caption.generate_save",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "modelId": "wd-vit-tagger-v3",
+        "generalThreshold": 0.35,
+        "characterThreshold": 0.85,
+        "replaceUnderscores": true
+      }
+    },
+    {
+      "id": "caption-wd-swinv2-save",
+      "label": "Generate & save caption (.txt — WD-SwinV2 v3)",
+      "action": "caption.generate_save",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "modelId": "wd-swinv2-tagger-v3",
+        "generalThreshold": 0.35,
+        "characterThreshold": 0.85,
+        "replaceUnderscores": true
+      }
+    }
+  ]
+}

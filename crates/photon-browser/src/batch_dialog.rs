@@ -1198,6 +1198,8 @@ mod tests {
                 batch: None,
                 translation: None,
                 translate_settings: TranslateSettings::default(),
+                plugins: Vec::new(),
+                has_pixel_clipboard: false,
             },
             entries: vec![Entry {
                 name: "a.png".to_owned(),

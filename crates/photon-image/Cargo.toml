@@ -6,7 +6,16 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+flate2 = { workspace = true }
 image = { workspace = true }
+jxl-oxide = { workspace = true }
 photon-protocol = { workspace = true }
+psd = { workspace = true }
+rawler = { workspace = true }
 rayon = { workspace = true }
+resvg = { workspace = true }
+roxmltree = { workspace = true }
 thiserror = { workspace = true }
+usvg = { workspace = true }
+xmlwriter = { workspace = true }
+zip = { workspace = true }

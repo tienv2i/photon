@@ -1,0 +1,20 @@
+[workspace]
+
+[package]
+name = "photon-plugin-upscale"
+version = "1.2.0"
+edition = "2021"
+license = "MIT"
+description = "Out-of-process ONNX Runtime AI Super-Resolution (2x/4x General & Anime) plugin for Photon"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+ort = { version = "2.0.0-rc.15", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-rustls"] }
+ndarray = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

@@ -4,21 +4,25 @@
 //! (UI-locked, canvas-interactive), and 2-stack resizable right Inspector
 //! (Top: Tool Options + History, Bottom: Layers + Layer Masks).
 
+use iced::mouse;
 use iced::widget::overlay::menu as iced_menu;
 use iced::widget::{
-    Shader, checkbox, column, container, pick_list, row, rule, scrollable, slider, text, text_input,
+    Shader, canvas, checkbox, column, container, pick_list, responsive, row, rule, scrollable,
+    slider, stack, text, text_input,
 };
-use iced::{Alignment, Border, Color, Element, Fill, Length, Shadow};
-use photon_i18n::{tr, tr_ui_text};
+use iced::window;
+use iced::{Alignment, Border, Color, Element, Fill, Length, Point, Rectangle, Shadow, Size};
+use photon_i18n::{tr, tr_args, tr_ui_text};
 use photon_panels::{
     DraggablePanelHeaderSpec, PanelFrameSpec, PanelTabItem, dock_panel_closable, kv_row,
     section_card, sidebar_dock, sidebar_panel, stacked_panel_heights,
 };
 use photon_protocol::{
     ApplyTarget, BlendMode, BrushSettings, BrushSmoothingMode, BrushTip, CanvasAnchor,
-    ColorAdjustments, ColorBalanceAdjustment, Command, CurvesAdjustment, EditorRightPanel,
-    EditorState, EditorToolTab, FlipAxis, GradientColorMode, GradientKind, HsvAdjustment, Language,
-    LayerEffect, LiquifyMode, ShapeFillMode, Theme,
+    CanvasAntiAliasingMode, ColorAdjustments, ColorBalanceAdjustment, Command, CurvesAdjustment,
+    EditorRightPanel, EditorState, EditorToolTab, FlipAxis, GradientColorMode, GradientKind,
+    HealingMode, HsvAdjustment, Language, LayerEffect, LayerTransformSpec, LiquifyMode,
+    PluginCapability, ShapeFillMode, Theme, ViewportDenoiseMode,
 };
 use photon_ui::button::{self, ButtonVariant};
 use photon_ui::dialog::DialogSpec;
@@ -45,7 +49,7 @@ use iced::widget::image as iced_image;
 use photon_panels::SidebarOrderState;
 use photon_protocol::UiStateSnapshot;
 use photon_ui::toolbar::workspace_switcher_mode;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use panel_splitter::{DockSplitterKind, dock_splitter_handle, editor_vertical_splitter};
 
@@ -62,6 +66,7 @@ pub enum EditorMenuKind {
     Image,
     Select,
     Filter,
+    Plugins,
     View,
     Window,
     Help,
@@ -80,6 +85,10 @@ pub struct EditorViewState<'a> {
     pub editor_mask_thumbs: &'a HashMap<u64, iced_image::Handle>,
     pub editor_ui: &'a EditorUiState,
     pub pending_adj: &'a ColorAdjustments,
+    pub curve_lut: Option<[u8; 1024]>,
+    pub aa_mode: CanvasAntiAliasingMode,
+    pub denoise_mode: ViewportDenoiseMode,
+    pub transform_preview: Option<&'a photon_canvas::TransformPreview>,
     pub crop_uv: Option<[f32; 4]>,
     pub viewport_background: Option<[u8; 3]>,
     pub editor_tool_tab: EditorToolTab,
@@ -175,8 +184,37 @@ pub enum EditorMessage {
     EditorSetShapeStrokeWidth(f32),
     EditorSetFloodFillTolerance(u8),
     EditorToggleFloodFillContiguous,
+    EditorSetFloodFillOpacity(f32),
+    EditorToggleFloodFillSampleAll,
     EditorSetGradientKind(GradientKind),
     EditorSetGradientColorMode(GradientColorMode),
+    EditorSetGradientOpacity(f32),
+    EditorToggleGradientReverse,
+    EditorToggleGradientDither,
+    EditorSetHealingMode(HealingMode),
+    EditorSetHealingRadius(f32),
+    EditorSetHealingHardness(f32),
+    EditorSetHealingStrength(f32),
+    EditorToggleHealingSampleAll,
+    EditorSetHealingSource(Option<[f32; 2]>),
+    EditorSetDenoiseStrength(f32),
+    EditorSetDenoiseDetail(f32),
+    EditorSetTransformSpec(LayerTransformSpec),
+    EditorTransformCommit,
+    EditorTransformCancel,
+    OpenDenoiseDialog,
+    OpenManagePlugins,
+    ReloadPlugins,
+    RunPlugin(String),
+    EditorCopyPixels { merged: bool },
+    EditorCutPixels,
+    EditorPastePixels { into_selection: bool },
+    ZoomStep(f32),
+    ZoomFit,
+    ZoomActual,
+    CanvasPanTo { pan_x: f32, pan_y: f32 },
+    SetAntiAliasingMode(CanvasAntiAliasingMode),
+    SetViewportDenoiseMode(ViewportDenoiseMode),
 }
 use photon_canvas::{CanvasTool, ImageCanvasProgram, default_viewport_bg_rgb};
 
@@ -211,6 +249,8 @@ pub enum EditorTool {
     BezierPen,
     PaintBucket,
     Gradient,
+    HealingBrush,
+    Transform,
 }
 
 impl EditorTool {
@@ -281,6 +321,8 @@ impl EditorTool {
             Self::BezierPen => Icon::BezierPen,
             Self::PaintBucket => Icon::PaintBucket,
             Self::Gradient => Icon::Gradient,
+            Self::HealingBrush => Icon::HealingBrush,
+            Self::Transform => Icon::Transform,
         }
     }
 
@@ -304,6 +346,8 @@ impl EditorTool {
             Self::BezierPen => "tool-bezier-pen",
             Self::PaintBucket => "tool-paint-bucket",
             Self::Gradient => "tool-gradient",
+            Self::HealingBrush => "tool-healing-brush",
+            Self::Transform => "tool-transform",
             _ => "tool-pointer",
         }
     }
@@ -316,6 +360,7 @@ impl EditorTool {
             Self::Brush => CanvasTool::Brush,
             Self::Eraser => CanvasTool::Eraser,
             Self::Liquify => CanvasTool::Liquify,
+            Self::HealingBrush => CanvasTool::HealingBrush,
             Self::Eyedropper => CanvasTool::Eyedropper,
             Self::Crop => CanvasTool::Crop,
             Self::RotateAngle => CanvasTool::RotateAngle,
@@ -337,6 +382,7 @@ impl EditorTool {
             Self::BezierPen => CanvasTool::BezierPen,
             Self::PaintBucket => CanvasTool::PaintBucket,
             Self::Gradient => CanvasTool::Gradient,
+            Self::Transform => CanvasTool::Transform,
         }
     }
 }
@@ -715,8 +761,22 @@ pub struct EditorUiState {
     pub shape_stroke_width: f32,
     pub flood_fill_tolerance: u8,
     pub flood_fill_contiguous: bool,
+    pub flood_fill_opacity: f32,
+    pub flood_fill_sample_all: bool,
     pub gradient_kind: GradientKind,
     pub gradient_color_mode: GradientColorMode,
+    pub gradient_opacity: f32,
+    pub gradient_reverse: bool,
+    pub gradient_dither: bool,
+    pub healing_mode: HealingMode,
+    pub healing_radius: f32,
+    pub healing_hardness: f32,
+    pub healing_strength: f32,
+    pub healing_sample_all: bool,
+    pub healing_source_px: Option<[f32; 2]>,
+    pub denoise_strength: f32,
+    pub denoise_detail: f32,
+    pub transform_spec: LayerTransformSpec,
 }
 
 impl Default for EditorUiState {
@@ -767,8 +827,22 @@ impl Default for EditorUiState {
             shape_stroke_width: 3.0,
             flood_fill_tolerance: 24,
             flood_fill_contiguous: true,
+            flood_fill_opacity: 1.0,
+            flood_fill_sample_all: false,
             gradient_kind: GradientKind::Linear,
             gradient_color_mode: GradientColorMode::FgToBg,
+            gradient_opacity: 1.0,
+            gradient_reverse: false,
+            gradient_dither: true,
+            healing_mode: HealingMode::Spot,
+            healing_radius: 18.0,
+            healing_hardness: 0.75,
+            healing_strength: 1.0,
+            healing_sample_all: false,
+            healing_source_px: None,
+            denoise_strength: 0.35,
+            denoise_detail: 0.6,
+            transform_spec: LayerTransformSpec::default(),
         }
     }
 }
@@ -905,6 +979,7 @@ pub fn build_editor_toolbar<'a>(
             trigger(tr(lang, "menu-image"), EditorMenuKind::Image),
             trigger(tr(lang, "menu-select"), EditorMenuKind::Select),
             trigger(tr(lang, "menu-filter"), EditorMenuKind::Filter),
+            trigger(tr(lang, "menu-plugins"), EditorMenuKind::Plugins),
             trigger(tr(lang, "menu-view"), EditorMenuKind::View),
             trigger(tr(lang, "menu-window"), EditorMenuKind::Window),
             trigger(tr(lang, "menu-help"), EditorMenuKind::Help),
@@ -997,6 +1072,7 @@ pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMe
     } else {
         match state.editor_ui.tool {
             EditorTool::Brush | EditorTool::Eraser => state.editor_ui.brush_radius,
+            EditorTool::HealingBrush => state.editor_ui.healing_radius,
             EditorTool::Liquify => state.editor_ui.liquify_radius,
             EditorTool::QuickSelect => state.editor_ui.quick_select_radius,
             _ => 0.0,
@@ -1008,6 +1084,11 @@ pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMe
         CanvasTool::Hand
     } else {
         state.editor_ui.tool.as_canvas_tool()
+    };
+    let transform_preview = if !adjust_open && state.editor_ui.tool == EditorTool::Transform {
+        state.transform_preview.cloned()
+    } else {
+        None
     };
 
     let canvas: Element<'_, EditorMessage> = Element::from(
@@ -1047,17 +1128,155 @@ pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMe
                 0.0
             },
             restrict_pan_to_hand: true,
+            curve_lut: state.curve_lut,
+            aa_mode: state.aa_mode,
+            denoise_mode: state.denoise_mode,
+            healing_source_px: state.editor_ui.healing_source_px,
+            transform_preview,
         })
         .width(Fill)
         .height(Fill),
     )
     .map(EditorMessage::Canvas);
 
-    let canvas_area: Element<'_, EditorMessage> = container(canvas)
-        .width(Fill)
-        .height(Fill)
-        .style(canvas_backdrop_style)
-        .into();
+    let (doc_w, doc_h) = state
+        .editor_frame
+        .map(|f| (f.width, f.height))
+        .unwrap_or((ed.width, ed.height));
+    let zoom = state.zoom;
+    let pan_x = state.pan_x;
+    let pan_y = state.pan_y;
+
+    let scrollbar_overlay: Element<'_, EditorMessage> = responsive(move |bounds| {
+        const BAR_THICKNESS: f32 = 10.0;
+        const CORNER_PAD: f32 = 2.0;
+        let (disp_w, disp_h) = canvas_display_dims(doc_w, doc_h, zoom, bounds.width, bounds.height);
+        let h_metrics = scrollbar_axis_metrics(disp_w, bounds.width, pan_x);
+        let v_metrics = scrollbar_axis_metrics(disp_h, bounds.height, pan_y);
+
+        if h_metrics.is_none() && v_metrics.is_none() {
+            return iced::widget::space::horizontal()
+                .width(Fill)
+                .height(Fill)
+                .into();
+        }
+
+        let mut layers: Vec<Element<'_, EditorMessage>> = vec![
+            iced::widget::space::horizontal()
+                .width(Fill)
+                .height(Fill)
+                .into(),
+        ];
+
+        if let Some(hm) = h_metrics {
+            let right_pad = if v_metrics.is_some() {
+                BAR_THICKNESS + CORNER_PAD
+            } else {
+                CORNER_PAD
+            };
+            let h_bar = iced::widget::canvas(CanvasScrollbarProgram {
+                horizontal: true,
+                metrics: hm,
+                other_axis_pan: pan_y,
+            })
+            .width(Fill)
+            .height(Length::Fixed(BAR_THICKNESS));
+            layers.push(
+                container(
+                    column![
+                        iced::widget::space::vertical(),
+                        container(h_bar).padding(iced::Padding {
+                            top: 0.0,
+                            right: right_pad,
+                            bottom: CORNER_PAD,
+                            left: CORNER_PAD,
+                        }),
+                    ]
+                    .width(Fill)
+                    .height(Fill),
+                )
+                .width(Fill)
+                .height(Fill)
+                .into(),
+            );
+        }
+
+        if let Some(vm) = v_metrics {
+            let bottom_pad = if h_metrics.is_some() {
+                BAR_THICKNESS + CORNER_PAD
+            } else {
+                CORNER_PAD
+            };
+            let v_bar = iced::widget::canvas(CanvasScrollbarProgram {
+                horizontal: false,
+                metrics: vm,
+                other_axis_pan: pan_x,
+            })
+            .width(Length::Fixed(BAR_THICKNESS))
+            .height(Fill);
+            layers.push(
+                container(
+                    row![
+                        iced::widget::space::horizontal(),
+                        container(v_bar).padding(iced::Padding {
+                            top: CORNER_PAD,
+                            right: CORNER_PAD,
+                            bottom: bottom_pad,
+                            left: 0.0,
+                        }),
+                    ]
+                    .width(Fill)
+                    .height(Fill),
+                )
+                .width(Fill)
+                .height(Fill)
+                .into(),
+            );
+        }
+
+        stack(layers).width(Fill).height(Fill).into()
+    })
+    .width(Fill)
+    .height(Fill)
+    .into();
+
+    let canvas_stack: Element<'_, EditorMessage> = stack![
+        container(canvas)
+            .width(Fill)
+            .height(Fill)
+            .style(canvas_backdrop_style),
+        scrollbar_overlay,
+    ]
+    .width(Fill)
+    .height(Fill)
+    .into();
+
+    let canvas_nav_bar = container(
+        row![
+            text(format!("{} × {}", doc_w, doc_h))
+                .size(TEXT_SIZE_CAPTION)
+                .style(|theme| text::Style {
+                    color: Some(PaletteTokens::for_theme(theme).text_muted),
+                }),
+            iced::widget::space::horizontal(),
+            build_editor_zoom_controls(state),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Fill),
+    )
+    .padding([3, 10])
+    .width(Fill)
+    .style(photon_ui::theme::surface_panel_style);
+
+    let canvas_area: Element<'_, EditorMessage> = column![
+        canvas_stack,
+        rule::horizontal(1).style(hairline_rule_style),
+        canvas_nav_bar,
+    ]
+    .width(Fill)
+    .height(Fill)
+    .into();
 
     let show_tools = state.snapshot.meta.layout.panel("editor.tools");
     let show_inspector = (state.editor_history_open || state.editor_layers_open)
@@ -1238,12 +1457,42 @@ fn build_tool_rail(state: EditorViewState<'_>, lang: Language) -> Element<'_, Ed
                 tr(lang, "tooltip-tool-bezier-pen"),
             ),
             tool_rail_button_tipped(
-                ui.fill_subtool.icon(),
-                active_tool.is_fill_group(),
+                Icon::PaintBucket,
+                active_tool == EditorTool::PaintBucket,
                 true,
-                Some(EditorMessage::EditorSelectTool(ui.fill_subtool)),
-                tr(lang, "tooltip-tool-fill-group"),
+                Some(EditorMessage::EditorSelectTool(EditorTool::PaintBucket)),
+                tr(lang, "tooltip-tool-paint-bucket"),
             ),
+        ]
+        .spacing(4),
+        row![
+            tool_rail_button_tipped(
+                Icon::Gradient,
+                active_tool == EditorTool::Gradient,
+                true,
+                Some(EditorMessage::EditorSelectTool(EditorTool::Gradient)),
+                tr(lang, "tooltip-tool-gradient"),
+            ),
+            tool_rail_button_tipped(
+                Icon::HealingBrush,
+                active_tool == EditorTool::HealingBrush,
+                true,
+                Some(EditorMessage::EditorSelectTool(EditorTool::HealingBrush)),
+                tr(lang, "tooltip-tool-healing-brush"),
+            ),
+        ]
+        .spacing(4),
+        row![
+            tool_rail_button_tipped(
+                Icon::Transform,
+                active_tool == EditorTool::Transform,
+                true,
+                Some(EditorMessage::EditorSelectTool(EditorTool::Transform)),
+                tr(lang, "tooltip-tool-transform"),
+            ),
+            container(iced::widget::space::horizontal())
+                .width(Length::Fixed(34.0))
+                .height(Length::Fixed(34.0)),
         ]
         .spacing(4),
     ]
@@ -1970,102 +2219,335 @@ fn build_tool_options_card<'a>(
                 );
             Some(section_card(tr(lang, ui.tool.label_key()), body))
         }
-        EditorTool::PaintBucket | EditorTool::Gradient => {
-            let sub_row = row([EditorTool::PaintBucket, EditorTool::Gradient]
-                .into_iter()
-                .map(|sub| {
-                    with_tooltip_pos(
-                        button::icon_only(
-                            sub.icon(),
-                            ButtonVariant::Tab {
-                                active: ui.tool == sub,
-                            },
-                            Some(EditorMessage::EditorSelectTool(sub)),
-                        ),
-                        tr(lang, sub.label_key()),
-                        TooltipPosition::Top,
-                    )
-                    .into()
-                }))
-            .spacing(4);
-            let mut body = column![sub_row].spacing(8);
-            if ui.tool == EditorTool::PaintBucket {
-                body = body
-                    .push(kv_row(
-                        tr(lang, "label-flood-fill-tolerance"),
-                        format!("{}", ui.flood_fill_tolerance),
-                    ))
-                    .push(
-                        slider(0.0..=255.0, f32::from(ui.flood_fill_tolerance), |v| {
-                            EditorMessage::EditorSetFloodFillTolerance(v.round() as u8)
-                        })
-                        .step(1.0_f32)
-                        .style(slider_style),
-                    )
-                    .push(
-                        checkbox(ui.flood_fill_contiguous)
-                            .label(tr(lang, "label-flood-fill-contiguous"))
-                            .on_toggle(|_| EditorMessage::EditorToggleFloodFillContiguous),
-                    );
-            } else {
-                let kind_label = |k: GradientKind| match k {
-                    GradientKind::Linear => tr(lang, "gradient-linear"),
-                    GradientKind::Radial => tr(lang, "gradient-radial"),
-                    GradientKind::Conical => tr(lang, "gradient-conical"),
-                    GradientKind::Reflected => tr(lang, "gradient-reflected"),
-                };
-                let mut kind_btns: Vec<Element<'_, EditorMessage>> = [
-                    GradientKind::Linear,
-                    GradientKind::Radial,
-                    GradientKind::Conical,
-                    GradientKind::Reflected,
-                ]
-                .into_iter()
-                .map(|k| {
-                    button::labeled(
-                        kind_label(k),
-                        None,
-                        ButtonVariant::Tab {
-                            active: ui.gradient_kind == k,
-                        },
-                        Some(EditorMessage::EditorSetGradientKind(k)),
-                    )
-                    .width(Fill)
-                    .into()
+        EditorTool::PaintBucket => {
+            let body = column![
+                kv_row(
+                    tr(lang, "label-flood-fill-tolerance"),
+                    format!("{}", ui.flood_fill_tolerance),
+                ),
+                slider(0.0..=255.0, f32::from(ui.flood_fill_tolerance), |v| {
+                    EditorMessage::EditorSetFloodFillTolerance(v.round() as u8)
                 })
-                .collect();
-                let kind_row2 = kind_btns.split_off(2);
-                let kind_grid =
-                    column![row(kind_btns).spacing(4), row(kind_row2).spacing(4)].spacing(4);
-                let color_mode_row = row([
-                    GradientColorMode::FgToBg,
-                    GradientColorMode::FgToTransparent,
-                ]
-                .into_iter()
-                .map(|cm| {
-                    let key = match cm {
-                        GradientColorMode::FgToBg => "gradient-fg-bg",
-                        GradientColorMode::FgToTransparent => "gradient-fg-transparent",
-                    };
-                    button::labeled(
-                        tr(lang, key),
-                        None,
-                        ButtonVariant::Tab {
-                            active: ui.gradient_color_mode == cm,
-                        },
-                        Some(EditorMessage::EditorSetGradientColorMode(cm)),
-                    )
-                    .width(Fill)
-                    .into()
-                }))
-                .spacing(4);
-                body = body
-                    .push(text(tr(lang, "label-gradient-kind")).size(11))
-                    .push(kind_grid)
-                    .push(text(tr(lang, "label-gradient-color-mode")).size(11))
-                    .push(color_mode_row);
-            }
+                .step(1.0_f32)
+                .style(slider_style),
+                kv_row(
+                    tr(lang, "label-opacity"),
+                    format!("{:.0}%", ui.flood_fill_opacity * 100.0),
+                ),
+                slider(
+                    0.05..=1.0,
+                    ui.flood_fill_opacity,
+                    EditorMessage::EditorSetFloodFillOpacity,
+                )
+                .step(0.05_f32)
+                .style(slider_style),
+                checkbox(ui.flood_fill_contiguous)
+                    .label(tr(lang, "label-flood-fill-contiguous"))
+                    .on_toggle(|_| EditorMessage::EditorToggleFloodFillContiguous),
+                checkbox(ui.flood_fill_sample_all)
+                    .label(tr(lang, "label-sample-all-layers"))
+                    .on_toggle(|_| EditorMessage::EditorToggleFloodFillSampleAll),
+            ]
+            .spacing(8);
             Some(section_card(tr(lang, ui.tool.label_key()), body))
+        }
+        EditorTool::Gradient => {
+            let kind_label = |k: GradientKind| match k {
+                GradientKind::Linear => tr(lang, "gradient-linear"),
+                GradientKind::Radial => tr(lang, "gradient-radial"),
+                GradientKind::Conical => tr(lang, "gradient-conical"),
+                GradientKind::Reflected => tr(lang, "gradient-reflected"),
+            };
+            let mut kind_btns: Vec<Element<'_, EditorMessage>> = [
+                GradientKind::Linear,
+                GradientKind::Radial,
+                GradientKind::Conical,
+                GradientKind::Reflected,
+            ]
+            .into_iter()
+            .map(|k| {
+                button::labeled(
+                    kind_label(k),
+                    None,
+                    ButtonVariant::Tab {
+                        active: ui.gradient_kind == k,
+                    },
+                    Some(EditorMessage::EditorSetGradientKind(k)),
+                )
+                .width(Fill)
+                .into()
+            })
+            .collect();
+            let kind_row2 = kind_btns.split_off(2);
+            let kind_grid =
+                column![row(kind_btns).spacing(4), row(kind_row2).spacing(4)].spacing(4);
+            let color_mode_row = row([
+                GradientColorMode::FgToBg,
+                GradientColorMode::FgToTransparent,
+            ]
+            .into_iter()
+            .map(|cm| {
+                let key = match cm {
+                    GradientColorMode::FgToBg => "gradient-fg-bg",
+                    GradientColorMode::FgToTransparent => "gradient-fg-transparent",
+                };
+                button::labeled(
+                    tr(lang, key),
+                    None,
+                    ButtonVariant::Tab {
+                        active: ui.gradient_color_mode == cm,
+                    },
+                    Some(EditorMessage::EditorSetGradientColorMode(cm)),
+                )
+                .width(Fill)
+                .into()
+            }))
+            .spacing(4);
+            let body = column![
+                text(tr(lang, "label-gradient-kind")).size(11),
+                kind_grid,
+                text(tr(lang, "label-gradient-color-mode")).size(11),
+                color_mode_row,
+                kv_row(
+                    tr(lang, "label-opacity"),
+                    format!("{:.0}%", ui.gradient_opacity * 100.0),
+                ),
+                slider(
+                    0.05..=1.0,
+                    ui.gradient_opacity,
+                    EditorMessage::EditorSetGradientOpacity,
+                )
+                .step(0.05_f32)
+                .style(slider_style),
+                checkbox(ui.gradient_reverse)
+                    .label(tr(lang, "label-gradient-reverse"))
+                    .on_toggle(|_| EditorMessage::EditorToggleGradientReverse),
+                checkbox(ui.gradient_dither)
+                    .label(tr(lang, "label-gradient-dither"))
+                    .on_toggle(|_| EditorMessage::EditorToggleGradientDither),
+            ]
+            .spacing(8);
+            Some(section_card(tr(lang, ui.tool.label_key()), body))
+        }
+        EditorTool::HealingBrush => {
+            let mode_row = row(HealingMode::ALL.into_iter().map(|m| {
+                let key = match m {
+                    HealingMode::Spot => "healing-mode-spot",
+                    HealingMode::Sampled => "healing-mode-sampled",
+                };
+                button::labeled(
+                    tr(lang, key),
+                    None,
+                    ButtonVariant::Tab {
+                        active: ui.healing_mode == m,
+                    },
+                    Some(EditorMessage::EditorSetHealingMode(m)),
+                )
+                .width(Fill)
+                .into()
+            }))
+            .spacing(4);
+
+            let source_label = if let Some([sx, sy]) = ui.healing_source_px {
+                let mut args = BTreeMap::new();
+                args.insert("x".to_owned(), format!("{sx:.0}"));
+                args.insert("y".to_owned(), format!("{sy:.0}"));
+                tr_args(lang, "label-healing-source-set", &args)
+            } else {
+                tr(lang, "label-healing-source-unset")
+            };
+
+            let mut body = column![
+                text(tr(lang, "label-healing-mode")).size(11),
+                mode_row,
+                kv_row(
+                    tr(lang, "label-brush-size"),
+                    format!("{:.0} px", ui.healing_radius),
+                ),
+                slider(
+                    2.0..=120.0,
+                    ui.healing_radius,
+                    EditorMessage::EditorSetHealingRadius,
+                )
+                .step(1.0_f32)
+                .style(slider_style),
+                kv_row(
+                    tr(lang, "label-brush-hardness"),
+                    format!("{:.0}%", ui.healing_hardness * 100.0),
+                ),
+                slider(
+                    0.0..=1.0,
+                    ui.healing_hardness,
+                    EditorMessage::EditorSetHealingHardness,
+                )
+                .step(0.05_f32)
+                .style(slider_style),
+                kv_row(
+                    tr(lang, "label-strength"),
+                    format!("{:.0}%", ui.healing_strength * 100.0),
+                ),
+                slider(
+                    0.05..=1.0,
+                    ui.healing_strength,
+                    EditorMessage::EditorSetHealingStrength,
+                )
+                .step(0.05_f32)
+                .style(slider_style),
+                checkbox(ui.healing_sample_all)
+                    .label(tr(lang, "label-sample-all-layers"))
+                    .on_toggle(|_| EditorMessage::EditorToggleHealingSampleAll),
+            ]
+            .spacing(6);
+
+            if ui.healing_mode == HealingMode::Sampled {
+                body =
+                    body.push(text(source_label).size(TEXT_SIZE_CAPTION).style(|theme| {
+                        text::Style {
+                            color: Some(PaletteTokens::for_theme(theme).text_secondary),
+                        }
+                    }))
+                    .push(
+                        text(tr(lang, "hint-healing-source"))
+                            .size(TEXT_SIZE_CAPTION)
+                            .style(|theme| text::Style {
+                                color: Some(PaletteTokens::for_theme(theme).text_muted),
+                            }),
+                    );
+            }
+
+            Some(section_card(tr(lang, "tool-healing-brush"), body))
+        }
+        EditorTool::Transform => {
+            let spec = ui.transform_spec;
+            let max_tx = (ed.width as f32).max(200.0);
+            let max_ty = (ed.height as f32).max(200.0);
+
+            let mut flipped_h = spec;
+            flipped_h.flip_h = !flipped_h.flip_h;
+            let mut flipped_v = spec;
+            flipped_v.flip_v = !flipped_v.flip_v;
+
+            let body = column![
+                kv_row(
+                    tr(lang, "label-transform-x"),
+                    format!("{:.1} px", spec.translate_x),
+                ),
+                slider(-max_tx..=max_tx, spec.translate_x, move |v| {
+                    let mut next = spec;
+                    next.translate_x = v;
+                    EditorMessage::EditorSetTransformSpec(next)
+                })
+                .step(1.0_f32)
+                .style(slider_style),
+                kv_row(
+                    tr(lang, "label-transform-y"),
+                    format!("{:.1} px", spec.translate_y),
+                ),
+                slider(-max_ty..=max_ty, spec.translate_y, move |v| {
+                    let mut next = spec;
+                    next.translate_y = v;
+                    EditorMessage::EditorSetTransformSpec(next)
+                })
+                .step(1.0_f32)
+                .style(slider_style),
+                kv_row(
+                    tr(lang, "label-transform-width"),
+                    format!("{:.0}%", spec.scale_x * 100.0),
+                ),
+                slider(
+                    10.0..=400.0,
+                    (spec.scale_x * 100.0).clamp(10.0, 400.0),
+                    move |v| {
+                        let mut next = spec;
+                        next.scale_x = v / 100.0;
+                        EditorMessage::EditorSetTransformSpec(next)
+                    }
+                )
+                .step(1.0_f32)
+                .style(slider_style),
+                kv_row(
+                    tr(lang, "label-transform-height"),
+                    format!("{:.0}%", spec.scale_y * 100.0),
+                ),
+                slider(
+                    10.0..=400.0,
+                    (spec.scale_y * 100.0).clamp(10.0, 400.0),
+                    move |v| {
+                        let mut next = spec;
+                        next.scale_y = v / 100.0;
+                        EditorMessage::EditorSetTransformSpec(next)
+                    }
+                )
+                .step(1.0_f32)
+                .style(slider_style),
+                kv_row(
+                    tr(lang, "label-transform-angle"),
+                    format!("{:.1}°", spec.rotation_deg),
+                ),
+                slider(
+                    -180.0..=180.0,
+                    spec.rotation_deg.clamp(-180.0, 180.0),
+                    move |v| {
+                        let mut next = spec;
+                        next.rotation_deg = v;
+                        EditorMessage::EditorSetTransformSpec(next)
+                    }
+                )
+                .step(0.5_f32)
+                .style(slider_style),
+                row![
+                    button::labeled(
+                        tr(lang, "action-flip-h"),
+                        Some(Icon::FlipH),
+                        ButtonVariant::Tab {
+                            active: spec.flip_h,
+                        },
+                        Some(EditorMessage::EditorSetTransformSpec(flipped_h)),
+                    )
+                    .width(Fill),
+                    button::labeled(
+                        tr(lang, "action-flip-v"),
+                        Some(Icon::FlipV),
+                        ButtonVariant::Tab {
+                            active: spec.flip_v,
+                        },
+                        Some(EditorMessage::EditorSetTransformSpec(flipped_v)),
+                    )
+                    .width(Fill),
+                ]
+                .spacing(4),
+                row![
+                    button::labeled(
+                        tr(lang, "action-reset"),
+                        Some(Icon::Reset),
+                        ButtonVariant::Ghost,
+                        (!spec.is_identity()).then_some(EditorMessage::EditorSetTransformSpec(
+                            LayerTransformSpec::default()
+                        )),
+                    ),
+                    button::labeled(
+                        tr(lang, "dialog-cancel"),
+                        None,
+                        ButtonVariant::Ghost,
+                        Some(EditorMessage::EditorTransformCancel),
+                    ),
+                    with_tooltip_pos(
+                        button::labeled(
+                            tr(lang, "action-apply-transform"),
+                            Some(Icon::Check),
+                            ButtonVariant::Primary,
+                            Some(EditorMessage::EditorTransformCommit),
+                        )
+                        .width(Fill),
+                        format!("{} (Enter)", tr(lang, "action-apply-transform")),
+                        TooltipPosition::Top,
+                    ),
+                ]
+                .spacing(4),
+            ]
+            .spacing(6);
+
+            Some(section_card(tr(lang, "tool-transform"), body))
         }
         EditorTool::Liquify => {
             let mode_label = |m: LiquifyMode| match m {
@@ -2477,6 +2959,63 @@ fn build_layers_panel<'a>(
                     .align_y(Alignment::Center)
                     .into(),
                 ),
+                LayerEffect::Denoise {
+                    strength,
+                    detail_preserve,
+                } => {
+                    let str_val = *strength;
+                    let det_val = *detail_preserve;
+                    Some(
+                        column![
+                            row![
+                                text(tr(lang, "label-strength")).size(11).style(|theme| {
+                                    text::Style {
+                                        color: Some(PaletteTokens::for_theme(theme).text_muted),
+                                    }
+                                }),
+                                slider(0.05..=1.0, str_val, move |v| {
+                                    EditorMessage::Dispatch(Command::EditorLayerUpdateEffect {
+                                        id: layer_id,
+                                        effect: LayerEffect::Denoise {
+                                            strength: v,
+                                            detail_preserve: det_val,
+                                        },
+                                    })
+                                })
+                                .step(0.05_f32)
+                                .style(slider_style)
+                                .width(Fill),
+                                text(format!("{:.0}%", str_val * 100.0)).size(11),
+                            ]
+                            .spacing(6)
+                            .align_y(Alignment::Center),
+                            row![
+                                text(tr(lang, "label-preserve-detail"))
+                                    .size(11)
+                                    .style(|theme| text::Style {
+                                        color: Some(PaletteTokens::for_theme(theme).text_muted),
+                                    }),
+                                slider(0.0..=1.0, det_val, move |v| {
+                                    EditorMessage::Dispatch(Command::EditorLayerUpdateEffect {
+                                        id: layer_id,
+                                        effect: LayerEffect::Denoise {
+                                            strength: str_val,
+                                            detail_preserve: v,
+                                        },
+                                    })
+                                })
+                                .step(0.05_f32)
+                                .style(slider_style)
+                                .width(Fill),
+                                text(format!("{:.0}%", det_val * 100.0)).size(11),
+                            ]
+                            .spacing(6)
+                            .align_y(Alignment::Center),
+                        ]
+                        .spacing(4)
+                        .into(),
+                    )
+                }
                 LayerEffect::ColorLight(_)
                 | LayerEffect::Hsv(_)
                 | LayerEffect::ColorBalance(_)
@@ -3236,13 +3775,57 @@ pub fn build_editor_canvas_context_menu<'a>(
         ),
         MenuEntry::Separator,
         MenuEntry::Item(
+            MenuItem::new(tr(lang, "action-cut"), EditorMessage::EditorCutPixels)
+                .icon(Icon::Cut)
+                .shortcut("Ctrl+X")
+                .enabled(state.editor_frame.is_some()),
+        ),
+        MenuEntry::Item(
             MenuItem::new(
-                tr(lang, "action-copy-image"),
-                EditorMessage::CopyImageToClipboard(None),
+                tr(lang, "action-copy"),
+                EditorMessage::EditorCopyPixels { merged: false },
+            )
+            .icon(Icon::Copy)
+            .shortcut("Ctrl+C")
+            .enabled(state.editor_frame.is_some()),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-copy-merged"),
+                EditorMessage::EditorCopyPixels { merged: true },
             )
             .icon(Icon::Copy)
             .shortcut("Ctrl+Shift+C")
             .enabled(state.editor_frame.is_some()),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-paste"),
+                EditorMessage::EditorPastePixels {
+                    into_selection: false,
+                },
+            )
+            .icon(Icon::Paste)
+            .shortcut("Ctrl+V"),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-paste-into-selection"),
+                EditorMessage::EditorPastePixels {
+                    into_selection: true,
+                },
+            )
+            .icon(Icon::Paste)
+            .enabled(ed.selection.has_selection),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-transform"),
+                EditorMessage::EditorSelectTool(EditorTool::Transform),
+            )
+            .icon(Icon::Transform)
+            .shortcut("Ctrl+T")
+            .enabled(!ed.layers.is_empty()),
         ),
         MenuEntry::Item(
             MenuItem::new(
@@ -3630,6 +4213,19 @@ pub fn build_editor_add_layer_menu<'a>(state: EditorViewState<'a>) -> Element<'a
         ),
         MenuEntry::Item(
             MenuItem::new(
+                tr(lang, "filter-denoise"),
+                EditorMessage::Dispatch(Command::EditorLayerAddEffect {
+                    name: tr(lang, "filter-denoise"),
+                    effect: LayerEffect::Denoise {
+                        strength: 0.35,
+                        detail_preserve: 0.6,
+                    },
+                }),
+            )
+            .icon(Icon::Denoise),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
                 tr(lang, "filter-invert"),
                 EditorMessage::Dispatch(Command::EditorLayerAddEffect {
                     name: tr(lang, "filter-invert"),
@@ -3705,6 +4301,320 @@ pub fn build_editor_add_layer_menu<'a>(state: EditorViewState<'a>) -> Element<'a
     menu_panel_entries(entries, 224.0)
 }
 
+/// Reusable Editor Plugins menu entries for `photon-desktop`.
+pub fn build_editor_plugins_menu_entries<'a>(
+    state: EditorViewState<'a>,
+) -> Vec<MenuEntry<'a, EditorMessage>> {
+    let lang = state.snapshot.meta.language;
+    let enabled_plugins: Vec<_> = state
+        .snapshot
+        .meta
+        .plugins
+        .iter()
+        .filter(|p| p.enabled && p.capabilities.contains(&PluginCapability::EditorFilter))
+        .collect();
+
+    let mut entries = Vec::new();
+    if enabled_plugins.is_empty() {
+        entries.push(MenuEntry::Item(
+            MenuItem::new(tr(lang, "menu-plugins-no-enabled"), EditorMessage::Noop).enabled(false),
+        ));
+    } else {
+        for plugin in enabled_plugins {
+            entries.push(MenuEntry::Item(
+                MenuItem::new(
+                    plugin.name.clone(),
+                    EditorMessage::RunPlugin(plugin.id.clone()),
+                )
+                .icon(Icon::Plug)
+                .enabled(state.snapshot.meta.editor.is_some()),
+            ));
+        }
+    }
+
+    entries.push(MenuEntry::Separator);
+    entries.push(MenuEntry::Item(
+        MenuItem::new(
+            tr(lang, "action-manage-plugins"),
+            EditorMessage::OpenManagePlugins,
+        )
+        .icon(Icon::Plug),
+    ));
+    entries.push(MenuEntry::Item(
+        MenuItem::new(
+            tr(lang, "action-reload-plugins"),
+            EditorMessage::ReloadPlugins,
+        )
+        .icon(Icon::Refresh),
+    ));
+    entries
+}
+
+/// Exportable Editor zoom controls (`-` / `%` / `+` / `Fit (0)` / `1:1 (1)`) for the bottom
+/// canvas bar or `photon-desktop` status bar.
+pub fn build_editor_zoom_controls<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMessage> {
+    let lang = state.snapshot.meta.language;
+    let has_doc = state.snapshot.meta.editor.is_some() || state.editor_frame.is_some();
+
+    let zoom_pct = container(with_tooltip_pos(
+        text(format!("{:.0}%", state.zoom * 100.0))
+            .size(TEXT_SIZE_CAPTION)
+            .style(|theme| text::Style {
+                color: Some(PaletteTokens::for_theme(theme).text_secondary),
+            }),
+        tr(lang, "tooltip-editor-zoom-percent"),
+        TooltipPosition::Top,
+    ))
+    .padding([0, 4]);
+
+    let fit_btn = with_tooltip_pos(
+        button::labeled(
+            tr(lang, "action-fit"),
+            Some(Icon::Fit),
+            ButtonVariant::Ghost,
+            has_doc.then_some(EditorMessage::ZoomFit),
+        )
+        .padding([2, 6]),
+        tr(lang, "tooltip-editor-fit-zero"),
+        TooltipPosition::Top,
+    );
+
+    let actual_btn = with_tooltip_pos(
+        button::labeled(
+            tr(lang, "action-actual-ratio"),
+            None,
+            ButtonVariant::Ghost,
+            has_doc.then_some(EditorMessage::ZoomActual),
+        )
+        .padding([2, 6]),
+        tr(lang, "tooltip-editor-actual-size"),
+        TooltipPosition::Top,
+    );
+
+    row![
+        with_tooltip_pos(
+            button::compact_icon(
+                Icon::ZoomOut,
+                ButtonVariant::Ghost,
+                has_doc.then_some(EditorMessage::ZoomStep(0.8)),
+            ),
+            tr(lang, "tooltip-editor-zoom-out"),
+            TooltipPosition::Top,
+        ),
+        zoom_pct,
+        with_tooltip_pos(
+            button::compact_icon(
+                Icon::ZoomIn,
+                ButtonVariant::Ghost,
+                has_doc.then_some(EditorMessage::ZoomStep(1.25)),
+            ),
+            tr(lang, "tooltip-editor-zoom-in"),
+            TooltipPosition::Top,
+        ),
+        toolbar_divider(),
+        fit_btn,
+        actual_btn,
+    ]
+    .spacing(3)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScrollbarAxisMetrics {
+    thumb_ratio: f32,
+    frac: f32,
+    max_pan: f32,
+}
+
+fn canvas_display_dims(iw: u32, ih: u32, zoom: f32, vp_w: f32, vp_h: f32) -> (f32, f32) {
+    let fw = iw.max(1) as f32;
+    let fh = ih.max(1) as f32;
+    let vp_w = vp_w.max(1.0);
+    let vp_h = vp_h.max(1.0);
+    let vp_aspect = vp_w / vp_h;
+    let img_aspect = fw / fh;
+    let (fit_w, fit_h) = if img_aspect > vp_aspect {
+        (vp_w, vp_w / img_aspect)
+    } else {
+        (vp_h * img_aspect, vp_h)
+    };
+    let z = zoom.max(0.02);
+    (fit_w * z, fit_h * z)
+}
+
+fn scrollbar_axis_metrics(disp: f32, vp: f32, pan: f32) -> Option<ScrollbarAxisMetrics> {
+    if disp <= vp + 1.0 {
+        return None;
+    }
+    let max_pan = ((disp - vp) * 0.5).max(1.0);
+    let thumb_ratio = (vp / disp).clamp(0.06, 1.0);
+    let frac = ((max_pan - pan) / (2.0 * max_pan)).clamp(0.0, 1.0);
+    Some(ScrollbarAxisMetrics {
+        thumb_ratio,
+        frac,
+        max_pan,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CanvasScrollbarProgram {
+    horizontal: bool,
+    metrics: ScrollbarAxisMetrics,
+    other_axis_pan: f32,
+}
+
+impl CanvasScrollbarProgram {
+    fn make_pan_msg(&self, new_pan: f32) -> EditorMessage {
+        if self.horizontal {
+            EditorMessage::CanvasPanTo {
+                pan_x: new_pan,
+                pan_y: self.other_axis_pan,
+            }
+        } else {
+            EditorMessage::CanvasPanTo {
+                pan_x: self.other_axis_pan,
+                pan_y: new_pan,
+            }
+        }
+    }
+
+    fn thumb_geometry(&self, bounds: Rectangle) -> (f32, f32, f32, f32) {
+        let track_len = if self.horizontal {
+            bounds.width
+        } else {
+            bounds.height
+        }
+        .max(1.0);
+        let thumb_len = (track_len * self.metrics.thumb_ratio).clamp(20.0, track_len);
+        let travel = (track_len - thumb_len).max(0.0);
+        let thumb_start = self.metrics.frac.clamp(0.0, 1.0) * travel;
+        (track_len, thumb_len, travel, thumb_start)
+    }
+}
+
+#[derive(Debug, Default)]
+struct CanvasScrollbarState {
+    dragging_grab_offset: Option<f32>,
+    hovered: bool,
+}
+
+impl canvas::Program<EditorMessage> for CanvasScrollbarProgram {
+    type State = CanvasScrollbarState;
+
+    fn update(
+        &self,
+        state: &mut Self::State,
+        event: &canvas::Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<canvas::Action<EditorMessage>> {
+        let (_track_len, thumb_len, travel, thumb_start) = self.thumb_geometry(bounds);
+
+        match event {
+            canvas::Event::Window(window::Event::Unfocused)
+            | canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                if state.dragging_grab_offset.take().is_some() {
+                    return Some(canvas::Action::request_redraw());
+                }
+                None
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                let pos = cursor.position_in(bounds)?;
+                let pos_along = if self.horizontal { pos.x } else { pos.y };
+                if pos_along >= thumb_start && pos_along <= thumb_start + thumb_len {
+                    state.dragging_grab_offset = Some(pos_along - thumb_start);
+                    return Some(canvas::Action::request_redraw().and_capture());
+                }
+                let grab_off = thumb_len * 0.5;
+                state.dragging_grab_offset = Some(grab_off);
+                let new_start = (pos_along - grab_off).clamp(0.0, travel);
+                let frac = if travel > 0.0 {
+                    (new_start / travel).clamp(0.0, 1.0)
+                } else {
+                    0.5
+                };
+                let new_pan = self.metrics.max_pan * (1.0 - 2.0 * frac);
+                Some(canvas::Action::publish(self.make_pan_msg(new_pan)).and_capture())
+            }
+            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if let Some(grab_off) = state.dragging_grab_offset
+                    && let Some(pos) = cursor.position_from(bounds.position())
+                {
+                    let pos_along = if self.horizontal { pos.x } else { pos.y };
+                    let new_start = (pos_along - grab_off).clamp(0.0, travel);
+                    let frac = if travel > 0.0 {
+                        (new_start / travel).clamp(0.0, 1.0)
+                    } else {
+                        0.5
+                    };
+                    let new_pan = self.metrics.max_pan * (1.0 - 2.0 * frac);
+                    return Some(canvas::Action::publish(self.make_pan_msg(new_pan)).and_capture());
+                }
+                let over = cursor.is_over(bounds);
+                if over != state.hovered {
+                    state.hovered = over;
+                    return Some(canvas::Action::request_redraw());
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        state: &Self::State,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        if state.dragging_grab_offset.is_some() || cursor.is_over(bounds) {
+            mouse::Interaction::Pointer
+        } else {
+            mouse::Interaction::default()
+        }
+    }
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &iced::Renderer,
+        theme: &iced::Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let t = PaletteTokens::for_theme(theme);
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let size = bounds.size();
+        frame.fill_rectangle(Point::ORIGIN, size, t.bg_surface.scale_alpha(0.72));
+
+        let (_track_len, thumb_len, _travel, thumb_start) = self.thumb_geometry(bounds);
+        let thumb_color = if state.dragging_grab_offset.is_some() {
+            t.accent
+        } else if state.hovered {
+            t.text_secondary
+        } else {
+            t.border_strong
+        };
+        let pad = 2.0;
+        let (pt, sz) = if self.horizontal {
+            (
+                Point::new(thumb_start, pad),
+                Size::new(thumb_len, (size.height - pad * 2.0).max(2.0)),
+            )
+        } else {
+            (
+                Point::new(pad, thumb_start),
+                Size::new((size.width - pad * 2.0).max(2.0), thumb_len),
+            )
+        };
+        let radius = (if self.horizontal { sz.height } else { sz.width }) * 0.5;
+        let path = canvas::Path::rounded_rectangle(pt, sz, radius.into());
+        frame.fill(&path, thumb_color);
+        vec![frame.into_geometry()]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3736,5 +4646,44 @@ mod tests {
         assert_eq!(dims.width_str, "12.80");
         dims.apply(DimGridAction::PresetRatio(1, 1));
         assert_eq!(dims.width_px, dims.height_px);
+    }
+
+    #[test]
+    fn healing_and_transform_tools_map_to_canvas_and_ui_defaults() {
+        assert_eq!(
+            EditorTool::HealingBrush.as_canvas_tool(),
+            CanvasTool::HealingBrush
+        );
+        assert_eq!(
+            EditorTool::Transform.as_canvas_tool(),
+            CanvasTool::Transform
+        );
+        assert_eq!(EditorTool::HealingBrush.icon(), Icon::HealingBrush);
+        assert_eq!(EditorTool::Transform.icon(), Icon::Transform);
+
+        let ui = EditorUiState::default();
+        assert_eq!(ui.healing_mode, HealingMode::Spot);
+        assert!(ui.transform_spec.is_identity());
+        assert_eq!(ui.flood_fill_opacity, 1.0);
+        assert_eq!(ui.gradient_opacity, 1.0);
+        assert!(ui.gradient_dither);
+        assert!(!ui.gradient_reverse);
+    }
+
+    #[test]
+    fn scrollbar_metrics_show_only_when_display_exceeds_viewport() {
+        let (dw, dh) = canvas_display_dims(4000, 3000, 1.0, 800.0, 600.0);
+        assert!(scrollbar_axis_metrics(dw, 800.0, 0.0).is_none());
+        assert!(scrollbar_axis_metrics(dh, 600.0, 0.0).is_none());
+
+        let (dw2, dh2) = canvas_display_dims(4000, 3000, 3.0, 800.0, 600.0);
+        let mx = scrollbar_axis_metrics(dw2, 800.0, 0.0).expect("horizontal bar expected");
+        let my = scrollbar_axis_metrics(dh2, 600.0, 0.0).expect("vertical bar expected");
+        assert!((mx.frac - 0.5).abs() < 1e-4);
+        assert!((my.frac - 0.5).abs() < 1e-4);
+        let left_edge = scrollbar_axis_metrics(dw2, 800.0, mx.max_pan).unwrap();
+        assert!((left_edge.frac - 0.0).abs() < 1e-4);
+        let right_edge = scrollbar_axis_metrics(dw2, 800.0, -mx.max_pan).unwrap();
+        assert!((right_edge.frac - 1.0).abs() < 1e-4);
     }
 }

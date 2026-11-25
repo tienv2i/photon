@@ -16,8 +16,8 @@ use photon_panels::{
     panel_splitter, sidebar_dock, sidebar_panel, stacked_panel_heights, vertical_panel_splitter,
 };
 use photon_protocol::{
-    ColorAdjustments, Command, Language, Theme, UiStateSnapshot, ViewerRightPanel, ViewerViewMode,
-    WebtoonFitMode, Workspace,
+    CanvasAntiAliasingMode, ColorAdjustments, Command, Language, Theme, UiStateSnapshot,
+    ViewerRightPanel, ViewerViewMode, ViewportDenoiseMode, WebtoonFitMode, Workspace,
 };
 use photon_ui::button::{self, ButtonVariant, TOOLBAR_CONTROL_HEIGHT};
 use photon_ui::grid::{FilmstripItem, filmstrip_bar};
@@ -69,6 +69,8 @@ pub struct ViewerViewState<'a> {
     pub is_main_window: bool,
     pub reader_options_open: bool,
     pub workspace_switcher_open: bool,
+    pub aa_mode: CanvasAntiAliasingMode,
+    pub denoise_mode: ViewportDenoiseMode,
 }
 
 /// Messages emitted by the Viewer workspace UI.
@@ -86,6 +88,8 @@ pub enum ViewerMessage {
     ViewerRotatePreview(i8),
     ToggleFullscreen,
     SetViewerViewMode(ViewerViewMode),
+    SetAntiAliasingMode(CanvasAntiAliasingMode),
+    SetViewportDenoiseMode(ViewportDenoiseMode),
     ToggleReaderOptions,
     ToggleWorkspaceSwitcher,
     ToggleWorkspacePanels,
@@ -521,6 +525,9 @@ pub fn build_viewer_view<'a>(state: ViewerViewState<'a>) -> Element<'a, ViewerMe
                     marching_ants_phase: 0.0,
                     restrict_pan_to_hand: false,
                     stabilizer_radius: 0.0,
+                    aa_mode: state.aa_mode,
+                    denoise_mode: state.denoise_mode,
+                    ..Default::default()
                 })
                 .width(Fill)
                 .height(Fill),
@@ -937,6 +944,9 @@ fn build_viewer_double_panes<'a>(
             marching_ants_phase: 0.0,
             restrict_pan_to_hand: false,
             stabilizer_radius: 0.0,
+            aa_mode: state.aa_mode,
+            denoise_mode: state.denoise_mode,
+            ..Default::default()
         })
         .width(Fill)
         .height(Fill),
@@ -1210,6 +1220,67 @@ pub fn step_dual_spread(state: ViewerViewState<'_>, delta: isize) -> Option<Stri
     let next_sp = (cur_sp + delta).rem_euclid(spreads.len() as isize) as usize;
     let target_idx = spreads[next_sp][0];
     images.get(target_idx).cloned()
+}
+
+/// Reader/View quality menu entries for Canvas Anti-Aliasing and Viewport Denoise.
+pub fn build_viewer_quality_menu_entries<'a>(
+    state: ViewerViewState<'a>,
+) -> Vec<MenuEntry<'a, ViewerMessage>> {
+    let lang = state.snapshot.meta.language;
+    vec![
+        MenuEntry::Header(tr(lang, "settings-canvas-aa")),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "aa-mode-crisp"),
+                ViewerMessage::SetAntiAliasingMode(CanvasAntiAliasingMode::Crisp),
+            )
+            .checked(state.aa_mode == CanvasAntiAliasingMode::Crisp),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "aa-mode-smooth"),
+                ViewerMessage::SetAntiAliasingMode(CanvasAntiAliasingMode::Smooth),
+            )
+            .checked(state.aa_mode == CanvasAntiAliasingMode::Smooth),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "aa-mode-high-quality"),
+                ViewerMessage::SetAntiAliasingMode(CanvasAntiAliasingMode::HighQuality),
+            )
+            .checked(state.aa_mode == CanvasAntiAliasingMode::HighQuality),
+        ),
+        MenuEntry::Separator,
+        MenuEntry::Header(tr(lang, "settings-viewport-denoise")),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "denoise-mode-off"),
+                ViewerMessage::SetViewportDenoiseMode(ViewportDenoiseMode::Off),
+            )
+            .checked(state.denoise_mode == ViewportDenoiseMode::Off),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "denoise-mode-light"),
+                ViewerMessage::SetViewportDenoiseMode(ViewportDenoiseMode::Light),
+            )
+            .checked(state.denoise_mode == ViewportDenoiseMode::Light),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "denoise-mode-medium"),
+                ViewerMessage::SetViewportDenoiseMode(ViewportDenoiseMode::Medium),
+            )
+            .checked(state.denoise_mode == ViewportDenoiseMode::Medium),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "denoise-mode-strong"),
+                ViewerMessage::SetViewportDenoiseMode(ViewportDenoiseMode::Strong),
+            )
+            .checked(state.denoise_mode == ViewportDenoiseMode::Strong),
+        ),
+    ]
 }
 
 /// Right-click context menu for Viewer canvas & pages.

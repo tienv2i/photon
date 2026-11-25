@@ -5,18 +5,29 @@
 //! contrast, saturation), live arbitrary-angle rotation preview, Before/After Original
 //! split/hold comparison, and interactive Paint/Eraser/Eyedropper/Crop/Zoom tools.
 
+mod gpu;
+mod transform;
+
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::keyboard::Modifiers;
 use iced::mouse;
-use iced::wgpu;
-use iced::widget::shader::{self, Action, Pipeline, Primitive, Viewport};
+use iced::widget::shader::{self, Action};
 use iced::{Event, Rectangle};
-use image::{DynamicImage, RgbaImage};
-use photon_protocol::{ColorAdjustments, DrawShapeKind, VectorPathNode};
+use photon_protocol::{
+    CanvasAntiAliasingMode, ColorAdjustments, DrawShapeKind, LayerTransformSpec, VectorPathNode,
+    ViewportDenoiseMode,
+};
+
+pub use gpu::{ImageQuadPrimitive, ImageShaderPipeline, MAX_GPU_TEXTURE_DIM};
+pub use transform::{
+    TransformDragMode, TransformHandle, TransformPreview, apply_transform_drag,
+    hit_test_transform_handle, transform_doc_to_local, transform_handle_positions,
+    transform_local_to_doc, transform_obb_corners,
+};
 
 #[derive(Debug, Clone)]
 pub struct CpuImageFrame {
@@ -46,6 +57,7 @@ pub enum CanvasTool {
     Brush,
     Eraser,
     Liquify,
+    HealingBrush,
     Eyedropper,
     Crop,
     RotateAngle,
@@ -67,6 +79,7 @@ pub enum CanvasTool {
     BezierPen,
     PaintBucket,
     Gradient,
+    Transform,
 }
 
 impl CanvasTool {
@@ -85,6 +98,14 @@ impl CanvasTool {
                 | Self::MagicWand
         )
     }
+
+    pub fn is_pan_on_left_drag(self, crop_active: bool) -> bool {
+        match self {
+            Self::Hand => true,
+            Self::Pointer => !crop_active,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -96,6 +117,12 @@ pub struct CanvasInteractionState {
     pub sampling: bool,
     pub dragging_split: bool,
     pub selecting: bool,
+    pub transform_dragging: bool,
+    pub transform_drag_mode: Option<TransformDragMode>,
+    pub transform_anchor_px: Option<[f32; 2]>,
+    pub transform_start_spec: Option<LayerTransformSpec>,
+    pub transform_live_spec: Option<LayerTransformSpec>,
+    pub healing_source_px: Option<[f32; 2]>,
     pub modifiers: Modifiers,
     pub last_cursor: Option<iced::Point>,
     pub last_click_time: Option<Instant>,
@@ -139,6 +166,7 @@ pub enum CanvasEvent {
     StrokeBegin([f64; 2]),
     StrokeStep(Vec<[f64; 2]>),
     StrokeEnd(bool),
+    HealingSourcePicked([f64; 2]),
     SampleColor([u32; 2]),
     CompareSplitChanged(f32),
     ContextMenuRequested {
@@ -193,6 +221,9 @@ pub enum CanvasEvent {
         start: [f32; 2],
         end: [f32; 2],
     },
+    TransformUpdated(LayerTransformSpec),
+    TransformCommit,
+    TransformCancel,
     ResetFit,
 }
 
@@ -221,12 +252,57 @@ pub struct ImageCanvasProgram {
     /// 0 = Off, 1 = Split (draggable divider), 2 = Side-by-Side (Original left | Edited right), 3 = HoldOriginal
     pub compare_mode: u8,
     pub compare_split_x: f32,
-    /// Active brush/eraser/liquify radius in document pixels (`0.0` disables cursor ring).
+    /// Active brush/eraser/liquify/healing radius in document pixels (`0.0` disables cursor ring).
     pub brush_radius_px: f32,
-    /// When true (e.g. Editor), Pointer & Middle-click do not pan; only Hand tool or Space+Drag pans.
+    /// When true (Editor), mouse-active tools reserve Left-drag exclusively; Pointer (no crop), Hand,
+    /// Middle-mouse drag, and Space+Left-drag pan freely.
     pub restrict_pan_to_hand: bool,
     /// Stabilizer leash radius in document pixels (`0.0` disables stabilizer overlay).
     pub stabilizer_radius: f32,
+    /// Optional 256×1 RGBA8 1D tonal curve LUT (`[R, G, B, 255]` per entry `0..=255`).
+    pub curve_lut: Option<[u8; 1024]>,
+    pub aa_mode: CanvasAntiAliasingMode,
+    pub denoise_mode: ViewportDenoiseMode,
+    pub healing_source_px: Option<[f32; 2]>,
+    pub transform_preview: Option<TransformPreview>,
+}
+
+impl Default for ImageCanvasProgram {
+    fn default() -> Self {
+        Self {
+            frame: None,
+            pair_frame: None,
+            dual_gap_px: 0.0,
+            compare_frame: None,
+            selection_mask: None,
+            has_selection: false,
+            quick_mask_active: false,
+            marching_ants_phase: 0.0,
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+            adjustments: ColorAdjustments::default(),
+            dark_theme: true,
+            crop_rect: None,
+            crop_aspect: None,
+            quarter_turns: 0,
+            tool: CanvasTool::Pointer,
+            preview_angle_rad: 0.0,
+            preview_fill: [0.0; 4],
+            canvas_bg: None,
+            viewport_bg: None,
+            compare_mode: 0,
+            compare_split_x: 0.5,
+            brush_radius_px: 0.0,
+            restrict_pan_to_hand: false,
+            stabilizer_radius: 0.0,
+            curve_lut: None,
+            aa_mode: CanvasAntiAliasingMode::default(),
+            denoise_mode: ViewportDenoiseMode::default(),
+            healing_source_px: None,
+            transform_preview: None,
+        }
+    }
 }
 
 /// Compute unified spread dimensions `(spread_w, spread_h, left_disp_w, gap_img)`
@@ -253,17 +329,36 @@ pub fn dual_spread_geometry(
 
 impl ImageCanvasProgram {
     fn effective_doc_size(&self) -> Option<(f32, f32)> {
-        let frame = self.frame.as_ref()?;
-        if let Some(pair) = &self.pair_frame {
-            let (sw, sh, _, _) = dual_spread_geometry(
-                (frame.width, frame.height),
-                (pair.width, pair.height),
-                self.dual_gap_px,
-            );
-            Some((sw, sh))
+        if let Some(frame) = self.frame.as_ref() {
+            if let Some(pair) = &self.pair_frame {
+                let (sw, sh, _, _) = dual_spread_geometry(
+                    (frame.width, frame.height),
+                    (pair.width, pair.height),
+                    self.dual_gap_px,
+                );
+                Some((sw, sh))
+            } else {
+                Some((frame.width.max(1) as f32, frame.height.max(1) as f32))
+            }
+        } else if let Some(tp) = &self.transform_preview {
+            let f = tp.base_frame.as_ref().unwrap_or(&tp.layer_frame);
+            Some((f.width.max(1) as f32, f.height.max(1) as f32))
         } else {
-            Some((frame.width.max(1) as f32, frame.height.max(1) as f32))
+            None
         }
+    }
+
+    fn effective_transform_preview(
+        &self,
+        state: &CanvasInteractionState,
+    ) -> Option<TransformPreview> {
+        let mut tp = self.transform_preview.clone()?;
+        if state.transform_dragging
+            && let Some(live) = state.transform_live_spec
+        {
+            tp.spec = live;
+        }
+        Some(tp)
     }
 
     fn fit_geometry(&self, bounds: Rectangle) -> Option<(f32, f32, f32, f32, f32, f32)> {
@@ -286,8 +381,8 @@ impl ImageCanvasProgram {
         } else {
             (vp_h * img_aspect, vp_h)
         };
-        let drawn_w = fit_w * self.zoom.max(0.05);
-        let drawn_h = fit_h * self.zoom.max(0.05);
+        let drawn_w = fit_w * self.zoom.max(0.02);
+        let drawn_h = fit_h * self.zoom.max(0.02);
         let cx = vp_w * 0.5 + self.pan_x;
         let cy = vp_h * 0.5 + self.pan_y;
         let left = cx - drawn_w * 0.5;
@@ -665,6 +760,37 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
         cursor: mouse::Cursor,
     ) -> Option<Action<CanvasEvent>> {
         match event {
+            Event::Window(iced::window::Event::Unfocused) => {
+                let had_transient = state.space_pan_active
+                    || state.dragging
+                    || state.painting
+                    || state.selecting
+                    || state.cropping
+                    || state.transform_dragging
+                    || state.sampling
+                    || state.dragging_split
+                    || state.drawing_shape
+                    || state.bezier_dragging_handle;
+                state.space_pan_active = false;
+                state.dragging = false;
+                state.painting = false;
+                state.selecting = false;
+                state.cropping = false;
+                state.transform_dragging = false;
+                state.transform_drag_mode = None;
+                state.transform_anchor_px = None;
+                state.transform_start_spec = None;
+                state.transform_live_spec = None;
+                state.sampling = false;
+                state.dragging_split = false;
+                state.drawing_shape = false;
+                state.bezier_dragging_handle = false;
+                state.last_cursor = None;
+                state.stabilizer_pos_px = None;
+                if had_transient {
+                    return Some(Action::request_redraw());
+                }
+            }
             Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) => {
                 state.modifiers = *mods;
             }
@@ -677,6 +803,28 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             state.space_pan_active = true;
                             return Some(Action::request_redraw());
                         }
+                    }
+                    Key::Named(Named::Enter)
+                        if self.tool == CanvasTool::Transform
+                            && self.transform_preview.is_some() =>
+                    {
+                        state.transform_dragging = false;
+                        state.transform_drag_mode = None;
+                        state.transform_anchor_px = None;
+                        state.transform_start_spec = None;
+                        state.transform_live_spec = None;
+                        return Some(Action::publish(CanvasEvent::TransformCommit).and_capture());
+                    }
+                    Key::Named(Named::Escape)
+                        if self.tool == CanvasTool::Transform
+                            && self.transform_preview.is_some() =>
+                    {
+                        state.transform_dragging = false;
+                        state.transform_drag_mode = None;
+                        state.transform_anchor_px = None;
+                        state.transform_start_spec = None;
+                        state.transform_live_spec = None;
+                        return Some(Action::publish(CanvasEvent::TransformCancel).and_capture());
                     }
                     Key::Named(Named::Enter)
                         if state.selecting
@@ -814,6 +962,44 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 }
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
+                if state.modifiers.shift() {
+                    let dx = match delta {
+                        mouse::ScrollDelta::Lines { x, y } => {
+                            let v = if x.abs() > 0.001 { *x } else { *y };
+                            v * 48.0
+                        }
+                        mouse::ScrollDelta::Pixels { x, y } => {
+                            if x.abs() > 0.5 {
+                                *x
+                            } else {
+                                *y
+                            }
+                        }
+                    };
+                    if dx.abs() > 0.01 {
+                        return Some(
+                            Action::publish(CanvasEvent::PanBy { dx, dy: 0.0 }).and_capture(),
+                        );
+                    }
+                    return None;
+                }
+                match delta {
+                    mouse::ScrollDelta::Pixels { x, y } if x.abs() > 0.5 && x.abs() > y.abs() => {
+                        return Some(
+                            Action::publish(CanvasEvent::PanBy { dx: *x, dy: 0.0 }).and_capture(),
+                        );
+                    }
+                    mouse::ScrollDelta::Lines { x, y } if x.abs() > 0.001 && x.abs() > y.abs() => {
+                        return Some(
+                            Action::publish(CanvasEvent::PanBy {
+                                dx: *x * 48.0,
+                                dy: 0.0,
+                            })
+                            .and_capture(),
+                        );
+                    }
+                    _ => {}
+                }
                 let y = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => *y,
                     mouse::ScrollDelta::Pixels { y, .. } => *y / 60.0,
@@ -834,84 +1020,12 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle))
                 if cursor.is_over(bounds) =>
             {
-                if self.restrict_pan_to_hand && self.tool != CanvasTool::Hand {
-                    return None;
-                }
+                // Middle-mouse drag ALWAYS pans freely regardless of `restrict_pan_to_hand` or active tool.
                 state.dragging = true;
                 state.last_cursor = cursor.position();
                 return Some(Action::capture());
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Middle)) => {
-                if state.selecting
-                    && matches!(
-                        self.tool,
-                        CanvasTool::MarqueeRect
-                            | CanvasTool::MarqueeEllipse
-                            | CanvasTool::Lasso
-                            | CanvasTool::QuickSelect
-                    )
-                {
-                    state.selecting = false;
-                    let shift = state.modifiers.shift();
-                    let alt = state.modifiers.alt();
-                    match self.tool {
-                        CanvasTool::MarqueeRect | CanvasTool::MarqueeEllipse => {
-                            let anchor = state.select_anchor_px.take();
-                            let cur = state.select_current_px.take();
-                            if let (Some(a), Some(b)) = (anchor, cur) {
-                                let x = a[0].min(b[0]);
-                                let y = a[1].min(b[1]);
-                                let w = (a[0] - b[0]).abs();
-                                let h = (a[1] - b[1]).abs();
-                                if w >= 1.0 && h >= 1.0 {
-                                    return Some(
-                                        Action::publish(CanvasEvent::SelectMarqueeCommit {
-                                            is_ellipse: self.tool == CanvasTool::MarqueeEllipse,
-                                            x,
-                                            y,
-                                            width: w,
-                                            height: h,
-                                            shift,
-                                            alt,
-                                        })
-                                        .and_capture(),
-                                    );
-                                }
-                            }
-                        }
-                        CanvasTool::Lasso => {
-                            let pts = std::mem::take(&mut state.select_points_px);
-                            if pts.len() >= 3 {
-                                return Some(
-                                    Action::publish(CanvasEvent::SelectPolygonCommit {
-                                        points: pts,
-                                        shift,
-                                        alt,
-                                    })
-                                    .and_capture(),
-                                );
-                            }
-                        }
-                        CanvasTool::QuickSelect => {
-                            let pts: Vec<[f64; 2]> = std::mem::take(&mut state.select_points_px)
-                                .into_iter()
-                                .map(|[x, y]| [f64::from(x), f64::from(y)])
-                                .collect();
-                            if !pts.is_empty() {
-                                return Some(
-                                    Action::publish(CanvasEvent::SelectQuickStroke {
-                                        points: pts,
-                                        shift,
-                                        alt,
-                                    })
-                                    .and_capture(),
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                    return Some(Action::capture());
-                }
                 if state.dragging {
                     state.dragging = false;
                     state.last_cursor = None;
@@ -957,6 +1071,13 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
                 if cursor.is_over(bounds) =>
             {
+                // (1) Global Space+Left-drag or Hand tool -> ALWAYS pan freely
+                if state.space_pan_active || self.tool == CanvasTool::Hand {
+                    state.dragging = true;
+                    state.last_cursor = cursor.position();
+                    return Some(Action::capture());
+                }
+
                 if let Some(pos) = cursor.position()
                     && self.is_over_split_handle(pos, bounds)
                 {
@@ -964,29 +1085,38 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     return Some(Action::capture());
                 }
 
-                // (1) Global Space+Drag or Hand tool -> pan
-                if state.space_pan_active || self.tool == CanvasTool::Hand {
-                    state.dragging = true;
-                    state.last_cursor = cursor.position();
-                    return Some(Action::capture());
-                }
-
-                // (2) Global Alt+Click on non-selection tools -> SampleColor
-                if state.modifiers.alt()
-                    && !self.tool.is_selection()
-                    && !matches!(self.tool, CanvasTool::Hand | CanvasTool::Zoom)
-                {
+                // (2) HealingBrush Alt+Click -> pick healing source instead of global SampleColor
+                if self.tool == CanvasTool::HealingBrush && state.modifiers.alt() {
                     if let Some(pos) = cursor.position()
                         && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
-                        && let Some(frame) = &self.frame
                     {
-                        state.sampling = true;
-                        let ix = (px.floor() as u32).min(frame.width.saturating_sub(1));
-                        let iy = (py.floor() as u32).min(frame.height.saturating_sub(1));
+                        state.healing_source_px = Some([px as f32, py as f32]);
                         return Some(
-                            Action::publish(CanvasEvent::SampleColor([ix, iy])).and_capture(),
+                            Action::publish(CanvasEvent::HealingSourcePicked([px, py]))
+                                .and_capture(),
                         );
                     }
+                    return None;
+                }
+
+                // (3) Global Alt+Click on non-selection/non-transform/non-healing tools -> SampleColor
+                if state.modifiers.alt()
+                    && !self.tool.is_selection()
+                    && !matches!(
+                        self.tool,
+                        CanvasTool::Hand
+                            | CanvasTool::Zoom
+                            | CanvasTool::HealingBrush
+                            | CanvasTool::Transform
+                    )
+                    && let Some(pos) = cursor.position()
+                    && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
+                    && let Some(frame) = &self.frame
+                {
+                    state.sampling = true;
+                    let ix = (px.floor() as u32).min(frame.width.saturating_sub(1));
+                    let iy = (py.floor() as u32).min(frame.height.saturating_sub(1));
+                    return Some(Action::publish(CanvasEvent::SampleColor([ix, iy])).and_capture());
                 }
 
                 match self.tool {
@@ -1002,7 +1132,10 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             .and_capture(),
                         );
                     }
-                    CanvasTool::Brush | CanvasTool::Eraser | CanvasTool::Liquify => {
+                    CanvasTool::Brush
+                    | CanvasTool::Eraser
+                    | CanvasTool::Liquify
+                    | CanvasTool::HealingBrush => {
                         if let Some(pos) = cursor.position()
                             && let Some(pt) = self.screen_to_image_px(pos, bounds)
                         {
@@ -1029,6 +1162,29 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                                 Action::publish(CanvasEvent::SampleColor([ix, iy])).and_capture(),
                             );
                         }
+                    }
+                    CanvasTool::Transform => {
+                        if let Some(eff_tp) = self.effective_transform_preview(state)
+                            && let Some(pos) = cursor.position()
+                            && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
+                            && let Some((_, _, drawn_w, _, fw, _)) = self.fit_geometry(bounds)
+                        {
+                            let doc_per_screen = (fw / drawn_w.max(1.0)).max(1e-4);
+                            let hit_radius_doc = 11.0 * doc_per_screen;
+                            let rot_stem_doc = 24.0 * doc_per_screen;
+                            let pt = [px as f32, py as f32];
+                            if let Some(mode) =
+                                hit_test_transform_handle(&eff_tp, pt, hit_radius_doc, rot_stem_doc)
+                            {
+                                state.transform_dragging = true;
+                                state.transform_drag_mode = Some(mode);
+                                state.transform_anchor_px = Some(pt);
+                                state.transform_start_spec = Some(eff_tp.spec);
+                                state.transform_live_spec = Some(eff_tp.spec);
+                                return Some(Action::capture());
+                            }
+                        }
+                        return None;
                     }
                     CanvasTool::MarqueeRect | CanvasTool::MarqueeEllipse => {
                         if let Some(pos) = cursor.position()
@@ -1251,19 +1407,29 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             return Some(Action::capture());
                         }
                     }
-                    _ => {}
+                    CanvasTool::Pointer | CanvasTool::Hand => {
+                        state.dragging = true;
+                        state.last_cursor = cursor.position();
+                        return Some(Action::capture());
+                    }
+                    CanvasTool::Crop | CanvasTool::RotateAngle => {
+                        // Reserve Left-click exclusively for the active tool; never accidentally pan.
+                        return None;
+                    }
                 }
-
-                if self.restrict_pan_to_hand && self.tool == CanvasTool::Pointer {
-                    return None;
-                }
-                state.dragging = true;
-                state.last_cursor = cursor.position();
-                return Some(Action::capture());
+                return None;
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 if state.dragging_split {
                     state.dragging_split = false;
+                    return Some(Action::capture());
+                }
+                if state.transform_dragging {
+                    state.transform_dragging = false;
+                    state.transform_drag_mode = None;
+                    state.transform_anchor_px = None;
+                    state.transform_start_spec = None;
+                    state.transform_live_spec = None;
                     return Some(Action::capture());
                 }
                 if state.painting {
@@ -1405,6 +1571,29 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 let frac = ((position.x - bounds.x) / bounds.width.max(1.0)).clamp(0.02, 0.98);
                 return Some(Action::publish(CanvasEvent::CompareSplitChanged(frac)).and_capture());
             }
+            Event::Mouse(mouse::Event::CursorMoved { position }) if state.transform_dragging => {
+                if let (Some(tp), Some(mode), Some(anchor), Some(start_spec), Some([px, py])) = (
+                    &self.transform_preview,
+                    state.transform_drag_mode,
+                    state.transform_anchor_px,
+                    state.transform_start_spec,
+                    self.screen_to_image_px(*position, bounds),
+                ) {
+                    let spec = apply_transform_drag(
+                        tp,
+                        start_spec,
+                        mode,
+                        anchor,
+                        [px as f32, py as f32],
+                        state.modifiers.shift(),
+                        state.modifiers.alt(),
+                    );
+                    state.transform_live_spec = Some(spec);
+                    return Some(
+                        Action::publish(CanvasEvent::TransformUpdated(spec)).and_capture(),
+                    );
+                }
+            }
             Event::Mouse(mouse::Event::CursorMoved { position }) if state.painting => {
                 if let Some(pt) = self.screen_to_image_px(*position, bounds) {
                     if self.stabilizer_radius > 0.0
@@ -1491,7 +1680,9 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                         CanvasTool::Brush
                             | CanvasTool::Eraser
                             | CanvasTool::Liquify
+                            | CanvasTool::HealingBrush
                             | CanvasTool::QuickSelect
+                            | CanvasTool::Transform
                     ) =>
             {
                 return Some(Action::request_redraw());
@@ -1513,6 +1704,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 CanvasTool::Brush
                     | CanvasTool::Eraser
                     | CanvasTool::Liquify
+                    | CanvasTool::HealingBrush
                     | CanvasTool::QuickSelect
             )
             && cursor.is_over(bounds);
@@ -1555,6 +1747,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
             (0.0, [0.0; 4])
         };
         let (overlay_lines, overlay_tris) = self.build_vector_overlay(state, cursor, bounds);
+        let transform_preview = self.effective_transform_preview(state);
 
         ImageQuadPrimitive {
             frame: self.frame.clone(),
@@ -1585,6 +1778,10 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
             bounds_size: [bounds.width.max(1.0), bounds.height.max(1.0)],
             overlay_lines,
             overlay_tris,
+            curve_lut: self.curve_lut,
+            aa_mode: self.aa_mode,
+            denoise_mode: self.denoise_mode,
+            transform_preview,
         }
     }
 
@@ -1606,6 +1803,63 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
             mouse::Interaction::Grab
         } else if !cursor.is_over(bounds) {
             mouse::Interaction::default()
+        } else if self.tool == CanvasTool::Transform {
+            if state.transform_dragging {
+                return match state.transform_drag_mode {
+                    Some(TransformDragMode::Scale(h)) => match h {
+                        TransformHandle::TopLeft | TransformHandle::BottomRight => {
+                            mouse::Interaction::ResizingDiagonallyDown
+                        }
+                        TransformHandle::TopRight | TransformHandle::BottomLeft => {
+                            mouse::Interaction::ResizingDiagonallyUp
+                        }
+                        TransformHandle::Top | TransformHandle::Bottom => {
+                            mouse::Interaction::ResizingVertically
+                        }
+                        TransformHandle::Left | TransformHandle::Right => {
+                            mouse::Interaction::ResizingHorizontally
+                        }
+                        _ => mouse::Interaction::Grabbing,
+                    },
+                    _ => mouse::Interaction::Grabbing,
+                };
+            }
+            if let Some(eff_tp) = self.effective_transform_preview(state)
+                && let Some(pos) = cursor.position()
+                && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
+                && let Some((_, _, drawn_w, _, fw, _)) = self.fit_geometry(bounds)
+            {
+                let doc_per_screen = (fw / drawn_w.max(1.0)).max(1e-4);
+                let hit_radius_doc = 11.0 * doc_per_screen;
+                let rot_stem_doc = 24.0 * doc_per_screen;
+                if let Some(mode) = hit_test_transform_handle(
+                    &eff_tp,
+                    [px as f32, py as f32],
+                    hit_radius_doc,
+                    rot_stem_doc,
+                ) {
+                    return match mode {
+                        TransformDragMode::Rotate => mouse::Interaction::Grab,
+                        TransformDragMode::Move => mouse::Interaction::Grab,
+                        TransformDragMode::Scale(h) => match h {
+                            TransformHandle::TopLeft | TransformHandle::BottomRight => {
+                                mouse::Interaction::ResizingDiagonallyDown
+                            }
+                            TransformHandle::TopRight | TransformHandle::BottomLeft => {
+                                mouse::Interaction::ResizingDiagonallyUp
+                            }
+                            TransformHandle::Top | TransformHandle::Bottom => {
+                                mouse::Interaction::ResizingVertically
+                            }
+                            TransformHandle::Left | TransformHandle::Right => {
+                                mouse::Interaction::ResizingHorizontally
+                            }
+                            _ => mouse::Interaction::Grab,
+                        },
+                    };
+                }
+            }
+            mouse::Interaction::default()
         } else if self.crop_rect.is_some()
             || self.tool.is_selection()
             || matches!(
@@ -1613,6 +1867,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 CanvasTool::Brush
                     | CanvasTool::Eraser
                     | CanvasTool::Liquify
+                    | CanvasTool::HealingBrush
                     | CanvasTool::Eyedropper
                     | CanvasTool::Crop
                     | CanvasTool::DrawLine
@@ -1639,9 +1894,78 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
 pub struct OverlayVertex {
     pub pos: [f32; 2],
     pub color: [f32; 4],
+    pub aa_uv: [f32; 2],
+    pub aa_kind: f32,
+    pub _pad: f32,
+}
+
+impl OverlayVertex {
+    const fn flat(pos: [f32; 2], color: [f32; 4]) -> Self {
+        Self {
+            pos,
+            color,
+            aa_uv: [0.0, 0.0],
+            aa_kind: 0.0,
+            _pad: 0.0,
+        }
+    }
+
+    const fn aa(pos: [f32; 2], color: [f32; 4], aa_uv: [f32; 2], aa_kind: f32) -> Self {
+        Self {
+            pos,
+            color,
+            aa_uv,
+            aa_kind,
+            _pad: 0.0,
+        }
+    }
 }
 
 impl ImageCanvasProgram {
+    #[allow(clippy::too_many_arguments)]
+    fn push_overlay_line_ndc(
+        &self,
+        lines: &mut Vec<OverlayVertex>,
+        tris: &mut Vec<OverlayVertex>,
+        a: [f32; 2],
+        b: [f32; 2],
+        color: [f32; 4],
+        half_width_px: f32,
+        bounds: Rectangle,
+    ) {
+        if self.aa_mode == CanvasAntiAliasingMode::HighQuality {
+            let vp_w = bounds.width.max(1.0);
+            let vp_h = bounds.height.max(1.0);
+            let ax = (a[0] + 1.0) * 0.5 * vp_w;
+            let ay = (1.0 - a[1]) * 0.5 * vp_h;
+            let bx = (b[0] + 1.0) * 0.5 * vp_w;
+            let by = (1.0 - b[1]) * 0.5 * vp_h;
+            let dx = bx - ax;
+            let dy = by - ay;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len > 0.25 {
+                let nx = (-dy / len) * half_width_px;
+                let ny = (dx / len) * half_width_px;
+                let to_ndc = |x: f32, y: f32| [(x / vp_w) * 2.0 - 1.0, 1.0 - (y / vp_h) * 2.0];
+                let p0 = to_ndc(ax + nx, ay + ny);
+                let p1 = to_ndc(ax - nx, ay - ny);
+                let p2 = to_ndc(bx - nx, by - ny);
+                let p3 = to_ndc(bx + nx, by + ny);
+                tris.extend_from_slice(&[
+                    OverlayVertex::aa(p0, color, [0.0, 1.0], 1.0),
+                    OverlayVertex::aa(p1, color, [0.0, -1.0], 1.0),
+                    OverlayVertex::aa(p2, color, [0.0, -1.0], 1.0),
+                    OverlayVertex::aa(p0, color, [0.0, 1.0], 1.0),
+                    OverlayVertex::aa(p2, color, [0.0, -1.0], 1.0),
+                    OverlayVertex::aa(p3, color, [0.0, 1.0], 1.0),
+                ]);
+                return;
+            }
+        }
+        lines.push(OverlayVertex::flat(a, color));
+        lines.push(OverlayVertex::flat(b, color));
+    }
+
     fn push_overlay_dot(
         &self,
         tris: &mut Vec<OverlayVertex>,
@@ -1657,13 +1981,44 @@ impl ImageCanvasProgram {
             let tr = [cx + half_w, cy + half_h];
             let bl = [cx - half_w, cy - half_h];
             let br = [cx + half_w, cy - half_h];
+            let aa_kind = if self.aa_mode == CanvasAntiAliasingMode::HighQuality {
+                2.0
+            } else {
+                0.0
+            };
             tris.extend_from_slice(&[
-                OverlayVertex { pos: tl, color },
-                OverlayVertex { pos: bl, color },
-                OverlayVertex { pos: br, color },
-                OverlayVertex { pos: tl, color },
-                OverlayVertex { pos: br, color },
-                OverlayVertex { pos: tr, color },
+                OverlayVertex::aa(tl, color, [-1.0, 1.0], aa_kind),
+                OverlayVertex::aa(bl, color, [-1.0, -1.0], aa_kind),
+                OverlayVertex::aa(br, color, [1.0, -1.0], aa_kind),
+                OverlayVertex::aa(tl, color, [-1.0, 1.0], aa_kind),
+                OverlayVertex::aa(br, color, [1.0, -1.0], aa_kind),
+                OverlayVertex::aa(tr, color, [1.0, 1.0], aa_kind),
+            ]);
+        }
+    }
+
+    fn push_overlay_square(
+        &self,
+        tris: &mut Vec<OverlayVertex>,
+        doc_px: [f32; 2],
+        half_px: f32,
+        color: [f32; 4],
+        bounds: Rectangle,
+    ) {
+        if let Some([cx, cy]) = self.doc_px_to_ndc(doc_px, bounds) {
+            let [half_w, half_h_neg] = self.screen_delta_to_ndc(half_px, half_px, bounds);
+            let half_h = half_h_neg.abs();
+            let tl = [cx - half_w, cy + half_h];
+            let tr = [cx + half_w, cy + half_h];
+            let bl = [cx - half_w, cy - half_h];
+            let br = [cx + half_w, cy - half_h];
+            tris.extend_from_slice(&[
+                OverlayVertex::flat(tl, color),
+                OverlayVertex::flat(bl, color),
+                OverlayVertex::flat(br, color),
+                OverlayVertex::flat(tl, color),
+                OverlayVertex::flat(br, color),
+                OverlayVertex::flat(tr, color),
             ]);
         }
     }
@@ -1680,20 +2035,20 @@ impl ImageCanvasProgram {
         for s in 0..segments {
             let a0 = (s as f32 / segments as f32) * std::f32::consts::TAU;
             let a1 = ((s + 1) as f32 / segments as f32) * std::f32::consts::TAU;
-            lines.push(OverlayVertex {
-                pos: [
+            lines.push(OverlayVertex::flat(
+                [
                     center_ndc[0] + rx_ndc * a0.cos(),
                     center_ndc[1] + ry_ndc * a0.sin(),
                 ],
                 color,
-            });
-            lines.push(OverlayVertex {
-                pos: [
+            ));
+            lines.push(OverlayVertex::flat(
+                [
                     center_ndc[0] + rx_ndc * a1.cos(),
                     center_ndc[1] + ry_ndc * a1.sin(),
                 ],
                 color,
-            });
+            ));
         }
     }
 
@@ -1705,6 +2060,128 @@ impl ImageCanvasProgram {
     ) -> (Vec<OverlayVertex>, Vec<OverlayVertex>) {
         let mut lines = Vec::new();
         let mut tris = Vec::new();
+
+        // Healing Brush source `+` crosshair
+        if self.tool == CanvasTool::HealingBrush
+            && let Some(src) = self.healing_source_px.or(state.healing_source_px)
+            && let Some(c_ndc) = self.doc_px_to_ndc(src, bounds)
+        {
+            let [dx, dy_neg] = self.screen_delta_to_ndc(9.0, 9.0, bounds);
+            let dy = dy_neg.abs();
+            let [rx, ry_neg] = self.screen_delta_to_ndc(4.5, 4.5, bounds);
+            let dark = [0.05, 0.06, 0.08, 0.92];
+            let bright = [0.35, 0.95, 1.0, 0.98];
+            self.push_overlay_line_ndc(
+                &mut lines,
+                &mut tris,
+                [c_ndc[0] - dx, c_ndc[1]],
+                [c_ndc[0] + dx, c_ndc[1]],
+                dark,
+                2.0,
+                bounds,
+            );
+            self.push_overlay_line_ndc(
+                &mut lines,
+                &mut tris,
+                [c_ndc[0], c_ndc[1] - dy],
+                [c_ndc[0], c_ndc[1] + dy],
+                dark,
+                2.0,
+                bounds,
+            );
+            self.push_overlay_line_ndc(
+                &mut lines,
+                &mut tris,
+                [c_ndc[0] - dx, c_ndc[1]],
+                [c_ndc[0] + dx, c_ndc[1]],
+                bright,
+                1.1,
+                bounds,
+            );
+            self.push_overlay_line_ndc(
+                &mut lines,
+                &mut tris,
+                [c_ndc[0], c_ndc[1] - dy],
+                [c_ndc[0], c_ndc[1] + dy],
+                bright,
+                1.1,
+                bounds,
+            );
+            self.push_overlay_circle(&mut lines, c_ndc, rx, ry_neg.abs(), bright, 16);
+        }
+
+        // Interactive Free Transform OBB, 8 resize handles, external rotation handle, and pivot crosshair
+        if self.tool == CanvasTool::Transform
+            && let Some(eff_tp) = self.effective_transform_preview(state)
+            && let Some((_, _, drawn_w, _, fw, _)) = self.fit_geometry(bounds)
+        {
+            let doc_per_screen = (fw / drawn_w.max(1.0)).max(1e-4);
+            let rot_stem_doc = 24.0 * doc_per_screen;
+            let corners = transform_obb_corners(&eff_tp);
+            let handles = transform_handle_positions(&eff_tp, rot_stem_doc);
+            let dark = [0.05, 0.06, 0.09, 0.92];
+            let frame_col = [0.35, 0.88, 1.0, 0.98];
+
+            for i in 0..4 {
+                if let (Some(na), Some(nb)) = (
+                    self.doc_px_to_ndc(corners[i], bounds),
+                    self.doc_px_to_ndc(corners[(i + 1) % 4], bounds),
+                ) {
+                    self.push_overlay_line_ndc(&mut lines, &mut tris, na, nb, dark, 2.0, bounds);
+                    self.push_overlay_line_ndc(
+                        &mut lines, &mut tris, na, nb, frame_col, 1.15, bounds,
+                    );
+                }
+            }
+
+            // Stem from Top midpoint to external Rotate handle
+            if let (Some(n_top), Some(n_rot)) = (
+                self.doc_px_to_ndc(handles[1].1, bounds),
+                self.doc_px_to_ndc(handles[8].1, bounds),
+            ) {
+                self.push_overlay_line_ndc(&mut lines, &mut tris, n_top, n_rot, dark, 2.0, bounds);
+                self.push_overlay_line_ndc(
+                    &mut lines, &mut tris, n_top, n_rot, frame_col, 1.15, bounds,
+                );
+            }
+
+            // 8 resize handles (squares with dark border + white fill)
+            for (_, pos) in &handles[..8] {
+                self.push_overlay_square(&mut tris, *pos, 4.5, dark, bounds);
+                self.push_overlay_square(&mut tris, *pos, 3.2, [1.0, 1.0, 1.0, 0.98], bounds);
+            }
+
+            // External rotation handle
+            self.push_overlay_dot(&mut tris, handles[8].1, 5.2, dark, bounds);
+            self.push_overlay_dot(&mut tris, handles[8].1, 3.8, frame_col, bounds);
+
+            // Pivot crosshair
+            if let Some(p_ndc) = self.doc_px_to_ndc(handles[9].1, bounds) {
+                let [dx, dy_neg] = self.screen_delta_to_ndc(7.0, 7.0, bounds);
+                let dy = dy_neg.abs();
+                let [rx, ry_neg] = self.screen_delta_to_ndc(4.0, 4.0, bounds);
+                let piv_col = [1.0, 0.82, 0.25, 0.95];
+                self.push_overlay_line_ndc(
+                    &mut lines,
+                    &mut tris,
+                    [p_ndc[0] - dx, p_ndc[1]],
+                    [p_ndc[0] + dx, p_ndc[1]],
+                    piv_col,
+                    1.2,
+                    bounds,
+                );
+                self.push_overlay_line_ndc(
+                    &mut lines,
+                    &mut tris,
+                    [p_ndc[0], p_ndc[1] - dy],
+                    [p_ndc[0], p_ndc[1] + dy],
+                    piv_col,
+                    1.2,
+                    bounds,
+                );
+                self.push_overlay_circle(&mut lines, p_ndc, rx, ry_neg.abs(), piv_col, 16);
+            }
+        }
 
         // Stabilizer leash/circle overlay for Brush / Eraser
         if self.stabilizer_radius > 0.0
@@ -1734,14 +2211,15 @@ impl ImageCanvasProgram {
                     self.doc_px_to_ndc(cur_doc, bounds),
                 )
             {
-                lines.push(OverlayVertex {
-                    pos: a,
-                    color: [1.0, 0.8, 0.25, 0.9],
-                });
-                lines.push(OverlayVertex {
-                    pos: b,
-                    color: [1.0, 0.8, 0.25, 0.9],
-                });
+                self.push_overlay_line_ndc(
+                    &mut lines,
+                    &mut tris,
+                    a,
+                    b,
+                    [1.0, 0.8, 0.25, 0.9],
+                    1.2,
+                    bounds,
+                );
                 self.push_overlay_dot(&mut tris, stab, 3.0, [1.0, 0.8, 0.25, 0.95], bounds);
             }
         }
@@ -1752,19 +2230,44 @@ impl ImageCanvasProgram {
 
         if state.drawing_shape {
             match self.tool {
-                CanvasTool::DrawLine | CanvasTool::Gradient => {
+                CanvasTool::Gradient => {
                     if let (Some(a), Some(b)) = (state.draw_anchor_px, state.draw_current_px)
                         && let (Some(na), Some(nb)) =
                             (self.doc_px_to_ndc(a, bounds), self.doc_px_to_ndc(b, bounds))
                     {
-                        lines.push(OverlayVertex {
-                            pos: na,
-                            color: rubber_color,
-                        });
-                        lines.push(OverlayVertex {
-                            pos: nb,
-                            color: rubber_color,
-                        });
+                        let dark = [0.05, 0.06, 0.08, 0.9];
+                        self.push_overlay_line_ndc(
+                            &mut lines, &mut tris, na, nb, dark, 2.0, bounds,
+                        );
+                        self.push_overlay_line_ndc(
+                            &mut lines,
+                            &mut tris,
+                            na,
+                            nb,
+                            rubber_color,
+                            1.2,
+                            bounds,
+                        );
+                        self.push_overlay_dot(&mut tris, a, 5.2, dark, bounds);
+                        self.push_overlay_dot(&mut tris, a, 3.8, [0.2, 0.85, 1.0, 1.0], bounds);
+                        self.push_overlay_dot(&mut tris, b, 5.2, dark, bounds);
+                        self.push_overlay_dot(&mut tris, b, 3.8, [1.0, 1.0, 1.0, 0.98], bounds);
+                    }
+                }
+                CanvasTool::DrawLine => {
+                    if let (Some(a), Some(b)) = (state.draw_anchor_px, state.draw_current_px)
+                        && let (Some(na), Some(nb)) =
+                            (self.doc_px_to_ndc(a, bounds), self.doc_px_to_ndc(b, bounds))
+                    {
+                        self.push_overlay_line_ndc(
+                            &mut lines,
+                            &mut tris,
+                            na,
+                            nb,
+                            rubber_color,
+                            1.2,
+                            bounds,
+                        );
                         self.push_overlay_dot(&mut tris, a, 3.5, [0.2, 0.8, 1.0, 1.0], bounds);
                         self.push_overlay_dot(&mut tris, b, 3.5, [1.0, 1.0, 1.0, 0.95], bounds);
                     }
@@ -1781,14 +2284,15 @@ impl ImageCanvasProgram {
                                 self.doc_px_to_ndc(corners[i], bounds),
                                 self.doc_px_to_ndc(corners[(i + 1) % 4], bounds),
                             ) {
-                                lines.push(OverlayVertex {
-                                    pos: na,
-                                    color: rubber_color,
-                                });
-                                lines.push(OverlayVertex {
-                                    pos: nb,
-                                    color: rubber_color,
-                                });
+                                self.push_overlay_line_ndc(
+                                    &mut lines,
+                                    &mut tris,
+                                    na,
+                                    nb,
+                                    rubber_color,
+                                    1.2,
+                                    bounds,
+                                );
                             }
                         }
                     }
@@ -1809,14 +2313,15 @@ impl ImageCanvasProgram {
                                 self.doc_px_to_ndc(p0, bounds),
                                 self.doc_px_to_ndc(p1, bounds),
                             ) {
-                                lines.push(OverlayVertex {
-                                    pos: na,
-                                    color: rubber_color,
-                                });
-                                lines.push(OverlayVertex {
-                                    pos: nb,
-                                    color: rubber_color,
-                                });
+                                self.push_overlay_line_ndc(
+                                    &mut lines,
+                                    &mut tris,
+                                    na,
+                                    nb,
+                                    rubber_color,
+                                    1.2,
+                                    bounds,
+                                );
                             }
                         }
                     }
@@ -1829,14 +2334,9 @@ impl ImageCanvasProgram {
                             self.doc_px_to_ndc(pair[0], bounds),
                             self.doc_px_to_ndc(pair[1], bounds),
                         ) {
-                            lines.push(OverlayVertex {
-                                pos: na,
-                                color: line_color,
-                            });
-                            lines.push(OverlayVertex {
-                                pos: nb,
-                                color: line_color,
-                            });
+                            self.push_overlay_line_ndc(
+                                &mut lines, &mut tris, na, nb, line_color, 1.2, bounds,
+                            );
                         }
                     }
                     if let (Some(&last), Some(cur)) =
@@ -1846,14 +2346,15 @@ impl ImageCanvasProgram {
                             self.doc_px_to_ndc(cur, bounds),
                         )
                     {
-                        lines.push(OverlayVertex {
-                            pos: na,
-                            color: rubber_color,
-                        });
-                        lines.push(OverlayVertex {
-                            pos: nb,
-                            color: rubber_color,
-                        });
+                        self.push_overlay_line_ndc(
+                            &mut lines,
+                            &mut tris,
+                            na,
+                            nb,
+                            rubber_color,
+                            1.2,
+                            bounds,
+                        );
                     }
                     for (i, &pt) in state.draw_points.iter().enumerate() {
                         let c = if i == 0 {
@@ -1916,14 +2417,9 @@ impl ImageCanvasProgram {
                                 self.doc_px_to_ndc(eval(t0), bounds),
                                 self.doc_px_to_ndc(eval(t1), bounds),
                             ) {
-                                lines.push(OverlayVertex {
-                                    pos: na,
-                                    color: line_color,
-                                });
-                                lines.push(OverlayVertex {
-                                    pos: nb,
-                                    color: line_color,
-                                });
+                                self.push_overlay_line_ndc(
+                                    &mut lines, &mut tris, na, nb, line_color, 1.2, bounds,
+                                );
                             }
                         }
                     }
@@ -1955,14 +2451,15 @@ impl ImageCanvasProgram {
                                 self.doc_px_to_ndc(eval(t0), bounds),
                                 self.doc_px_to_ndc(eval(t1), bounds),
                             ) {
-                                lines.push(OverlayVertex {
-                                    pos: na,
-                                    color: rubber_color,
-                                });
-                                lines.push(OverlayVertex {
-                                    pos: nb,
-                                    color: rubber_color,
-                                });
+                                self.push_overlay_line_ndc(
+                                    &mut lines,
+                                    &mut tris,
+                                    na,
+                                    nb,
+                                    rubber_color,
+                                    1.2,
+                                    bounds,
+                                );
                             }
                         }
                     }
@@ -1973,14 +2470,15 @@ impl ImageCanvasProgram {
                                 self.doc_px_to_ndc(node.anchor, bounds),
                                 self.doc_px_to_ndc(h, bounds),
                             ) {
-                                lines.push(OverlayVertex {
-                                    pos: na,
-                                    color: handle_color,
-                                });
-                                lines.push(OverlayVertex {
-                                    pos: nb,
-                                    color: handle_color,
-                                });
+                                self.push_overlay_line_ndc(
+                                    &mut lines,
+                                    &mut tris,
+                                    na,
+                                    nb,
+                                    handle_color,
+                                    1.0,
+                                    bounds,
+                                );
                             }
                             self.push_overlay_dot(&mut tris, h, 2.5, handle_color, bounds);
                         }
@@ -2043,14 +2541,7 @@ impl ImageCanvasProgram {
                 self.doc_px_to_ndc(pair[0], bounds),
                 self.doc_px_to_ndc(pair[1], bounds),
             ) {
-                lines.push(OverlayVertex {
-                    pos: a,
-                    color: line_color,
-                });
-                lines.push(OverlayVertex {
-                    pos: b,
-                    color: line_color,
-                });
+                self.push_overlay_line_ndc(&mut lines, &mut tris, a, b, line_color, 1.2, bounds);
             }
         }
 
@@ -2063,28 +2554,22 @@ impl ImageCanvasProgram {
                 self.doc_px_to_ndc(last, bounds),
                 self.doc_px_to_ndc(first_prev, bounds),
             ) {
-                lines.push(OverlayVertex {
-                    pos: a,
-                    color: rubber_color,
-                });
-                lines.push(OverlayVertex {
-                    pos: b,
-                    color: rubber_color,
-                });
+                self.push_overlay_line_ndc(&mut lines, &mut tris, a, b, rubber_color, 1.2, bounds);
             }
             for pair in state.magnetic_preview_px.windows(2) {
                 if let (Some(a), Some(b)) = (
                     self.doc_px_to_ndc(pair[0], bounds),
                     self.doc_px_to_ndc(pair[1], bounds),
                 ) {
-                    lines.push(OverlayVertex {
-                        pos: a,
-                        color: rubber_color,
-                    });
-                    lines.push(OverlayVertex {
-                        pos: b,
-                        color: rubber_color,
-                    });
+                    self.push_overlay_line_ndc(
+                        &mut lines,
+                        &mut tris,
+                        a,
+                        b,
+                        rubber_color,
+                        1.2,
+                        bounds,
+                    );
                 }
             }
         } else if matches!(
@@ -2097,14 +2582,7 @@ impl ImageCanvasProgram {
                 self.doc_px_to_ndc(cur, bounds),
             )
         {
-            lines.push(OverlayVertex {
-                pos: a,
-                color: rubber_color,
-            });
-            lines.push(OverlayVertex {
-                pos: b,
-                color: rubber_color,
-            });
+            self.push_overlay_line_ndc(&mut lines, &mut tris, a, b, rubber_color, 1.2, bounds);
         }
 
         // Vertex anchor dots and close-snap ring for polygon-style tools
@@ -2112,8 +2590,6 @@ impl ImageCanvasProgram {
             self.tool,
             CanvasTool::PolygonLasso | CanvasTool::MagneticLasso | CanvasTool::BezierSelect
         ) {
-            let [half_w, half_h_neg] = self.screen_delta_to_ndc(3.5, 3.5, bounds);
-            let half_h = half_h_neg.abs();
             let last_idx = state.select_points_px.len() - 1;
             let stride = if self.tool == CanvasTool::MagneticLasso {
                 12
@@ -2124,43 +2600,12 @@ impl ImageCanvasProgram {
                 if i != 0 && i != last_idx && i % stride != 0 {
                     continue;
                 }
-                if let Some([cx, cy]) = self.doc_px_to_ndc(pt, bounds) {
-                    let dot_color = if i == 0 {
-                        [0.20, 0.80, 1.0, 1.0]
-                    } else {
-                        [1.0, 1.0, 1.0, 0.95]
-                    };
-                    let tl = [cx - half_w, cy + half_h];
-                    let tr = [cx + half_w, cy + half_h];
-                    let bl = [cx - half_w, cy - half_h];
-                    let br = [cx + half_w, cy - half_h];
-                    tris.extend_from_slice(&[
-                        OverlayVertex {
-                            pos: tl,
-                            color: dot_color,
-                        },
-                        OverlayVertex {
-                            pos: bl,
-                            color: dot_color,
-                        },
-                        OverlayVertex {
-                            pos: br,
-                            color: dot_color,
-                        },
-                        OverlayVertex {
-                            pos: tl,
-                            color: dot_color,
-                        },
-                        OverlayVertex {
-                            pos: br,
-                            color: dot_color,
-                        },
-                        OverlayVertex {
-                            pos: tr,
-                            color: dot_color,
-                        },
-                    ]);
-                }
+                let dot_color = if i == 0 {
+                    [0.20, 0.80, 1.0, 1.0]
+                } else {
+                    [1.0, 1.0, 1.0, 0.95]
+                };
+                self.push_overlay_square(&mut tris, pt, 3.5, dot_color, bounds);
             }
 
             // Close-snap ring at first vertex when >= 3 vertices
@@ -2172,1201 +2617,20 @@ impl ImageCanvasProgram {
                     let dy = cur[1] - first[1];
                     (dx * dx + dy * dy).sqrt() <= snap_thresh
                 });
-                if let Some([cx, cy]) = self.doc_px_to_ndc(first, bounds) {
+                if let Some(c_ndc) = self.doc_px_to_ndc(first, bounds) {
                     let [rx, ry_neg] = self.screen_delta_to_ndc(9.0, 9.0, bounds);
-                    let ry = ry_neg.abs();
                     let ring_color = if is_snapped {
                         [0.20, 1.0, 0.55, 1.0]
                     } else {
                         [1.0, 1.0, 1.0, 0.65]
                     };
-                    const SEGMENTS: usize = 20;
-                    for s in 0..SEGMENTS {
-                        let a0 = (s as f32 / SEGMENTS as f32) * std::f32::consts::TAU;
-                        let a1 = ((s + 1) as f32 / SEGMENTS as f32) * std::f32::consts::TAU;
-                        lines.push(OverlayVertex {
-                            pos: [cx + rx * a0.cos(), cy + ry * a0.sin()],
-                            color: ring_color,
-                        });
-                        lines.push(OverlayVertex {
-                            pos: [cx + rx * a1.cos(), cy + ry * a1.sin()],
-                            color: ring_color,
-                        });
-                    }
+                    self.push_overlay_circle(&mut lines, c_ndc, rx, ry_neg.abs(), ring_color, 20);
                 }
             }
         }
 
         (lines, tris)
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct ImageQuadPrimitive {
-    pub frame: Option<CpuImageFrame>,
-    pub pair_frame: Option<CpuImageFrame>,
-    pub dual_gap_px: f32,
-    pub compare_frame: Option<CpuImageFrame>,
-    pub selection_mask: Option<CpuMaskFrame>,
-    pub has_selection: bool,
-    pub quick_mask_active: bool,
-    pub marching_ants_phase: f32,
-    pub sel_preview_kind: f32,
-    pub sel_preview_rect: [f32; 4],
-    pub zoom: f32,
-    pub pan_x: f32,
-    pub pan_y: f32,
-    pub adjustments: ColorAdjustments,
-    pub dark_theme: bool,
-    pub crop_rect: Option<[f32; 4]>,
-    pub quarter_turns: u8,
-    pub preview_angle_rad: f32,
-    pub preview_fill: [f32; 4],
-    pub canvas_bg: Option<[u8; 3]>,
-    pub viewport_bg: Option<[u8; 3]>,
-    pub compare_mode: u8,
-    pub compare_split_x: f32,
-    pub cursor_doc_pos: [f32; 2],
-    pub cursor_radius_px: f32,
-    pub bounds_size: [f32; 2],
-    pub overlay_lines: Vec<OverlayVertex>,
-    pub overlay_tris: Vec<OverlayVertex>,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Uniforms {
-    viewport_size: [f32; 2],
-    image_size: [f32; 2],
-    pan: [f32; 2],
-    zoom: f32,
-    brightness: f32,
-    contrast: f32,
-    saturation: f32,
-    exposure: f32,
-    highlights: f32,
-    shadows: f32,
-    has_image: f32,
-    dark_theme: f32,
-    crop_active: f32,
-    crop_rect: [f32; 4],
-    quarter_turns: f32,
-    preview_angle_rad: f32,
-    has_canvas_bg: f32,
-    has_compare: f32,
-    canvas_bg: [f32; 4],
-    preview_fill: [f32; 4],
-    compare_mode: f32,
-    compare_split_x: f32,
-    gamma: f32,
-    cursor_radius_px: f32,
-    cursor_doc_pos: [f32; 2],
-    has_viewport_bg: f32,
-    _pad: f32,
-    viewport_bg: [f32; 4],
-    pair_size: [f32; 2],
-    has_pair: f32,
-    dual_gap_px: f32,
-    has_selection: f32,
-    quick_mask_active: f32,
-    marching_ants_phase: f32,
-    sel_preview_kind: f32,
-    sel_preview_rect: [f32; 4],
-}
-
-impl Uniforms {
-    fn as_bytes(&self) -> &[u8] {
-        // Safety: Uniforms is #[repr(C)] containing only plain f32 values (192 bytes).
-        unsafe {
-            std::slice::from_raw_parts(
-                (self as *const Self).cast::<u8>(),
-                std::mem::size_of::<Self>(),
-            )
-        }
-    }
-}
-
-struct CachedSimpleTexture {
-    revision: u64,
-    width: u32,
-    height: u32,
-    view: wgpu::TextureView,
-}
-
-struct CachedGpuTexture {
-    revision: u64,
-    width: u32,
-    height: u32,
-    image_view: wgpu::TextureView,
-    bound_compare: Option<(String, u64)>,
-    bound_sel: Option<(String, u64)>,
-    uniform_buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-}
-
-pub struct ImageShaderPipeline {
-    pipeline: wgpu::RenderPipeline,
-    overlay_line_pipeline: wgpu::RenderPipeline,
-    overlay_tri_pipeline: wgpu::RenderPipeline,
-    overlay_line_buffer: wgpu::Buffer,
-    overlay_line_capacity: usize,
-    overlay_line_count: u32,
-    overlay_tri_buffer: wgpu::Buffer,
-    overlay_tri_capacity: usize,
-    overlay_tri_count: u32,
-    placeholder_uniform_buffer: wgpu::Buffer,
-    bind_group_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-    placeholder_view: wgpu::TextureView,
-    placeholder_bind_group: wgpu::BindGroup,
-    textures: HashMap<String, CachedGpuTexture>,
-    compare_textures: HashMap<String, CachedSimpleTexture>,
-    sel_mask_textures: HashMap<String, CachedSimpleTexture>,
-    recent_keys: Vec<String>,
-}
-
-const WGSL_SHADER: &str = r#"
-struct Uniforms {
-    viewport_size: vec2<f32>,
-    image_size: vec2<f32>,
-    pan: vec2<f32>,
-    zoom: f32,
-    brightness: f32,
-    contrast: f32,
-    saturation: f32,
-    exposure: f32,
-    highlights: f32,
-    shadows: f32,
-    has_image: f32,
-    dark_theme: f32,
-    crop_active: f32,
-    crop_rect: vec4<f32>,
-    quarter_turns: f32,
-    preview_angle_rad: f32,
-    has_canvas_bg: f32,
-    has_compare: f32,
-    canvas_bg: vec4<f32>,
-    preview_fill: vec4<f32>,
-    compare_mode: f32,
-    compare_split_x: f32,
-    gamma: f32,
-    cursor_radius_px: f32,
-    cursor_doc_pos: vec2<f32>,
-    has_viewport_bg: f32,
-    _pad: f32,
-    viewport_bg: vec4<f32>,
-    pair_size: vec2<f32>,
-    has_pair: f32,
-    dual_gap_px: f32,
-    has_selection: f32,
-    quick_mask_active: f32,
-    marching_ants_phase: f32,
-    sel_preview_kind: f32,
-    sel_preview_rect: vec4<f32>,
-};
-
-@group(0) @binding(0) var<uniform> u: Uniforms;
-@group(0) @binding(1) var img_tex: texture_2d<f32>;
-@group(0) @binding(2) var img_sampler: sampler;
-@group(0) @binding(3) var compare_tex: texture_2d<f32>;
-@group(0) @binding(4) var sel_mask_tex: texture_2d<f32>;
-
-struct VsOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-@vertex
-fn vs_main(@builtin(vertex_index) idx: u32) -> VsOut {
-    var positions = array<vec2<f32>, 6>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>( 1.0, -1.0),
-        vec2<f32>(-1.0,  1.0),
-        vec2<f32>(-1.0,  1.0),
-        vec2<f32>( 1.0, -1.0),
-        vec2<f32>( 1.0,  1.0),
-    );
-    var uvs = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(1.0, 0.0),
-    );
-    var out: VsOut;
-    out.pos = vec4<f32>(positions[idx], 0.0, 1.0);
-    out.uv = uvs[idx];
-    return out;
-}
-
-fn apply_color_and_light(in_rgb: vec3<f32>) -> vec3<f32> {
-    var rgb = in_rgb * exp2(clamp(u.exposure, -2.0, 2.0));
-    let gamma = clamp(u.gamma, 0.2, 3.0);
-    if (abs(gamma - 1.0) > 0.0001) {
-        rgb = pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(1.0 / gamma));
-    }
-    let luma_pre = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let shadows_w = 1.0 - smoothstep(0.0, 0.55, luma_pre);
-    let highlights_w = smoothstep(0.45, 1.0, luma_pre);
-    let tone_delta = u.shadows * 0.5 * shadows_w + u.highlights * 0.5 * highlights_w;
-    rgb = rgb + vec3<f32>(tone_delta);
-
-    let c = clamp(u.contrast, -1.0, 1.0);
-    let contrast = select(1.0 + c, 1.0 / (1.0 - c * 0.999), c >= 0.0);
-    rgb = (rgb - vec3<f32>(0.5)) * contrast + vec3<f32>(0.5) + vec3<f32>(u.brightness);
-
-    let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let sat = max(1.0 + u.saturation, 0.0);
-    return clamp(mix(vec3<f32>(luma), rgb, sat), vec3<f32>(0.0), vec3<f32>(1.0));
-}
-
-// Compute the UV of `pixel` within a fitted image, given a sub-viewport
-// defined by its left edge `vp_x0` and width `vp_w`, full height `vp_h`.
-// Uses the same zoom/pan uniforms for synchronized navigation.
-// Returns a vec3: (uv.x, uv.y, in_bounds) where in_bounds is 1.0 or 0.0.
-fn half_vp_uv(pixel: vec2<f32>, img_sz: vec2<f32>, vp_x0: f32, vp_w: f32, vp_h: f32) -> vec3<f32> {
-    let half_vp = vec2<f32>(vp_w, vp_h);
-    let img_aspect = img_sz.x / max(img_sz.y, 1.0);
-    let hv_aspect = vp_w / max(vp_h, 1.0);
-    var fit: vec2<f32>;
-    if (img_aspect > hv_aspect) {
-        fit = vec2<f32>(vp_w, vp_w / img_aspect);
-    } else {
-        fit = vec2<f32>(vp_h * img_aspect, vp_h);
-    }
-    let drawn = fit * u.zoom;
-    // Pan is relative to the half-viewport centre
-    let half_center = vec2<f32>(vp_x0 + vp_w * 0.5, vp_h * 0.5) + u.pan;
-    let tl = half_center - drawn * 0.5;
-    let uv = (pixel - tl) / drawn;
-    let in_bounds = select(0.0, 1.0,
-        uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0);
-    return vec3<f32>(clamp(uv.x, 0.0, 1.0), clamp(uv.y, 0.0, 1.0), in_bounds);
-}
-
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let pixel = in.uv * u.viewport_size;
-    let default_bg = select(
-        vec3<f32>(0.9137255, 0.9254902, 0.9411765),
-        vec3<f32>(0.0627451, 0.07058824, 0.078431375),
-        u.dark_theme > 0.5
-    );
-    let bg = select(default_bg, u.viewport_bg.rgb, u.has_viewport_bg > 0.5);
-
-    if (u.has_image < 0.5) {
-        return vec4<f32>(bg, 1.0);
-    }
-
-    let turns = i32(round(u.quarter_turns)) & 3;
-    let odd_rot = (turns & 1) == 1;
-
-    // ── Mode 2: Side-by-Side ──────────────────────────────────────────────────
-    // Left half  = compare_frame (Original), fitted to left half-viewport.
-    // Right half = primary edited frame,     fitted to right half-viewport.
-    // Both halves share the same zoom & pan → synchronized navigation.
-    if (u.compare_mode > 1.5 && u.compare_mode < 2.5 && u.has_compare > 0.5) {
-        let vp_w = u.viewport_size.x;
-        let vp_h = u.viewport_size.y;
-        let half_w = vp_w * 0.5;
-        let center_px = half_w;
-        let sbs_size = select(u.image_size, vec2<f32>(u.image_size.y, u.image_size.x), odd_rot);
-
-        // Checkerboard for this pixel
-        let tile2 = vec2<i32>(floor(pixel / 10.0));
-        let odd2 = ((tile2.x + tile2.y) & 1) == 1;
-        let ca2 = select(vec3<f32>(0.85, 0.85, 0.85), vec3<f32>(0.18, 0.19, 0.21), u.dark_theme > 0.5);
-        let cb2 = select(vec3<f32>(0.75, 0.75, 0.75), vec3<f32>(0.24, 0.25, 0.28), u.dark_theme > 0.5);
-        var bd2 = select(ca2, cb2, odd2);
-        if (u.has_canvas_bg > 0.5) {
-            bd2 = mix(bd2, u.canvas_bg.rgb, u.canvas_bg.a);
-        }
-
-        // Crisp 1-px white center divider
-        if (abs(pixel.x - center_px) < 1.0) {
-            return vec4<f32>(1.0, 1.0, 1.0, 1.0);
-        }
-
-        var out2: vec3<f32> = bg;
-        let is_left = pixel.x < center_px;
-        let r = half_vp_uv(pixel, sbs_size, select(half_w, 0.0, is_left), half_w, vp_h);
-        if (r.z > 0.5) {
-            var sbs_uv = r.xy;
-            if (turns == 1) {
-                sbs_uv = vec2<f32>(sbs_uv.y, 1.0 - sbs_uv.x);
-            } else if (turns == 2) {
-                sbs_uv = vec2<f32>(1.0 - sbs_uv.x, 1.0 - sbs_uv.y);
-            } else if (turns == 3) {
-                sbs_uv = vec2<f32>(1.0 - sbs_uv.y, sbs_uv.x);
-            }
-            if (is_left) {
-                // Left half: Original (compare_tex)
-                let s = textureSample(compare_tex, img_sampler, sbs_uv);
-                out2 = mix(bd2, s.rgb, s.a);
-            } else {
-                // Right half: Edited primary (img_tex)
-                let s = textureSample(img_tex, img_sampler, sbs_uv);
-                let adj = apply_color_and_light(s.rgb);
-                out2 = mix(bd2, adj, s.a);
-            }
-        }
-        return vec4<f32>(out2, 1.0);
-    }
-    // ─────────────────────────────────────────────────────────────────────────
-    var doc_size = u.image_size;
-    var dual_left_w = u.image_size.x;
-    var dual_right_w = 0.0;
-    var dual_gap = 0.0;
-    if (u.has_pair > 0.5) {
-        let target_h = max(u.image_size.y, u.pair_size.y);
-        dual_left_w = round(u.image_size.x * (target_h / max(u.image_size.y, 1.0)));
-        dual_right_w = round(u.pair_size.x * (target_h / max(u.pair_size.y, 1.0)));
-        if (u.dual_gap_px > 0.0) {
-            dual_gap = u.dual_gap_px * max(target_h / 900.0, 1.0);
-        }
-        doc_size = vec2<f32>(dual_left_w + dual_gap + dual_right_w, target_h);
-    }
-    let base_size = select(doc_size, vec2<f32>(doc_size.y, doc_size.x), odd_rot);
-
-    let ca = cos(u.preview_angle_rad);
-    let sa = sin(u.preview_angle_rad);
-    let abs_ca = abs(ca);
-    let abs_sa = abs(sa);
-    let eff_size = vec2<f32>(
-        base_size.x * abs_ca + base_size.y * abs_sa,
-        base_size.x * abs_sa + base_size.y * abs_ca
-    );
-
-    let vp_aspect = u.viewport_size.x / max(u.viewport_size.y, 1.0);
-    let img_aspect = eff_size.x / max(eff_size.y, 1.0);
-    var fit_size = u.viewport_size;
-    if (img_aspect > vp_aspect) {
-        fit_size.y = u.viewport_size.x / img_aspect;
-    } else {
-        fit_size.x = u.viewport_size.y * img_aspect;
-    }
-    let drawn_size = fit_size * u.zoom;
-    let center = u.viewport_size * 0.5 + u.pan;
-    let top_left = center - drawn_size * 0.5;
-    let img_uv = (pixel - top_left) / drawn_size;
-
-    if (img_uv.x < 0.0 || img_uv.x > 1.0 || img_uv.y < 0.0 || img_uv.y > 1.0) {
-        return vec4<f32>(bg, 1.0);
-    }
-
-    // Checkerboard behind alpha regions
-    let tile = vec2<i32>(floor(pixel / 10.0));
-    let odd = ((tile.x + tile.y) & 1) == 1;
-    let check_a = select(vec3<f32>(0.85, 0.85, 0.85), vec3<f32>(0.18, 0.19, 0.21), u.dark_theme > 0.5);
-    let check_b = select(vec3<f32>(0.75, 0.75, 0.75), vec3<f32>(0.24, 0.25, 0.28), u.dark_theme > 0.5);
-    var backdrop = select(check_a, check_b, odd);
-    if (u.has_canvas_bg > 0.5) {
-        backdrop = mix(backdrop, u.canvas_bg.rgb, u.canvas_bg.a);
-    }
-
-    var rot_uv = img_uv;
-    var in_rot_bounds = true;
-    if (abs(u.preview_angle_rad) > 0.0001) {
-        let p_rot = (img_uv - vec2<f32>(0.5)) * eff_size;
-        let p_src = vec2<f32>(
-            p_rot.x * ca + p_rot.y * sa,
-            -p_rot.x * sa + p_rot.y * ca
-        );
-        rot_uv = p_src / base_size + vec2<f32>(0.5);
-        in_rot_bounds = rot_uv.x >= 0.0 && rot_uv.x <= 1.0 && rot_uv.y >= 0.0 && rot_uv.y <= 1.0;
-    }
-
-    var tex_uv = clamp(rot_uv, vec2<f32>(0.0), vec2<f32>(1.0));
-    if (turns == 1) {
-        tex_uv = vec2<f32>(tex_uv.y, 1.0 - tex_uv.x);
-    } else if (turns == 2) {
-        tex_uv = vec2<f32>(1.0 - tex_uv.x, 1.0 - tex_uv.y);
-    } else if (turns == 3) {
-        tex_uv = vec2<f32>(1.0 - tex_uv.y, tex_uv.x);
-    }
-
-    let spread_x = tex_uv.x * doc_size.x;
-    let is_dual = u.has_pair > 0.5;
-    let in_dual_gap = is_dual && spread_x >= dual_left_w && spread_x < (dual_left_w + dual_gap);
-    let on_right_page = is_dual && spread_x >= (dual_left_w + dual_gap);
-
-    let primary_uv = select(
-        tex_uv,
-        vec2<f32>(clamp(spread_x / max(dual_left_w, 1.0), 0.0, 1.0), tex_uv.y),
-        is_dual
-    );
-    let secondary_uv = select(
-        tex_uv,
-        vec2<f32>(clamp((spread_x - dual_left_w - dual_gap) / max(dual_right_w, 1.0), 0.0, 1.0), tex_uv.y),
-        is_dual
-    );
-
-    let prim_texel = textureSample(img_tex, img_sampler, primary_uv);
-    let sec_texel = textureSample(compare_tex, img_sampler, secondary_uv);
-    let texel = select(prim_texel, sec_texel, on_right_page);
-    let comp_texel = sec_texel;
-
-    if (in_rot_bounds && in_dual_gap) {
-        return vec4<f32>(bg, 1.0);
-    }
-
-    var out_rgb = backdrop;
-    if (!in_rot_bounds) {
-        out_rgb = mix(backdrop, u.preview_fill.rgb, u.preview_fill.a);
-    } else {
-        // Mode 1 (Split): left of split_x shows compare; Mode 3 (HoldOriginal): whole image shows compare
-        let show_compare = u.has_compare > 0.5 && (
-            u.compare_mode > 2.5 ||
-            (u.compare_mode > 0.5 && u.compare_mode < 1.5 && in.uv.x < u.compare_split_x)
-        );
-        if (show_compare) {
-            out_rgb = mix(backdrop, comp_texel.rgb, comp_texel.a);
-        } else {
-            let adj_rgb = apply_color_and_light(texel.rgb);
-            out_rgb = mix(backdrop, adj_rgb, texel.a);
-        }
-    }
-
-    // Mode 1 (Split): draggable vertical divider line
-    if (u.compare_mode > 0.5 && u.compare_mode < 1.5) {
-        let split_px = u.compare_split_x * u.viewport_size.x;
-        if (abs(pixel.x - split_px) < 1.25) {
-            out_rgb = vec3<f32>(1.0, 1.0, 1.0);
-        }
-    }
-
-    if (u.crop_active > 0.5) {
-        let c0 = u.crop_rect.xy;
-        let c1 = u.crop_rect.zw;
-        let inside = img_uv.x >= c0.x && img_uv.x <= c1.x && img_uv.y >= c0.y && img_uv.y <= c1.y;
-        if (!inside) {
-            out_rgb = out_rgb * 0.35;
-        } else {
-            let px_uv = 1.5 / max(drawn_size, vec2<f32>(1.0));
-            let on_edge = (img_uv.x - c0.x) < px_uv.x || (c1.x - img_uv.x) < px_uv.x || (img_uv.y - c0.y) < px_uv.y || (c1.y - img_uv.y) < px_uv.y;
-            if (on_edge) {
-                out_rgb = vec3<f32>(1.0, 1.0, 1.0);
-            } else {
-                let c_size = max(c1 - c0, vec2<f32>(0.001));
-                let rel = (img_uv - c0) / c_size;
-                let g_uv = 1.0 / max(drawn_size * c_size, vec2<f32>(1.0));
-                let on_third = abs(rel.x - 0.33333) < g_uv.x || abs(rel.x - 0.66667) < g_uv.x || abs(rel.y - 0.33333) < g_uv.y || abs(rel.y - 0.66667) < g_uv.y;
-                if (on_third) {
-                    out_rgb = mix(out_rgb, vec3<f32>(1.0), 0.28);
-                }
-            }
-        }
-    }
-
-    if (u.has_selection > 0.5 || u.quick_mask_active > 0.5) {
-        let sel_m = textureSampleLevel(sel_mask_tex, img_sampler, img_uv, 0.0).r;
-        if (u.quick_mask_active > 0.5) {
-            let unmasked = 1.0 - sel_m;
-            out_rgb = mix(out_rgb, vec3<f32>(0.92, 0.14, 0.16), unmasked * 0.45);
-        }
-        if (u.has_selection > 0.5) {
-            let step_uv = 1.0 / max(drawn_size, vec2<f32>(1.0));
-            let ml = textureSampleLevel(sel_mask_tex, img_sampler, img_uv - vec2<f32>(step_uv.x, 0.0), 0.0).r;
-            let mr = textureSampleLevel(sel_mask_tex, img_sampler, img_uv + vec2<f32>(step_uv.x, 0.0), 0.0).r;
-            let mu = textureSampleLevel(sel_mask_tex, img_sampler, img_uv - vec2<f32>(0.0, step_uv.y), 0.0).r;
-            let md = textureSampleLevel(sel_mask_tex, img_sampler, img_uv + vec2<f32>(0.0, step_uv.y), 0.0).r;
-            let min_n = min(min(ml, mr), min(mu, md));
-            let max_n = max(max(ml, mr), max(mu, md));
-            if (sel_m >= 0.5 && min_n < 0.5 || sel_m < 0.5 && max_n >= 0.5) {
-                let dash = fract((pixel.x + pixel.y) * 0.125 - u.marching_ants_phase);
-                out_rgb = select(vec3<f32>(0.08, 0.08, 0.10), vec3<f32>(1.0, 1.0, 1.0), dash < 0.5);
-            }
-        }
-    }
-
-    if (u.sel_preview_kind > 0.5) {
-        let s0 = u.sel_preview_rect.xy;
-        let s1 = u.sel_preview_rect.zw;
-        let px_uv = 1.35 / max(drawn_size, vec2<f32>(1.0));
-        var on_sel_edge = false;
-        if (u.sel_preview_kind < 1.5) {
-            let in_rect = img_uv.x >= s0.x && img_uv.x <= s1.x && img_uv.y >= s0.y && img_uv.y <= s1.y;
-            let near_x = abs(img_uv.x - s0.x) < px_uv.x || abs(img_uv.x - s1.x) < px_uv.x;
-            let near_y = abs(img_uv.y - s0.y) < px_uv.y || abs(img_uv.y - s1.y) < px_uv.y;
-            on_sel_edge = in_rect && (near_x || near_y);
-        } else {
-            let c = (s0 + s1) * 0.5;
-            let r = max((s1 - s0) * 0.5, vec2<f32>(0.0005));
-            let d = length((img_uv - c) / r);
-            let step_d = max(px_uv.x / r.x, px_uv.y / r.y);
-            on_sel_edge = abs(d - 1.0) <= step_d;
-        }
-        if (on_sel_edge) {
-            let dash = fract((pixel.x + pixel.y) * 0.125 - u.marching_ants_phase);
-            out_rgb = select(vec3<f32>(0.08, 0.08, 0.10), vec3<f32>(1.0, 1.0, 1.0), dash < 0.5);
-        }
-    }
-
-    if (u.cursor_radius_px > 0.5 && u.cursor_doc_pos.x > -9000.0) {
-        let doc_px = rot_uv * base_size;
-        let dist = length(doc_px - u.cursor_doc_pos);
-        let px_per_screen = max(base_size.x / max(drawn_size.x, 1.0), 0.25);
-        let diff = abs(dist - u.cursor_radius_px);
-        if (diff <= px_per_screen * 0.9) {
-            out_rgb = vec3<f32>(1.0, 1.0, 1.0);
-        } else if (diff <= px_per_screen * 1.75) {
-            out_rgb = vec3<f32>(0.05, 0.05, 0.08);
-        }
-    }
-    return vec4<f32>(out_rgb, 1.0);
-}
-"#;
-
-const OVERLAY_WGSL_SHADER: &str = r#"
-struct VsIn {
-    @location(0) pos: vec2<f32>,
-    @location(1) color: vec4<f32>,
-};
-
-struct VsOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) color: vec4<f32>,
-};
-
-@vertex
-fn vs_overlay(in: VsIn) -> VsOut {
-    var out: VsOut;
-    out.pos = vec4<f32>(in.pos, 0.0, 1.0);
-    out.color = in.color;
-    return out;
-}
-
-@fragment
-fn fs_overlay(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
-}
-"#;
-
-impl Pipeline for ImageShaderPipeline {
-    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("photon_image_shader"),
-            source: wgpu::ShaderSource::Wgsl(WGSL_SHADER.into()),
-        });
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("photon_image_bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("photon_image_pl"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("photon_image_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            multiview: None,
-            cache: None,
-        });
-
-        let placeholder_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("photon_image_placeholder_uniforms"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("photon_image_sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-
-        let placeholder_view = upload_rgba_texture(device, queue, 1, 1, &[0, 0, 0, 0]);
-        let placeholder_bind_group = build_bind_group(
-            device,
-            &bind_group_layout,
-            &placeholder_uniform_buffer,
-            &sampler,
-            &placeholder_view,
-            &placeholder_view,
-            &placeholder_view,
-        );
-
-        let overlay_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("photon_overlay_shader"),
-            source: wgpu::ShaderSource::Wgsl(OVERLAY_WGSL_SHADER.into()),
-        });
-        let overlay_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("photon_overlay_pl"),
-            bind_group_layouts: &[],
-            push_constant_ranges: &[],
-        });
-        let overlay_vbl = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<OverlayVertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x2,
-                },
-                wgpu::VertexAttribute {
-                    offset: 8,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-            ],
-        };
-        let make_overlay_pipeline = |label: &str, topology: wgpu::PrimitiveTopology| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&overlay_pl),
-                vertex: wgpu::VertexState {
-                    module: &overlay_shader,
-                    entry_point: Some("vs_overlay"),
-                    buffers: std::slice::from_ref(&overlay_vbl),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &overlay_shader,
-                    entry_point: Some("fs_overlay"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                multiview: None,
-                cache: None,
-            })
-        };
-        let overlay_line_pipeline = make_overlay_pipeline(
-            "photon_overlay_line_pipeline",
-            wgpu::PrimitiveTopology::LineList,
-        );
-        let overlay_tri_pipeline = make_overlay_pipeline(
-            "photon_overlay_tri_pipeline",
-            wgpu::PrimitiveTopology::TriangleList,
-        );
-        let initial_cap = 256usize;
-        let overlay_line_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("photon_overlay_line_vb"),
-            size: (initial_cap * std::mem::size_of::<OverlayVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let overlay_tri_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("photon_overlay_tri_vb"),
-            size: (initial_cap * std::mem::size_of::<OverlayVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        Self {
-            pipeline,
-            overlay_line_pipeline,
-            overlay_tri_pipeline,
-            overlay_line_buffer,
-            overlay_line_capacity: initial_cap,
-            overlay_line_count: 0,
-            overlay_tri_buffer,
-            overlay_tri_capacity: initial_cap,
-            overlay_tri_count: 0,
-            placeholder_uniform_buffer,
-            bind_group_layout,
-            sampler,
-            placeholder_view,
-            placeholder_bind_group,
-            textures: HashMap::new(),
-            compare_textures: HashMap::new(),
-            sel_mask_textures: HashMap::new(),
-            recent_keys: Vec::new(),
-        }
-    }
-
-    fn trim(&mut self) {
-        if self.textures.len() > 16 {
-            let keep: Vec<String> = self.recent_keys.iter().rev().take(4).cloned().collect();
-            self.textures.retain(|k, _| keep.contains(k));
-        }
-        if self.compare_textures.len() > 8 {
-            self.compare_textures.clear();
-        }
-    }
-}
-
-impl Primitive for ImageQuadPrimitive {
-    type Pipeline = ImageShaderPipeline;
-
-    fn prepare(
-        &self,
-        pipeline: &mut Self::Pipeline,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        _bounds: &Rectangle,
-        _viewport: &Viewport,
-    ) {
-        let mut has_image = 0.0f32;
-        let mut img_size = [1.0f32, 1.0f32];
-        let mut has_compare = 0.0f32;
-        let mut has_pair = 0.0f32;
-        let mut pair_size = [1.0f32, 1.0f32];
-
-        let secondary_ref = if self.compare_mode > 0 {
-            self.compare_frame.as_ref()
-        } else {
-            self.pair_frame.as_ref()
-        };
-
-        let secondary_key_rev = secondary_ref.map(|c| (c.key.clone(), c.revision));
-        if let Some(sec) = secondary_ref {
-            let needs_sec = pipeline
-                .compare_textures
-                .get(&sec.key)
-                .is_none_or(|t| t.revision != sec.revision);
-            if needs_sec {
-                let max_dim = device.limits().max_texture_dimension_2d.min(4096);
-                let (w, h, bytes) = fit_within_gpu_limit(sec.width, sec.height, &sec.rgba, max_dim);
-                let view = upload_rgba_texture(device, queue, w, h, &bytes);
-                pipeline.compare_textures.insert(
-                    sec.key.clone(),
-                    CachedSimpleTexture {
-                        revision: sec.revision,
-                        width: w,
-                        height: h,
-                        view,
-                    },
-                );
-            }
-            if self.compare_mode > 0 {
-                has_compare = 1.0;
-            } else if let Some(cached) = pipeline.compare_textures.get(&sec.key) {
-                has_pair = 1.0;
-                pair_size = [cached.width as f32, cached.height as f32];
-            }
-        }
-
-        let secondary_view = secondary_ref
-            .and_then(|c| pipeline.compare_textures.get(&c.key))
-            .map(|t| &t.view)
-            .unwrap_or(&pipeline.placeholder_view);
-
-        let sel_key_rev = self
-            .selection_mask
-            .as_ref()
-            .map(|m| (m.key.clone(), m.revision));
-        if let Some(sel) = &self.selection_mask {
-            let needs_sel = pipeline
-                .sel_mask_textures
-                .get(&sel.key)
-                .is_none_or(|t| t.revision != sel.revision);
-            if needs_sel {
-                let mut rgba = Vec::with_capacity(sel.alpha.len() * 4);
-                for &a in sel.alpha.iter() {
-                    rgba.extend_from_slice(&[a, a, a, 255]);
-                }
-                let max_dim = device.limits().max_texture_dimension_2d.min(4096);
-                let (w, h, bytes) = fit_within_gpu_limit(sel.width, sel.height, &rgba, max_dim);
-                let view = upload_rgba_texture(device, queue, w, h, &bytes);
-                pipeline.sel_mask_textures.insert(
-                    sel.key.clone(),
-                    CachedSimpleTexture {
-                        revision: sel.revision,
-                        width: w,
-                        height: h,
-                        view,
-                    },
-                );
-            }
-        }
-        let sel_view = self
-            .selection_mask
-            .as_ref()
-            .and_then(|m| pipeline.sel_mask_textures.get(&m.key))
-            .map(|t| &t.view)
-            .unwrap_or(&pipeline.placeholder_view);
-
-        if let Some(frame) = &self.frame {
-            let needs_upload = pipeline
-                .textures
-                .get(&frame.key)
-                .is_none_or(|tex| tex.revision != frame.revision);
-
-            if needs_upload {
-                let max_dim = device.limits().max_texture_dimension_2d.min(4096);
-                let (w, h, bytes) =
-                    fit_within_gpu_limit(frame.width, frame.height, &frame.rgba, max_dim);
-                let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("photon_image_uniforms"),
-                    size: std::mem::size_of::<Uniforms>() as u64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let image_view = upload_rgba_texture(device, queue, w, h, &bytes);
-                let bind_group = build_bind_group(
-                    device,
-                    &pipeline.bind_group_layout,
-                    &uniform_buffer,
-                    &pipeline.sampler,
-                    &image_view,
-                    secondary_view,
-                    sel_view,
-                );
-                pipeline.textures.insert(
-                    frame.key.clone(),
-                    CachedGpuTexture {
-                        revision: frame.revision,
-                        width: w,
-                        height: h,
-                        image_view,
-                        bound_compare: secondary_key_rev.clone(),
-                        bound_sel: sel_key_rev.clone(),
-                        uniform_buffer,
-                        bind_group,
-                    },
-                );
-            } else if let Some(tex) = pipeline.textures.get_mut(&frame.key)
-                && (tex.bound_compare != secondary_key_rev || tex.bound_sel != sel_key_rev)
-            {
-                tex.bind_group = build_bind_group(
-                    device,
-                    &pipeline.bind_group_layout,
-                    &tex.uniform_buffer,
-                    &pipeline.sampler,
-                    &tex.image_view,
-                    secondary_view,
-                    sel_view,
-                );
-                tex.bound_compare = secondary_key_rev;
-                tex.bound_sel = sel_key_rev;
-            }
-
-            if let Some(tex) = pipeline.textures.get(&frame.key) {
-                has_image = 1.0;
-                img_size = [tex.width as f32, tex.height as f32];
-                pipeline.recent_keys.retain(|k| k != &frame.key);
-                pipeline.recent_keys.push(frame.key.clone());
-                if pipeline.recent_keys.len() > 32 {
-                    pipeline.recent_keys.remove(0);
-                }
-            }
-        }
-
-        let (has_canvas_bg, canvas_bg) = match self.canvas_bg {
-            Some([r, g, b]) => (
-                1.0,
-                [
-                    f32::from(r) / 255.0,
-                    f32::from(g) / 255.0,
-                    f32::from(b) / 255.0,
-                    1.0,
-                ],
-            ),
-            None => (0.0, [0.0; 4]),
-        };
-
-        let (has_viewport_bg, viewport_bg) = match self.viewport_bg {
-            Some([r, g, b]) => (
-                1.0,
-                [
-                    f32::from(r) / 255.0,
-                    f32::from(g) / 255.0,
-                    f32::from(b) / 255.0,
-                    1.0,
-                ],
-            ),
-            None => (0.0, [0.0; 4]),
-        };
-
-        let uniforms = Uniforms {
-            viewport_size: self.bounds_size,
-            image_size: img_size,
-            pan: [self.pan_x, self.pan_y],
-            zoom: self.zoom.max(0.05),
-            brightness: self.adjustments.brightness,
-            contrast: self.adjustments.contrast,
-            saturation: self.adjustments.saturation,
-            exposure: self.adjustments.exposure,
-            highlights: self.adjustments.highlights,
-            shadows: self.adjustments.shadows,
-            has_image,
-            dark_theme: if self.dark_theme { 1.0 } else { 0.0 },
-            crop_active: if self.crop_rect.is_some() { 1.0 } else { 0.0 },
-            crop_rect: self.crop_rect.unwrap_or([0.0, 0.0, 1.0, 1.0]),
-            quarter_turns: f32::from(self.quarter_turns % 4),
-            preview_angle_rad: self.preview_angle_rad,
-            has_canvas_bg,
-            has_compare,
-            canvas_bg,
-            preview_fill: self.preview_fill,
-            compare_mode: f32::from(self.compare_mode),
-            compare_split_x: self.compare_split_x.clamp(0.0, 1.0),
-            gamma: self.adjustments.gamma.clamp(0.2, 3.0),
-            cursor_radius_px: self.cursor_radius_px.max(0.0),
-            cursor_doc_pos: self.cursor_doc_pos,
-            has_viewport_bg,
-            _pad: 0.0,
-            viewport_bg,
-            pair_size,
-            has_pair,
-            dual_gap_px: self.dual_gap_px.max(0.0),
-            has_selection: if self.has_selection { 1.0 } else { 0.0 },
-            quick_mask_active: if self.quick_mask_active { 1.0 } else { 0.0 },
-            marching_ants_phase: self.marching_ants_phase,
-            sel_preview_kind: self.sel_preview_kind,
-            sel_preview_rect: self.sel_preview_rect,
-        };
-
-        let target_buf = self
-            .frame
-            .as_ref()
-            .and_then(|f| pipeline.textures.get(&f.key))
-            .map(|t| &t.uniform_buffer)
-            .unwrap_or(&pipeline.placeholder_uniform_buffer);
-        queue.write_buffer(target_buf, 0, uniforms.as_bytes());
-
-        pipeline.overlay_line_count = upload_overlay_vertices(
-            device,
-            queue,
-            &mut pipeline.overlay_line_buffer,
-            &mut pipeline.overlay_line_capacity,
-            &self.overlay_lines,
-            "photon_overlay_line_vb",
-        );
-        pipeline.overlay_tri_count = upload_overlay_vertices(
-            device,
-            queue,
-            &mut pipeline.overlay_tri_buffer,
-            &mut pipeline.overlay_tri_capacity,
-            &self.overlay_tris,
-            "photon_overlay_tri_vb",
-        );
-    }
-
-    fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
-        let bind_group = self
-            .frame
-            .as_ref()
-            .and_then(|f| pipeline.textures.get(&f.key))
-            .map(|t| &t.bind_group)
-            .unwrap_or(&pipeline.placeholder_bind_group);
-
-        render_pass.set_pipeline(&pipeline.pipeline);
-        render_pass.set_bind_group(0, bind_group, &[]);
-        render_pass.draw(0..6, 0..1);
-
-        if pipeline.overlay_line_count > 0 {
-            render_pass.set_pipeline(&pipeline.overlay_line_pipeline);
-            render_pass.set_vertex_buffer(0, pipeline.overlay_line_buffer.slice(..));
-            render_pass.draw(0..pipeline.overlay_line_count, 0..1);
-        }
-        if pipeline.overlay_tri_count > 0 {
-            render_pass.set_pipeline(&pipeline.overlay_tri_pipeline);
-            render_pass.set_vertex_buffer(0, pipeline.overlay_tri_buffer.slice(..));
-            render_pass.draw(0..pipeline.overlay_tri_count, 0..1);
-        }
-        true
-    }
-}
-
-fn upload_overlay_vertices(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    buffer: &mut wgpu::Buffer,
-    capacity: &mut usize,
-    vertices: &[OverlayVertex],
-    label: &str,
-) -> u32 {
-    if vertices.is_empty() {
-        return 0;
-    }
-    if vertices.len() > *capacity {
-        let new_cap = vertices.len().next_power_of_two().max(64);
-        *buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: (new_cap * std::mem::size_of::<OverlayVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        *capacity = new_cap;
-    }
-    // Safety: OverlayVertex is #[repr(C)] containing only plain f32 values.
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            vertices.as_ptr().cast::<u8>(),
-            std::mem::size_of_val(vertices),
-        )
-    };
-    queue.write_buffer(buffer, 0, bytes);
-    vertices.len() as u32
-}
-
-fn fit_within_gpu_limit(w: u32, h: u32, rgba: &[u8], max_dim: u32) -> (u32, u32, Vec<u8>) {
-    if w <= max_dim && h <= max_dim {
-        return (w, h, rgba.to_vec());
-    }
-    if let Some(img) = RgbaImage::from_raw(w, h, rgba.to_vec()) {
-        let scaled = DynamicImage::ImageRgba8(img)
-            .thumbnail(max_dim, max_dim)
-            .to_rgba8();
-        let (nw, nh) = scaled.dimensions();
-        return (nw, nh, scaled.into_raw());
-    }
-    (w, h, rgba.to_vec())
-}
-
-fn upload_rgba_texture(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    width: u32,
-    height: u32,
-    rgba: &[u8],
-) -> wgpu::TextureView {
-    let size = wgpu::Extent3d {
-        width: width.max(1),
-        height: height.max(1),
-        depth_or_array_layers: 1,
-    };
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("photon_image_texture"),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    if rgba.len() == (size.width as usize) * (size.height as usize) * 4 {
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * size.width),
-                rows_per_image: Some(size.height),
-            },
-            size,
-        );
-    }
-    texture.create_view(&wgpu::TextureViewDescriptor::default())
-}
-
-fn build_bind_group(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    uniform_buffer: &wgpu::Buffer,
-    sampler: &wgpu::Sampler,
-    image_view: &wgpu::TextureView,
-    compare_view: &wgpu::TextureView,
-    sel_mask_view: &wgpu::TextureView,
-) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("photon_image_bind_group"),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(image_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::TextureView(compare_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::TextureView(sel_mask_view),
-            },
-        ],
-    })
 }
 
 #[cfg(test)]
@@ -3446,5 +2710,441 @@ mod tests {
         let path = magnetic_snap(&frame, [4.0, 4.0], [20.0, 20.0]);
         assert!(!path.is_empty());
         assert_eq!(*path.last().unwrap(), [20.0, 20.0]);
+    }
+
+    fn dummy_frame(w: u32, h: u32) -> CpuImageFrame {
+        CpuImageFrame {
+            key: format!("dummy_{w}x{h}"),
+            revision: 1,
+            width: w,
+            height: h,
+            rgba: Arc::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn uniforms_16_byte_alignment_and_size() {
+        use std::mem::{offset_of, size_of};
+        assert_eq!(size_of::<gpu::Uniforms>(), 304);
+        assert_eq!(size_of::<gpu::Uniforms>() % 16, 0);
+        // vec4<f32> fields must be 16-byte aligned
+        assert_eq!(offset_of!(gpu::Uniforms, crop_rect) % 16, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, canvas_bg) % 16, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, preview_fill) % 16, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, viewport_bg) % 16, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, sel_preview_rect) % 16, 0);
+        // vec2<f32> fields must be 8-byte aligned
+        assert_eq!(offset_of!(gpu::Uniforms, viewport_size) % 8, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, image_size) % 8, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, pan) % 8, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, cursor_doc_pos) % 8, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, pair_size) % 8, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, transform_layer_offset) % 8, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, transform_layer_size) % 8, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, transform_translate) % 8, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, transform_scale) % 8, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, transform_pivot) % 8, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, transform_cos_sin) % 8, 0);
+    }
+
+    #[test]
+    fn doc_px_to_ndc_maps_oversized_8000x6000_image_accurately() {
+        let prog = ImageCanvasProgram {
+            frame: Some(dummy_frame(8000, 6000)),
+            zoom: 2.0,
+            pan_x: 40.0,
+            pan_y: -30.0,
+            ..Default::default()
+        };
+        let bounds = Rectangle::new(iced::Point::new(0.0, 0.0), iced::Size::new(800.0, 600.0));
+        // Center of 8000x6000 is (4000, 3000) -> screen (400+40, 300-30) = (440, 270)
+        let center_ndc = prog.doc_px_to_ndc([4000.0, 3000.0], bounds).unwrap();
+        assert!((center_ndc[0] - (440.0 / 800.0 * 2.0 - 1.0)).abs() < 1e-4);
+        assert!((center_ndc[1] - (1.0 - 270.0 / 600.0 * 2.0)).abs() < 1e-4);
+
+        // Round-trip screen -> doc_px -> ndc at an off-center coordinate on 8000x6000
+        let screen_pt = iced::Point::new(520.0, 190.0);
+        let doc_px = prog.screen_to_image_px(screen_pt, bounds).unwrap();
+        let ndc = prog
+            .doc_px_to_ndc([doc_px[0] as f32, doc_px[1] as f32], bounds)
+            .unwrap();
+        assert!((ndc[0] - (520.0 / 800.0 * 2.0 - 1.0)).abs() < 1e-3);
+        assert!((ndc[1] - (1.0 - 190.0 / 600.0 * 2.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn middle_mouse_and_space_drag_pan_with_all_tools() {
+        let bounds = Rectangle::new(iced::Point::new(0.0, 0.0), iced::Size::new(800.0, 600.0));
+        let cursor_a = mouse::Cursor::Available(iced::Point::new(200.0, 200.0));
+        let cursor_b = mouse::Cursor::Available(iced::Point::new(235.0, 220.0));
+
+        for tool in [
+            CanvasTool::Pointer,
+            CanvasTool::Hand,
+            CanvasTool::Brush,
+            CanvasTool::HealingBrush,
+            CanvasTool::Crop,
+            CanvasTool::RotateAngle,
+            CanvasTool::Gradient,
+            CanvasTool::Transform,
+        ] {
+            let prog = ImageCanvasProgram {
+                frame: Some(dummy_frame(1000, 800)),
+                tool,
+                restrict_pan_to_hand: true,
+                ..Default::default()
+            };
+            let mut state = CanvasInteractionState::default();
+
+            // Middle-mouse drag ALWAYS pans
+            let act_press = shader::Program::update(
+                &prog,
+                &mut state,
+                &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle)),
+                bounds,
+                cursor_a,
+            );
+            assert!(act_press.is_some());
+            assert!(state.dragging, "middle click should drag for {tool:?}");
+
+            let act_move = shader::Program::update(
+                &prog,
+                &mut state,
+                &Event::Mouse(mouse::Event::CursorMoved {
+                    position: iced::Point::new(235.0, 220.0),
+                }),
+                bounds,
+                cursor_b,
+            );
+            assert!(matches!(
+                act_move.and_then(|a| a.into_inner().0),
+                Some(CanvasEvent::PanBy { dx, dy }) if (dx - 35.0).abs() < 1e-4 && (dy - 20.0).abs() < 1e-4
+            ));
+
+            shader::Program::update(
+                &prog,
+                &mut state,
+                &Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Middle)),
+                bounds,
+                cursor_b,
+            );
+            assert!(!state.dragging);
+
+            // Space + Left-drag ALWAYS pans
+            shader::Program::update(
+                &prog,
+                &mut state,
+                &Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Space),
+                    modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Space),
+                    physical_key: iced::keyboard::key::Physical::Code(
+                        iced::keyboard::key::Code::Space,
+                    ),
+                    location: iced::keyboard::Location::Standard,
+                    modifiers: Modifiers::empty(),
+                    text: None,
+                    repeat: false,
+                }),
+                bounds,
+                cursor_a,
+            );
+            assert!(state.space_pan_active);
+
+            shader::Program::update(
+                &prog,
+                &mut state,
+                &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                bounds,
+                cursor_a,
+            );
+            assert!(state.dragging, "space+left should drag for {tool:?}");
+
+            let act_space_move = shader::Program::update(
+                &prog,
+                &mut state,
+                &Event::Mouse(mouse::Event::CursorMoved {
+                    position: iced::Point::new(210.0, 190.0),
+                }),
+                bounds,
+                cursor_b,
+            );
+            assert!(matches!(
+                act_space_move.and_then(|a| a.into_inner().0),
+                Some(CanvasEvent::PanBy { dx, dy }) if (dx - 10.0).abs() < 1e-4 && (dy + 10.0).abs() < 1e-4
+            ));
+        }
+
+        // Pointer (without crop) pans on Left-drag in Editor; Brush/Transform do NOT pan on Left-drag
+        let pointer_prog = ImageCanvasProgram {
+            frame: Some(dummy_frame(1000, 800)),
+            tool: CanvasTool::Pointer,
+            restrict_pan_to_hand: true,
+            ..Default::default()
+        };
+        let mut ptr_state = CanvasInteractionState::default();
+        shader::Program::update(
+            &pointer_prog,
+            &mut ptr_state,
+            &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            cursor_a,
+        );
+        assert!(ptr_state.dragging);
+
+        for tool in [
+            CanvasTool::Brush,
+            CanvasTool::HealingBrush,
+            CanvasTool::Crop,
+            CanvasTool::RotateAngle,
+            CanvasTool::Transform,
+        ] {
+            let tool_prog = ImageCanvasProgram {
+                frame: Some(dummy_frame(1000, 800)),
+                tool,
+                restrict_pan_to_hand: true,
+                ..Default::default()
+            };
+            let mut st = CanvasInteractionState::default();
+            shader::Program::update(
+                &tool_prog,
+                &mut st,
+                &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                bounds,
+                cursor_a,
+            );
+            assert!(!st.dragging, "left click on {tool:?} must never start pan");
+        }
+    }
+
+    #[test]
+    fn window_unfocused_clears_transient_interaction_flags() {
+        let prog = ImageCanvasProgram::default();
+        let mut state = CanvasInteractionState {
+            space_pan_active: true,
+            dragging: true,
+            painting: true,
+            selecting: true,
+            cropping: true,
+            transform_dragging: true,
+            ..Default::default()
+        };
+        let bounds = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let act = shader::Program::update(
+            &prog,
+            &mut state,
+            &Event::Window(iced::window::Event::Unfocused),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+        assert!(act.is_some());
+        assert!(!state.space_pan_active);
+        assert!(!state.dragging);
+        assert!(!state.painting);
+        assert!(!state.selecting);
+        assert!(!state.cropping);
+        assert!(!state.transform_dragging);
+    }
+
+    #[test]
+    fn shift_wheel_and_horizontal_pixels_emit_pan_by() {
+        let prog = ImageCanvasProgram {
+            frame: Some(dummy_frame(1000, 800)),
+            ..Default::default()
+        };
+        let bounds = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let cursor = mouse::Cursor::Available(iced::Point::new(100.0, 100.0));
+        let mut state = CanvasInteractionState {
+            modifiers: Modifiers::SHIFT,
+            ..Default::default()
+        };
+
+        let shift_wheel = shader::Program::update(
+            &prog,
+            &mut state,
+            &Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Lines { x: 0.0, y: 1.0 },
+            }),
+            bounds,
+            cursor,
+        )
+        .and_then(|a| a.into_inner().0);
+        assert!(matches!(
+            shift_wheel,
+            Some(CanvasEvent::PanBy { dx, dy }) if dx > 10.0 && dy.abs() < 1e-5
+        ));
+
+        state.modifiers = Modifiers::empty();
+        let horiz_pixels = shader::Program::update(
+            &prog,
+            &mut state,
+            &Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels { x: -32.0, y: 2.0 },
+            }),
+            bounds,
+            cursor,
+        )
+        .and_then(|a| a.into_inner().0);
+        assert!(matches!(
+            horiz_pixels,
+            Some(CanvasEvent::PanBy { dx, dy }) if (dx + 32.0).abs() < 1e-4 && dy.abs() < 1e-5
+        ));
+    }
+
+    #[test]
+    fn healing_brush_alt_click_picks_source_and_left_drag_strokes() {
+        let prog = ImageCanvasProgram {
+            frame: Some(dummy_frame(400, 300)),
+            tool: CanvasTool::HealingBrush,
+            brush_radius_px: 12.0,
+            ..Default::default()
+        };
+        let bounds = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(400.0, 300.0));
+        let cursor = mouse::Cursor::Available(iced::Point::new(120.0, 90.0));
+        let mut state = CanvasInteractionState {
+            modifiers: Modifiers::ALT,
+            ..Default::default()
+        };
+
+        let picked = shader::Program::update(
+            &prog,
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            cursor,
+        )
+        .and_then(|a| a.into_inner().0);
+        assert!(matches!(
+            picked,
+            Some(CanvasEvent::HealingSourcePicked([x, y])) if (x - 120.0).abs() < 1e-3 && (y - 90.0).abs() < 1e-3
+        ));
+        assert!(state.healing_source_px.is_some());
+
+        let (lines, _) = prog.build_vector_overlay(&state, cursor, bounds);
+        assert!(!lines.is_empty(), "expected healing source '+' crosshair");
+
+        state.modifiers = Modifiers::empty();
+        let begin = shader::Program::update(
+            &prog,
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            cursor,
+        )
+        .and_then(|a| a.into_inner().0);
+        assert!(matches!(begin, Some(CanvasEvent::StrokeBegin(_))));
+        assert!(state.painting);
+    }
+
+    #[test]
+    fn transform_handle_hit_test_and_drag_math() {
+        let tp = TransformPreview {
+            base_frame: Some(dummy_frame(800, 600)),
+            layer_frame: dummy_frame(200, 100),
+            layer_offset: [100, 100],
+            layer_size: [200, 100],
+            spec: LayerTransformSpec::default(),
+        };
+
+        let handles = transform_handle_positions(&tp, 24.0);
+        // External rotate handle is above Top midpoint (200, 100 - 24)
+        assert_eq!(
+            hit_test_transform_handle(&tp, handles[8].1, 8.0, 24.0),
+            Some(TransformDragMode::Rotate)
+        );
+        // All 8 resize handles hit cleanly
+        for (h, pos) in &handles[..8] {
+            assert_eq!(
+                hit_test_transform_handle(&tp, *pos, 8.0, 24.0),
+                Some(TransformDragMode::Scale(*h))
+            );
+        }
+        // Inside OBB hits Move
+        assert_eq!(
+            hit_test_transform_handle(&tp, [200.0, 150.0], 8.0, 24.0),
+            Some(TransformDragMode::Move)
+        );
+        // Outside OBB & handles hits None
+        assert_eq!(
+            hit_test_transform_handle(&tp, [50.0, 50.0], 8.0, 24.0),
+            None
+        );
+
+        // Scale BottomRight with Shift aspect-lock & non-Alt (TopLeft stays pinned at [100, 100])
+        let scaled = apply_transform_drag(
+            &tp,
+            tp.spec,
+            TransformDragMode::Scale(TransformHandle::BottomRight),
+            [300.0, 200.0],
+            [400.0, 220.0],
+            true,
+            false,
+        );
+        assert!((scaled.scale_x - 1.5).abs() < 1e-4);
+        assert!((scaled.scale_y - 1.5).abs() < 1e-4);
+        let tl_after = transform_local_to_doc([0.0, 0.0], tp.layer_offset, tp.layer_size, scaled);
+        assert!((tl_after[0] - 100.0).abs() < 1e-3);
+        assert!((tl_after[1] - 100.0).abs() < 1e-3);
+
+        // Scale BottomRight with Alt (center-scale, translate stays 0)
+        let center_scaled = apply_transform_drag(
+            &tp,
+            tp.spec,
+            TransformDragMode::Scale(TransformHandle::BottomRight),
+            [300.0, 200.0],
+            [350.0, 225.0],
+            false,
+            true,
+        );
+        assert!((center_scaled.translate_x).abs() < 1e-5);
+        assert!((center_scaled.translate_y).abs() < 1e-5);
+        assert!((center_scaled.scale_x - 1.5).abs() < 1e-4);
+        assert!((center_scaled.scale_y - 1.5).abs() < 1e-4);
+
+        // Enter emits TransformCommit, Esc emits TransformCancel
+        let prog = ImageCanvasProgram {
+            frame: Some(dummy_frame(800, 600)),
+            tool: CanvasTool::Transform,
+            transform_preview: Some(tp),
+            ..Default::default()
+        };
+        let bounds = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let mut st = CanvasInteractionState::default();
+        let enter_ev = shader::Program::update(
+            &prog,
+            &mut st,
+            &Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter),
+                modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter),
+                physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::Enter),
+                location: iced::keyboard::Location::Standard,
+                modifiers: Modifiers::empty(),
+                text: None,
+                repeat: false,
+            }),
+            bounds,
+            mouse::Cursor::Unavailable,
+        )
+        .and_then(|a| a.into_inner().0);
+        assert!(matches!(enter_ev, Some(CanvasEvent::TransformCommit)));
+
+        let esc_ev = shader::Program::update(
+            &prog,
+            &mut st,
+            &Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                physical_key: iced::keyboard::key::Physical::Code(
+                    iced::keyboard::key::Code::Escape,
+                ),
+                location: iced::keyboard::Location::Standard,
+                modifiers: Modifiers::empty(),
+                text: None,
+                repeat: false,
+            }),
+            bounds,
+            mouse::Cursor::Unavailable,
+        )
+        .and_then(|a| a.into_inner().0);
+        assert!(matches!(esc_ev, Some(CanvasEvent::TransformCancel)));
     }
 }

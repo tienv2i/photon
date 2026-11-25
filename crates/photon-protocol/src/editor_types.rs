@@ -21,7 +21,7 @@ pub(crate) fn default_opaque_alpha() -> u8 {
     255
 }
 
-fn default_brush_hardness() -> f32 {
+pub(crate) fn default_brush_hardness() -> f32 {
     0.85
 }
 
@@ -334,6 +334,19 @@ pub enum MoveDirection {
     Down,
 }
 
+/// Healing brush operating mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HealingMode {
+    #[default]
+    Spot,
+    Sampled,
+}
+
+impl HealingMode {
+    pub const ALL: [Self; 2] = [Self::Spot, Self::Sampled];
+}
+
 /// Interactive live stroke kind for `EditorLiveStrokeBegin`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -354,6 +367,17 @@ pub enum LiveStrokeKind {
         radius: f32,
         #[serde(default = "default_half_f32")]
         strength: f32,
+    },
+    Healing {
+        #[serde(default)]
+        mode: HealingMode,
+        radius: f32,
+        #[serde(default = "default_brush_hardness")]
+        hardness: f32,
+        #[serde(default = "default_one_f32")]
+        strength: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<[f64; 2]>,
     },
 }
 
@@ -418,6 +442,7 @@ pub enum LayerEffect {
     Curves(CurvesAdjustment),
     Blur { radius: f32 },
     Sharpen { amount: f32 },
+    Denoise { strength: f32, detail_preserve: f32 },
     Invert,
     Desaturate,
     Sepia,
@@ -432,6 +457,7 @@ impl LayerEffect {
             Self::Curves(_) => "Curves",
             Self::Blur { .. } => "Gaussian Blur",
             Self::Sharpen { .. } => "Sharpen",
+            Self::Denoise { .. } => "Denoise",
             Self::Invert => "Invert",
             Self::Desaturate => "Black & White",
             Self::Sepia => "Sepia",
@@ -443,10 +469,58 @@ impl LayerEffect {
             self,
             Self::Blur { .. }
                 | Self::Sharpen { .. }
+                | Self::Denoise { .. }
                 | Self::Invert
                 | Self::Desaturate
                 | Self::Sepia
         )
+    }
+}
+
+/// 2D affine transform parameters applied to a layer or selection region.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LayerTransformSpec {
+    pub translate_x: f32,
+    pub translate_y: f32,
+    #[serde(default = "default_one_f32")]
+    pub scale_x: f32,
+    #[serde(default = "default_one_f32")]
+    pub scale_y: f32,
+    pub rotation_deg: f32,
+    #[serde(default = "default_half_f32")]
+    pub pivot_x: f32,
+    #[serde(default = "default_half_f32")]
+    pub pivot_y: f32,
+    pub flip_h: bool,
+    pub flip_v: bool,
+}
+
+impl Default for LayerTransformSpec {
+    fn default() -> Self {
+        Self {
+            translate_x: 0.0,
+            translate_y: 0.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            rotation_deg: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
+            flip_h: false,
+            flip_v: false,
+        }
+    }
+}
+
+impl LayerTransformSpec {
+    pub fn is_identity(&self) -> bool {
+        self.translate_x.abs() < 1e-4
+            && self.translate_y.abs() < 1e-4
+            && (self.scale_x - 1.0).abs() < 1e-4
+            && (self.scale_y - 1.0).abs() < 1e-4
+            && self.rotation_deg.abs() < 1e-4
+            && !self.flip_h
+            && !self.flip_v
     }
 }
 
@@ -561,4 +635,186 @@ pub enum SelectionModifyOp {
     Smooth(u32),
     Grow(u8),
     Similar(u8),
+}
+
+/// Capabilities declared by a Photon external plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginCapability {
+    EditorFilter,
+    BrowserAction,
+}
+
+/// Parameter widget/value kind in a plugin parameter schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginParamKind {
+    Float,
+    Int,
+    Bool,
+    Select,
+    Color,
+}
+
+/// Typed runtime value for a plugin parameter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum PluginParamValue {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Color([u8; 3]),
+    Select(String),
+}
+
+/// Declarative parameter specification in `plugin.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginParamSpec {
+    pub key: String,
+    pub label: String,
+    pub kind: PluginParamKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<PluginParamValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Parsed `plugin.json` manifest for a process-isolated NDJSON plugin.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginManifest {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub author: String,
+    pub entry: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub capabilities: Vec<PluginCapability>,
+    #[serde(default)]
+    pub params: Vec<PluginParamSpec>,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Published summary of an installed plugin in `UiStateMeta`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInfo {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub author: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub capabilities: Vec<PluginCapability>,
+    #[serde(default)]
+    pub params: Vec<PluginParamSpec>,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    #[serde(default)]
+    pub install_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl PluginInfo {
+    pub fn from_manifest(
+        manifest: &PluginManifest,
+        enabled: bool,
+        install_dir: impl Into<String>,
+        error: Option<String>,
+    ) -> Self {
+        Self {
+            id: manifest.id.clone(),
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            description: manifest.description.clone(),
+            author: manifest.author.clone(),
+            enabled,
+            capabilities: manifest.capabilities.clone(),
+            params: manifest.params.clone(),
+            permissions: manifest.permissions.clone(),
+            install_dir: install_dir.into(),
+            error,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transform_spec_defaults_to_identity() {
+        let spec = LayerTransformSpec::default();
+        assert_eq!(spec.scale_x, 1.0);
+        assert_eq!(spec.scale_y, 1.0);
+        assert_eq!(spec.pivot_x, 0.5);
+        assert_eq!(spec.pivot_y, 0.5);
+        assert!(spec.is_identity());
+
+        let parsed: LayerTransformSpec = serde_json::from_str(r#"{"rotationDeg":15.0}"#).unwrap();
+        assert_eq!(parsed.scale_x, 1.0);
+        assert_eq!(parsed.pivot_x, 0.5);
+        assert!(!parsed.is_identity());
+    }
+
+    #[test]
+    fn plugin_manifest_and_healing_types_roundtrip() {
+        let json = r#"{
+            "id": "com.example.demo",
+            "name": "Demo",
+            "version": "1.0.0",
+            "entry": "run.py",
+            "capabilities": ["editor_filter"],
+            "params": [
+                {"key": "strength", "label": "Strength", "kind": "float", "default": 0.5, "min": 0.0, "max": 1.0},
+                {"key": "invert", "label": "Invert", "kind": "bool", "default": true}
+            ],
+            "permissions": ["read_image"]
+        }"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let info = PluginInfo::from_manifest(&manifest, true, "/tmp/demo", None);
+        assert_eq!(info.id, "com.example.demo");
+        assert_eq!(info.params.len(), 2);
+        assert_eq!(info.params[0].default, Some(PluginParamValue::Float(0.5)));
+        assert_eq!(info.params[1].default, Some(PluginParamValue::Bool(true)));
+
+        let stroke = LiveStrokeKind::Healing {
+            mode: HealingMode::Sampled,
+            radius: 12.0,
+            hardness: 0.7,
+            strength: 0.9,
+            source: Some([10.0, 20.0]),
+        };
+        let round: LiveStrokeKind =
+            serde_json::from_str(&serde_json::to_string(&stroke).unwrap()).unwrap();
+        assert_eq!(round, stroke);
+
+        let effect = LayerEffect::Denoise {
+            strength: 0.4,
+            detail_preserve: 0.6,
+        };
+        assert!(effect.is_filter());
+        assert_eq!(effect.default_name(), "Denoise");
+    }
 }

@@ -8,15 +8,15 @@ use std::sync::Arc;
 use image::{Rgba, RgbaImage};
 use photon_protocol::{
     ApplyTarget, BrushSettings, CanvasAnchor, ColorAdjustments, ColorBalanceAdjustment,
-    CurvesAdjustment, DrawShapeKind, FlipAxis, GradientColorMode, GradientKind, HsvAdjustment,
-    LiquifyMode, LiveStrokeKind, ResizeFilter, ResizeMode, SelectionBooleanOp, SelectionModifyOp,
-    SelectionShape, ShapeFillMode, UiText, VectorPathNode,
+    CurvesAdjustment, DrawShapeKind, FlipAxis, GradientColorMode, GradientKind, HealingMode,
+    HsvAdjustment, LayerTransformSpec, LiquifyMode, LiveStrokeKind, ResizeFilter, ResizeMode,
+    SelectionBooleanOp, SelectionModifyOp, SelectionShape, ShapeFillMode, UiText, VectorPathNode,
 };
 
 use crate::{
     ImageError, Layer, LayerOperation, LayerStack, MAX_DOCUMENT_PIXELS, MAX_HISTORY_STEPS,
     MAX_IMAGE_DIMENSION, MAX_SNAPSHOT_BYTES, SelectionMask, blend_layer_onto, codec,
-    composite_stack, decode_rgba, drawing, liquify, pixels, rasterize_shape,
+    composite_stack, decode_rgba, drawing, healing, liquify, pixels, rasterize_shape,
 };
 
 #[derive(Debug, Clone)]
@@ -105,6 +105,24 @@ pub enum EditOp {
         fg_color: [u8; 3],
         bg_color: [u8; 3],
         opacity: f32,
+        reverse: bool,
+        dither: bool,
+    },
+    Healing {
+        points: Vec<[f64; 2]>,
+        mode: HealingMode,
+        radius: f32,
+        strength: f32,
+        source: Option<[f64; 2]>,
+        brush: BrushSettings,
+    },
+    Denoise {
+        strength: f32,
+        detail_preserve: f32,
+    },
+    TransformLayer {
+        layer_id: Option<u64>,
+        transform: LayerTransformSpec,
     },
     Layer(LayerOperation),
 }
@@ -153,6 +171,9 @@ impl EditOp {
             Self::DrawShape { .. } => UiText::new("op_draw_shape"),
             Self::FloodFill { .. } => UiText::new("op_flood_fill"),
             Self::DrawGradient { .. } => UiText::new("op_gradient"),
+            Self::Healing { .. } => UiText::new("op_healing"),
+            Self::Denoise { .. } => UiText::new("op_denoise"),
+            Self::TransformLayer { .. } => UiText::new("op_transform_layer"),
             Self::Layer(op) => op.ui_label(),
         }
     }
@@ -169,6 +190,7 @@ struct Step {
 struct LiveStrokeSession {
     before_stack: LayerStack,
     stroke: LiveStrokeKind,
+    begin_point: [f64; 2],
     last_point: [f64; 2],
     editing_mask: bool,
 }
@@ -194,8 +216,44 @@ pub struct EditorDocument {
 
 impl EditorDocument {
     pub fn open(path: PathBuf) -> Result<Self, ImageError> {
-        let rgba = decode_rgba(&path)?;
-        Ok(Self::from_rgba(path, rgba))
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        match ext.as_deref() {
+            Some("ora") => {
+                let stack = crate::ora::decode_ora_stack(&path)?;
+                Ok(Self::from_stack(path, stack))
+            }
+            Some("psd") => {
+                let stack = codec::decode_psd_stack(&path)?;
+                Ok(Self::from_stack(path, stack))
+            }
+            _ => {
+                let rgba = decode_rgba(&path)?;
+                Ok(Self::from_rgba(path, rgba))
+            }
+        }
+    }
+
+    pub fn from_stack(path: PathBuf, stack: LayerStack) -> Self {
+        let composite = composite_stack(&stack);
+        Self {
+            save_path: path.clone(),
+            source_path: path,
+            original: Arc::clone(&composite),
+            original_stack: stack.clone(),
+            current: composite,
+            stack,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            saved_at_depth: Some(0),
+            pixel_revision: 1,
+            original_revision: 1,
+            selection_revision: 1,
+            history_trimmed: false,
+            live_stroke: None,
+        }
     }
 
     pub fn from_rgba(path: PathBuf, rgba: RgbaImage) -> Self {
@@ -353,6 +411,14 @@ impl EditorDocument {
             } => {
                 validate_liquify(&[[x, y]], radius, strength)?;
             }
+            LiveStrokeKind::Healing {
+                radius,
+                hardness,
+                strength,
+                ..
+            } => {
+                validate_healing(&[[x, y]], radius, hardness, strength)?;
+            }
         }
         let active = self.stack.active_layer();
         if active.locked {
@@ -368,6 +434,7 @@ impl EditorDocument {
         self.live_stroke = Some(LiveStrokeSession {
             before_stack,
             stroke,
+            begin_point: [x, y],
             last_point: [x, y],
             editing_mask,
         });
@@ -422,6 +489,7 @@ impl EditorDocument {
                 }
             }
             LiveStrokeKind::Liquify { .. } => UiText::new("op_liquify"),
+            LiveStrokeKind::Healing { .. } => UiText::new("op_healing"),
         };
         let active = self.stack.active_layer();
         let op = EditOp::LiveStrokeCommit {
@@ -440,7 +508,14 @@ impl EditorDocument {
             return;
         };
         let stroke = session.stroke;
+        let begin_point = session.begin_point;
         let editing_mask = session.editing_mask;
+        let before_pixels = Arc::clone(&session.before_stack.active_layer().pixels);
+        let sel_snapshot = self
+            .stack
+            .selection
+            .has_selection()
+            .then(|| self.stack.selection.clone());
         let active = self.stack.active_layer_mut();
         let ox = f64::from(active.offset_x);
         let oy = f64::from(active.offset_y);
@@ -495,6 +570,40 @@ impl EditorDocument {
                     strength,
                 );
                 active.pixels = Arc::new(warped);
+            }
+            LiveStrokeKind::Healing {
+                mode,
+                radius,
+                hardness,
+                strength,
+                source,
+            } => {
+                let local_pts: Vec<[f64; 2]> =
+                    points.iter().map(|[x, y]| [x - ox, y - oy]).collect();
+                let seg_source = source.map(|[sx, sy]| {
+                    let dx = points[0][0] - begin_point[0];
+                    let dy = points[0][1] - begin_point[1];
+                    [sx + dx - ox, sy + dy - oy]
+                });
+                let brush = BrushSettings {
+                    hardness,
+                    ..BrushSettings::default()
+                };
+                let sel_ref = sel_snapshot
+                    .as_ref()
+                    .map(|s| (s, active.offset_x, active.offset_y));
+                let healed = healing::healing_stroke_with_reference(
+                    &active.pixels,
+                    &before_pixels,
+                    &local_pts,
+                    mode,
+                    radius,
+                    strength,
+                    seg_source,
+                    brush,
+                    sel_ref,
+                );
+                active.pixels = Arc::new(healed);
             }
         }
     }
@@ -592,7 +701,11 @@ impl EditorDocument {
         let dest = target
             .map(PathBuf::from)
             .unwrap_or_else(|| self.save_path.clone());
-        let saved = codec::save_to(&self.current, &dest)?;
+        let saved = if codec::SaveFormat::from_path(&dest) == Some(codec::SaveFormat::Ora) {
+            crate::ora::encode_ora_stack(&self.stack, &dest)?
+        } else {
+            codec::save_to(&self.current, &dest)?
+        };
         self.save_path = saved.clone();
         self.saved_at_depth = Some(self.undo_stack.len());
         Ok(saved)
@@ -849,6 +962,44 @@ impl EditorDocument {
                 let dy = end[1] - start[1];
                 Ok(dx * dx + dy * dy < 1e-6)
             }
+            EditOp::Healing {
+                points,
+                radius,
+                strength,
+                brush,
+                ..
+            } => {
+                validate_healing(points, *radius, brush.hardness, *strength)?;
+                Ok(false)
+            }
+            EditOp::Denoise {
+                strength,
+                detail_preserve,
+            } => {
+                if !strength.is_finite() || !detail_preserve.is_finite() {
+                    return Err(ImageError::InvalidEdit(
+                        "denoise parameters must be finite".into(),
+                    ));
+                }
+                Ok(*strength <= 1e-4)
+            }
+            EditOp::TransformLayer { transform, .. } => {
+                let vals = [
+                    transform.translate_x,
+                    transform.translate_y,
+                    transform.scale_x,
+                    transform.scale_y,
+                    transform.rotation_deg,
+                    transform.pivot_x,
+                    transform.pivot_y,
+                ];
+                if vals.iter().any(|v| !v.is_finite()) {
+                    return Err(ImageError::InvalidEdit(
+                        "transform parameters must be finite".into(),
+                    ));
+                }
+                Ok(transform.is_identity())
+            }
         }
     }
 
@@ -860,6 +1011,7 @@ impl EditorDocument {
                 EditOp::AdjustHsv(_) => "HSV Adjustment",
                 EditOp::ColorBalance(_) => "Color Balance",
                 EditOp::AdjustCurves(_) => "Curves",
+                EditOp::Denoise { .. } => "Denoise",
                 _ => "Layer",
             }
             .to_owned();
@@ -1078,6 +1230,132 @@ impl EditorDocument {
                 *strength,
             );
             self.stack.active_layer_mut().pixels = Arc::new(next);
+            return Ok(());
+        }
+
+        // Healing always targets the active layer and respects SelectionMask.
+        if let EditOp::Healing {
+            points,
+            mode,
+            radius,
+            strength,
+            source,
+            brush,
+        } = op
+        {
+            let active = self.stack.active_layer();
+            if active.locked {
+                return Err(ImageError::coded("layer_locked"));
+            }
+            if !active.visible {
+                return Err(ImageError::coded("layer_hidden"));
+            }
+            let sel_snapshot = self
+                .stack
+                .selection
+                .has_selection()
+                .then(|| self.stack.selection.clone());
+            let ox = f64::from(active.offset_x);
+            let oy = f64::from(active.offset_y);
+            let local_pts: Vec<[f64; 2]> = points.iter().map(|[x, y]| [x - ox, y - oy]).collect();
+            let local_src = source.map(|[sx, sy]| [sx - ox, sy - oy]);
+            let sel_ref = sel_snapshot
+                .as_ref()
+                .map(|s| (s, active.offset_x, active.offset_y));
+            let next = healing::healing_stroke(
+                &active.pixels,
+                &local_pts,
+                *mode,
+                *radius,
+                *strength,
+                local_src,
+                *brush,
+                sel_ref,
+            );
+            self.stack.active_layer_mut().pixels = Arc::new(next);
+            return Ok(());
+        }
+
+        // TransformLayer supports full layer affine transform or active selection extract+transform.
+        if let EditOp::TransformLayer {
+            layer_id,
+            transform,
+        } = op
+        {
+            let target_id = layer_id.unwrap_or(self.stack.active_layer_id);
+            let Some(idx) = self.stack.index_of(target_id) else {
+                return Err(ImageError::coded("layer_not_found"));
+            };
+            if self.stack.layers[idx].locked {
+                return Err(ImageError::coded("layer_locked"));
+            }
+            if self.stack.selection.has_selection() && target_id == self.stack.active_layer_id {
+                self.transform_selected_pixels(idx, transform);
+                self.selection_revision += 1;
+            } else {
+                let layer = &mut self.stack.layers[idx];
+                let (lw, lh) = layer.dimensions();
+                let (next_px, dx, dy) = pixels::transform_rgba_affine(&layer.pixels, transform);
+                layer.pixels = Arc::new(next_px);
+                layer.offset_x += dx;
+                layer.offset_y += dy;
+                if let Some(orig) = &layer.original {
+                    let (next_orig, _, _) = pixels::transform_rgba_affine(orig, transform);
+                    layer.original = Some(Arc::new(next_orig));
+                }
+                if let Some(mask) = &layer.mask
+                    && mask.len() == (lw as usize) * (lh as usize)
+                {
+                    if layer.mask_linked {
+                        let (next_mask, _, _, _, _) =
+                            pixels::transform_mask_affine(mask, lw, lh, transform);
+                        layer.mask = Some(Arc::new(next_mask));
+                    } else {
+                        layer.mask_offset_x -= dx;
+                        layer.mask_offset_y -= dy;
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        if let EditOp::Denoise {
+            strength,
+            detail_preserve,
+        } = op
+        {
+            let sel_snapshot = self
+                .stack
+                .selection
+                .has_selection()
+                .then(|| self.stack.selection.clone());
+            if target == ApplyTarget::ActiveLayer || self.is_simple_single_layer() {
+                let active = self.stack.active_layer();
+                if active.locked {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                if !active.visible {
+                    return Err(ImageError::coded("layer_hidden"));
+                }
+                let sel_ref = sel_snapshot
+                    .as_ref()
+                    .map(|s| (s, active.offset_x, active.offset_y));
+                let next =
+                    pixels::denoise_rgba(&active.pixels, *strength, *detail_preserve, sel_ref);
+                self.stack.active_layer_mut().pixels = Arc::new(next);
+            } else {
+                for layer in &mut self.stack.layers {
+                    if layer.locked || !layer.visible || layer.effect.is_some() {
+                        continue;
+                    }
+                    let sel_ref = sel_snapshot
+                        .as_ref()
+                        .map(|s| (s, layer.offset_x, layer.offset_y));
+                    let next =
+                        pixels::denoise_rgba(&layer.pixels, *strength, *detail_preserve, sel_ref);
+                    layer.pixels = Arc::new(next);
+                }
+            }
             return Ok(());
         }
 
@@ -1429,6 +1707,145 @@ impl EditorDocument {
             ApplyTarget::WholeImage,
         )
     }
+
+    fn transform_selected_pixels(&mut self, layer_idx: usize, transform: &LayerTransformSpec) {
+        let Some([bx, by, bw, bh]) = self.stack.selection.bounds else {
+            return;
+        };
+        if bw == 0 || bh == 0 {
+            return;
+        }
+        let layer = &mut self.stack.layers[layer_idx];
+        let (lw, lh) = layer.dimensions();
+        let ox = layer.offset_x;
+        let oy = layer.offset_y;
+
+        let mut extracted = RgbaImage::from_pixel(bw, bh, Rgba([0, 0, 0, 0]));
+        let mut base = (*layer.pixels).clone();
+
+        for sy in 0..bh {
+            let cy = by as i32 + sy as i32;
+            let ly = cy - oy;
+            if ly < 0 || ly >= lh as i32 {
+                continue;
+            }
+            for sx in 0..bw {
+                let cx = bx as i32 + sx as i32;
+                let lx = cx - ox;
+                if lx < 0 || lx >= lw as i32 {
+                    continue;
+                }
+                let sel_a = self.stack.selection.alpha_at(cx, cy);
+                if sel_a == 0 {
+                    continue;
+                }
+                let p = base.get_pixel(lx as u32, ly as u32).0;
+                let ex_a = ((u16::from(p[3]) * u16::from(sel_a) + 127) / 255) as u8;
+                extracted.put_pixel(sx, sy, Rgba([p[0], p[1], p[2], ex_a]));
+
+                let keep = 255 - u16::from(sel_a);
+                let rem_a = ((u16::from(p[3]) * keep + 127) / 255) as u8;
+                let dst_px = base.get_pixel_mut(lx as u32, ly as u32);
+                if rem_a == 0 {
+                    dst_px.0 = [0, 0, 0, 0];
+                } else {
+                    dst_px.0[3] = rem_a;
+                }
+            }
+        }
+
+        let (transformed, dx, dy) = pixels::transform_rgba_affine(&extracted, transform);
+        let tx = bx as i32 + dx;
+        let ty = by as i32 + dy;
+        let (tw, th) = transformed.dimensions();
+
+        // Expand layer bounds if the transformed selection extends outside existing layer bounds.
+        let new_ox = ox.min(tx);
+        let new_oy = oy.min(ty);
+        let new_right = (ox + lw as i32).max(tx + tw as i32);
+        let new_bottom = (oy + lh as i32).max(ty + th as i32);
+        let new_w = (new_right - new_ox).max(1) as u32;
+        let new_h = (new_bottom - new_oy).max(1) as u32;
+
+        let mut merged = RgbaImage::from_pixel(new_w, new_h, Rgba([0, 0, 0, 0]));
+        image::imageops::replace(
+            &mut merged,
+            &base,
+            i64::from(ox - new_ox),
+            i64::from(oy - new_oy),
+        );
+        let place_x = tx - new_ox;
+        let place_y = ty - new_oy;
+        for py in 0..th {
+            let my = place_y + py as i32;
+            if my < 0 || my >= new_h as i32 {
+                continue;
+            }
+            for px in 0..tw {
+                let mx = place_x + px as i32;
+                if mx < 0 || mx >= new_w as i32 {
+                    continue;
+                }
+                let src_px = transformed.get_pixel(px, py).0;
+                if src_px[3] == 0 {
+                    continue;
+                }
+                let dst_px = merged.get_pixel_mut(mx as u32, my as u32);
+                let sa = f32::from(src_px[3]) / 255.0;
+                let da = f32::from(dst_px.0[3]) / 255.0;
+                let out_a = sa + da * (1.0 - sa);
+                if out_a > 1e-5 {
+                    let mix = |s: u8, d: u8| -> u8 {
+                        ((f32::from(s) * sa + f32::from(d) * da * (1.0 - sa)) / out_a)
+                            .round()
+                            .clamp(0.0, 255.0) as u8
+                    };
+                    *dst_px = Rgba([
+                        mix(src_px[0], dst_px.0[0]),
+                        mix(src_px[1], dst_px.0[1]),
+                        mix(src_px[2], dst_px.0[2]),
+                        (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
+                    ]);
+                }
+            }
+        }
+        layer.pixels = Arc::new(merged);
+        layer.offset_x = new_ox;
+        layer.offset_y = new_oy;
+
+        // Transform the selection mask to match the transformed pixels.
+        let (cw, ch) = (self.stack.canvas_width, self.stack.canvas_height);
+        let mut sel_patch = vec![0u8; (bw as usize) * (bh as usize)];
+        for sy in 0..bh {
+            for sx in 0..bw {
+                sel_patch[(sy * bw + sx) as usize] = self
+                    .stack
+                    .selection
+                    .alpha_at(bx as i32 + sx as i32, by as i32 + sy as i32);
+            }
+        }
+        let (t_mask, mw, mh, mdx, mdy) =
+            pixels::transform_mask_affine(&sel_patch, bw, bh, transform);
+        let mut next_canvas_sel = vec![0u8; (cw as usize) * (ch as usize)];
+        let mtx = bx as i32 + mdx;
+        let mty = by as i32 + mdy;
+        for py in 0..mh {
+            let cy = mty + py as i32;
+            if cy < 0 || cy >= ch as i32 {
+                continue;
+            }
+            for px in 0..mw {
+                let cx = mtx + px as i32;
+                if cx < 0 || cx >= cw as i32 {
+                    continue;
+                }
+                next_canvas_sel[(cy as usize) * (cw as usize) + (cx as usize)] =
+                    t_mask[(py * mw + px) as usize];
+            }
+        }
+        self.stack.selection.alpha = Arc::new(next_canvas_sel);
+        self.stack.selection.recompute_bounds();
+    }
 }
 
 fn render_drawing_op(
@@ -1514,6 +1931,8 @@ fn render_drawing_op(
             fg_color,
             bg_color,
             opacity,
+            reverse,
+            dither,
         } => {
             let fg = if is_mask {
                 to_gray(*fg_color)
@@ -1534,6 +1953,9 @@ fn render_drawing_op(
                 fg,
                 bg,
                 *opacity,
+                *reverse,
+                *dither,
+                selection.map(|s| (s, offset_x, offset_y)),
             )
         }
         _ => src.clone(),
@@ -1845,6 +2267,38 @@ fn validate_liquify(points: &[[f64; 2]], radius: f32, strength: f32) -> Result<(
     Ok(())
 }
 
+fn validate_healing(
+    points: &[[f64; 2]],
+    radius: f32,
+    hardness: f32,
+    strength: f32,
+) -> Result<(), ImageError> {
+    if points.is_empty() {
+        return Err(ImageError::InvalidEdit("healing stroke is empty".into()));
+    }
+    if points.iter().any(|[x, y]| !x.is_finite() || !y.is_finite()) {
+        return Err(ImageError::InvalidEdit(
+            "healing stroke contains non-finite coordinates".into(),
+        ));
+    }
+    if !radius.is_finite() || !(0.5..=4096.0).contains(&radius) {
+        return Err(ImageError::InvalidEdit(format!(
+            "healing radius must be in 0.5..=4096, got {radius}"
+        )));
+    }
+    if !hardness.is_finite() || !(0.0..=1.0).contains(&hardness) {
+        return Err(ImageError::InvalidEdit(format!(
+            "healing hardness must be in 0..=1, got {hardness}"
+        )));
+    }
+    if !strength.is_finite() || !(0.05..=1.0).contains(&strength) {
+        return Err(ImageError::InvalidEdit(format!(
+            "healing strength must be in 0.05..=1.0, got {strength}"
+        )));
+    }
+    Ok(())
+}
+
 pub fn render_single_op(
     src: &RgbaImage,
     baseline: Option<&RgbaImage>,
@@ -1932,6 +2386,21 @@ pub fn render_single_op(
         EditOp::DrawShape { .. } | EditOp::FloodFill { .. } | EditOp::DrawGradient { .. } => {
             render_drawing_op(src, op, 0, 0, None, false)
         }
+        EditOp::Healing {
+            points,
+            mode,
+            radius,
+            strength,
+            source,
+            brush,
+        } => healing::healing_stroke(
+            src, points, *mode, *radius, *strength, *source, *brush, None,
+        ),
+        EditOp::Denoise {
+            strength,
+            detail_preserve,
+        } => pixels::denoise_rgba(src, *strength, *detail_preserve, None),
+        EditOp::TransformLayer { transform, .. } => pixels::transform_rgba_affine(src, transform).0,
         EditOp::Layer(_) => src.clone(),
     };
     Ok(out)
@@ -2480,5 +2949,284 @@ mod tests {
         assert!(doc.selection().has_selection());
         assert!(doc.undo().unwrap());
         assert!(!doc.selection().has_selection());
+    }
+
+    #[test]
+    fn healing_spot_and_sampled_respect_selection_mask() {
+        // Uniform background [100, 140, 180] with a bright red blemish at (16, 16).
+        let mut img = RgbaImage::from_pixel(40, 40, Rgba([100, 140, 180, 255]));
+        for y in 14..=18 {
+            for x in 14..=18 {
+                img.put_pixel(x, y, Rgba([250, 20, 20, 255]));
+            }
+        }
+        // Source region at (6, 6) has subtle texture.
+        img.put_pixel(6, 6, Rgba([40, 50, 60, 255]));
+        img.put_pixel(7, 6, Rgba([52, 62, 72, 255]));
+
+        let spot = healing::healing_stroke(
+            &img,
+            &[[16.0, 16.0]],
+            HealingMode::Spot,
+            5.0,
+            1.0,
+            None,
+            BrushSettings::default(),
+            None,
+        );
+        let healed_px = spot.get_pixel(16, 16).0;
+        assert!(
+            healed_px[0] < 130 && healed_px[2] > 150,
+            "spot heal failed: {healed_px:?}"
+        );
+
+        // Sampled healing with SelectionMask isolating right half (x >= 16).
+        let mut sel = SelectionMask::empty(40, 40);
+        let mask: Vec<u8> = (0..40 * 40)
+            .map(|i| if (i % 40) >= 16 { 255 } else { 0 })
+            .collect();
+        sel.combine(&mask, SelectionBooleanOp::Replace);
+
+        let sampled = healing::healing_stroke(
+            &img,
+            &[[16.0, 16.0]],
+            HealingMode::Sampled,
+            5.0,
+            1.0,
+            Some([6.0, 6.0]),
+            BrushSettings::default(),
+            Some((&sel, 0, 0)),
+        );
+        // Outside selection (14, 16) stays untouched red; inside selection (17, 16) is healed.
+        assert_eq!(sampled.get_pixel(14, 16).0, [250, 20, 20, 255]);
+        assert!(sampled.get_pixel(17, 16).0[0] < 140);
+    }
+
+    #[test]
+    fn denoise_selection_border_has_zero_exterior_bleed() {
+        // Left half (x < 16) is bright red [255, 0, 0]; right half (x >= 16) is dark [20, 20, 20]
+        // with a small noisy pixel at (17, 16).
+        let mut img = RgbaImage::from_pixel(32, 32, Rgba([20, 20, 20, 255]));
+        for y in 0..32 {
+            for x in 0..16 {
+                img.put_pixel(x, y, Rgba([255, 0, 0, 255]));
+            }
+        }
+        img.put_pixel(17, 16, Rgba([45, 45, 45, 255]));
+
+        let mut sel = SelectionMask::empty(32, 32);
+        let mask: Vec<u8> = (0..32 * 32)
+            .map(|i| if (i % 32) >= 16 { 255 } else { 0 })
+            .collect();
+        sel.combine(&mask, SelectionBooleanOp::Replace);
+
+        let denoised = pixels::denoise_rgba(&img, 1.0, 0.2, Some((&sel, 0, 0)));
+        // Exterior red stays untouched
+        assert_eq!(denoised.get_pixel(15, 16).0, [255, 0, 0, 255]);
+        // Border pixel inside selection (16, 16) must have ZERO red bleed from (15, 16)!
+        let border_px = denoised.get_pixel(16, 16).0;
+        assert!(
+            border_px[0] <= 30 && border_px[1] >= 18 && border_px[2] >= 18,
+            "red halo bled across selection border: {border_px:?}"
+        );
+    }
+
+    #[test]
+    fn affine_transform_and_document_selection_transform_and_excluding_composite() {
+        let mut img = RgbaImage::from_pixel(20, 20, Rgba([10, 10, 10, 255]));
+        for y in 4..8 {
+            for x in 4..8 {
+                img.put_pixel(x, y, Rgba([200, 100, 50, 255]));
+            }
+        }
+        let spec = LayerTransformSpec {
+            translate_x: 5.0,
+            translate_y: 3.0,
+            scale_x: 2.0,
+            scale_y: 2.0,
+            rotation_deg: 0.0,
+            pivot_x: 0.5,
+            pivot_y: 0.5,
+            flip_h: false,
+            flip_v: false,
+        };
+        let (scaled, dx, dy) = pixels::transform_rgba_affine(&img, &spec);
+        assert_eq!(scaled.dimensions(), (40, 40));
+        assert_eq!((dx, dy), (-5, -7));
+
+        let mut doc = EditorDocument::from_rgba(PathBuf::from("tr.png"), img);
+        doc.apply_layer_op(LayerOperation::AddEmpty {
+            name: "Top".to_owned(),
+        })
+        .unwrap();
+        let top_id = doc.stack().active_layer_id;
+        doc.apply(EditOp::Paint {
+            points: vec![[10.0, 10.0]],
+            color: [0, 255, 0],
+            radius: 2.0,
+            opacity: 1.0,
+            erase: false,
+            brush: BrushSettings::default(),
+        })
+        .unwrap();
+
+        // composite_stack_excluding omits the transforming layer cleanly
+        let base_without_top = crate::composite_stack_excluding(doc.stack(), top_id);
+        assert_eq!(base_without_top.get_pixel(10, 10).0, [10, 10, 10, 255]);
+
+        // Transform active layer and undo/redo
+        doc.apply(EditOp::TransformLayer {
+            layer_id: Some(top_id),
+            transform: LayerTransformSpec {
+                translate_x: 4.0,
+                translate_y: 0.0,
+                ..LayerTransformSpec::default()
+            },
+        })
+        .unwrap();
+        assert_eq!(doc.stack().active_layer().offset_x, 4);
+        assert!(doc.undo().unwrap());
+        assert_eq!(doc.stack().active_layer().offset_x, 0);
+    }
+
+    #[test]
+    fn ora_multilayer_roundtrip_and_document_save_with_bak() {
+        let dir = std::env::temp_dir().join(format!("photon-ora-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ora_path = dir.join("layered.ora");
+
+        let bg = Arc::new(RgbaImage::from_pixel(32, 24, Rgba([40, 60, 80, 255])));
+        let mut stack = LayerStack::from_single(bg);
+        let top_img = Arc::new(RgbaImage::from_pixel(12, 10, Rgba([220, 40, 30, 255])));
+        stack
+            .apply_op(&LayerOperation::AddImage {
+                name: "Foreground".to_owned(),
+                offset_x: 5,
+                offset_y: 7,
+                pixels: top_img,
+            })
+            .unwrap();
+        let fg_id = stack.active_layer_id;
+        stack
+            .apply_op(&LayerOperation::SetProps {
+                id: fg_id,
+                name: None,
+                visible: Some(true),
+                locked: None,
+                opacity: Some(0.75),
+                blend_mode: Some(BlendMode::Multiply),
+                offset_x: None,
+                offset_y: None,
+            })
+            .unwrap();
+
+        crate::ora::encode_ora_stack(&stack, &ora_path).unwrap();
+        assert_eq!(crate::probe_dimensions(&ora_path), Some((32, 24)));
+        let thumb = crate::generate_thumbnail(&ora_path, 16).unwrap();
+        assert!(thumb.width() <= 16 && thumb.height() <= 16);
+
+        let mut doc = EditorDocument::open(ora_path.clone()).unwrap();
+        assert_eq!(doc.stack().layers.len(), 2);
+        assert_eq!(doc.stack().layers[1].name, "Foreground");
+        assert_eq!(doc.stack().layers[1].offset_x, 5);
+        assert_eq!(doc.stack().layers[1].offset_y, 7);
+        assert_eq!(doc.stack().layers[1].blend_mode, BlendMode::Multiply);
+        assert!((doc.stack().layers[1].opacity - 0.75).abs() < 0.01);
+
+        // Save back to existing .ora creates .ora.bak and preserves layers
+        doc.save_to(None).unwrap();
+        assert!(dir.join("layered.ora.bak").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extra_codecs_svg_svgz_exr_hdr_ico_pnm_ff_avif_probe_and_decode() {
+        let dir = std::env::temp_dir().join(format!("photon-codec-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let sample = RgbaImage::from_pixel(16, 12, Rgba([180, 90, 45, 255]));
+
+        // SVG & SVGZ
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="18"><rect width="24" height="18" fill="rgb(200,50,50)"/></svg>"#;
+        let svg_path = dir.join("test.svg");
+        std::fs::write(&svg_path, svg.as_bytes()).unwrap();
+        assert_eq!(crate::probe_dimensions(&svg_path), Some((24, 18)));
+        let svg_px = crate::decode_rgba(&svg_path).unwrap();
+        assert_eq!(svg_px.dimensions(), (24, 18));
+        assert_eq!(svg_px.get_pixel(12, 9).0, [200, 50, 50, 255]);
+
+        let svgz_path = dir.join("test.svgz");
+        {
+            use flate2::write::GzEncoder;
+            use std::io::Write;
+            let f = std::fs::File::create(&svgz_path).unwrap();
+            let mut gz = GzEncoder::new(f, flate2::Compression::default());
+            gz.write_all(svg.as_bytes()).unwrap();
+            gz.finish().unwrap();
+        }
+        assert_eq!(crate::probe_dimensions(&svgz_path), Some((24, 18)));
+        assert_eq!(
+            crate::decode_rgba(&svgz_path).unwrap().dimensions(),
+            (24, 18)
+        );
+
+        // EXR, HDR, ICO, PNM/PAM, Farbfeld
+        for ext in ["exr", "hdr", "ico", "ppm", "pam", "ff"] {
+            let p = dir.join(format!("sample.{ext}"));
+            codec::save_to(&sample, &p).unwrap();
+            assert_eq!(
+                crate::probe_dimensions(&p),
+                Some((16, 12)),
+                "probe failed for {ext}"
+            );
+            let dec = crate::decode_rgba(&p).unwrap();
+            assert_eq!(dec.dimensions(), (16, 12), "decode failed for {ext}");
+        }
+
+        // AVIF encode test (decoding depends on optional avifdec/ffmpeg CLI)
+        let avif_path = dir.join("sample.avif");
+        codec::save_to(&sample, &avif_path).unwrap();
+        assert!(std::fs::metadata(&avif_path).unwrap().len() > 0);
+
+        // JXL probe & decode
+        let jxl_bytes: &[u8] = &[
+            0xff, 0x0a, 0x30, 0x54, 0x10, 0x09, 0x08, 0x06, 0x01, 0x00, 0x78, 0x00, 0x4b, 0x38,
+            0x41, 0x3c, 0xb6, 0x3a, 0x51, 0xfe, 0x00, 0x47, 0x1e, 0xa0, 0x85, 0xb8, 0x27, 0x1a,
+            0x48, 0x45, 0x84, 0x1b, 0x71, 0x4f, 0xa8, 0x3e, 0x8e, 0x30, 0x03, 0x92, 0x84, 0x01,
+        ];
+        let jxl_path = dir.join("sample.jxl");
+        std::fs::write(&jxl_path, jxl_bytes).unwrap();
+        let jxl_dims = crate::probe_dimensions(&jxl_path).expect("jxl probe");
+        assert!(jxl_dims.0 > 0 && jxl_dims.1 > 0);
+        assert_eq!(
+            crate::decode_rgba(&jxl_path).unwrap().dimensions(),
+            jxl_dims
+        );
+
+        // PSD probe & decode
+        let mut psd_bytes: Vec<u8> = Vec::new();
+        psd_bytes.extend_from_slice(b"8BPS");
+        psd_bytes.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]); // version 1 + reserved
+        psd_bytes.extend_from_slice(&[0, 3]); // 3 channels
+        psd_bytes.extend_from_slice(&1u32.to_be_bytes()); // height = 1
+        psd_bytes.extend_from_slice(&1u32.to_be_bytes()); // width = 1
+        psd_bytes.extend_from_slice(&[0, 8, 0, 3]); // depth = 8, RGB mode = 3
+        psd_bytes.extend_from_slice(&0u32.to_be_bytes()); // color mode data
+        psd_bytes.extend_from_slice(&0u32.to_be_bytes()); // image resources
+        psd_bytes.extend_from_slice(&0u32.to_be_bytes()); // layer & mask info
+        psd_bytes.extend_from_slice(&[0, 0]); // compression = raw
+        psd_bytes.extend_from_slice(&[200, 100, 50]); // R, G, B
+        let psd_path = dir.join("sample.psd");
+        std::fs::write(&psd_path, &psd_bytes).unwrap();
+        assert_eq!(crate::probe_dimensions(&psd_path), Some((1, 1)));
+        let psd_px = crate::decode_rgba(&psd_path).unwrap();
+        assert_eq!(psd_px.get_pixel(0, 0).0, [200, 100, 50, 255]);
+        let psd_doc = EditorDocument::open(psd_path).unwrap();
+        assert_eq!(psd_doc.dimensions(), (1, 1));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

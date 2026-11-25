@@ -4,8 +4,10 @@
 pub mod codec;
 pub mod document;
 pub mod drawing;
+pub mod healing;
 pub mod layer;
 pub mod liquify;
+pub mod ora;
 pub mod pixels;
 pub mod selection;
 
@@ -14,9 +16,10 @@ use thiserror::Error;
 
 pub use codec::{decode_rgba, generate_thumbnail, probe_dimensions};
 pub use document::{EditOp, EditorDocument, render_single_op, validate_dimensions};
+pub use healing::healing_stroke;
 pub use layer::{
     Layer, LayerOperation, LayerStack, LayerThumbnail, blend_layer_onto, composite_stack,
-    render_layer_thumbnails,
+    composite_stack_excluding, render_layer_thumbnails,
 };
 pub use selection::{SelectionMask, SelectionSnapshot, rasterize_shape};
 

@@ -427,7 +427,7 @@ pub fn fill_polygon_aa(dst: &mut RgbaImage, poly: &[[f64; 2]], color: [u8; 3], o
                 }
             }
             xs.sort_by(|a, b| a.total_cmp(b));
-            for pair in xs.chunks_exact(2) {
+            for pair in xs.as_chunks::<2>().0 {
                 let x_start = pair[0];
                 let x_end = pair[1];
                 let px_start = x_start.floor().max(left as f64) as u32;
@@ -600,7 +600,30 @@ pub fn flood_fill(
     out
 }
 
+const BAYER_4X4: [[f32; 4]; 4] = [
+    [0.0 / 16.0 - 0.5, 0.0, 2.0 / 16.0 - 0.5, 10.0 / 16.0 - 0.5],
+    [
+        12.0 / 16.0 - 0.5,
+        4.0 / 16.0 - 0.5,
+        14.0 / 16.0 - 0.5,
+        6.0 / 16.0 - 0.5,
+    ],
+    [
+        3.0 / 16.0 - 0.5,
+        11.0 / 16.0 - 0.5,
+        1.0 / 16.0 - 0.5,
+        9.0 / 16.0 - 0.5,
+    ],
+    [
+        15.0 / 16.0 - 0.5,
+        7.0 / 16.0 - 0.5,
+        13.0 / 16.0 - 0.5,
+        5.0 / 16.0 - 0.5,
+    ],
+];
+
 /// Render a gradient (`Linear`, `Radial`, `Conical`, `Reflected`) onto `src`.
+/// Supports `reverse`, ordered 4×4 Bayer `dither`, and optional `SelectionMask` clipping.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_gradient(
     src: &RgbaImage,
@@ -611,6 +634,9 @@ pub fn draw_gradient(
     fg_color: [u8; 3],
     bg_color: [u8; 3],
     opacity: f32,
+    reverse: bool,
+    dither: bool,
+    selection: Option<(&SelectionMask, i32, i32)>,
 ) -> RgbaImage {
     let (w, h) = src.dimensions();
     if w == 0 || h == 0 || opacity <= 0.0 {
@@ -627,13 +653,21 @@ pub fn draw_gradient(
     let sx = f64::from(start[0]);
     let sy = f64::from(start[1]);
     let alpha_scale = opacity.clamp(0.0, 1.0);
+    let active_sel = selection.filter(|(sel, _, _)| sel.has_selection());
 
     let mut out = src.clone();
     for py in 0..h {
         let vy = f64::from(py) + 0.5 - sy;
+        let bayer_row = &BAYER_4X4[(py & 3) as usize];
         for px in 0..w {
+            let sel_w = active_sel
+                .map(|(sel, ox, oy)| sel.clip_factor(ox + px as i32, oy + py as i32))
+                .unwrap_or(1.0);
+            if sel_w <= 0.0 {
+                continue;
+            }
             let vx = f64::from(px) + 0.5 - sx;
-            let t = match kind {
+            let raw_t = match kind {
                 GradientKind::Linear => ((vx * dx + vy * dy) / len_sq).clamp(0.0, 1.0),
                 GradientKind::Radial => (vx.hypot(vy) / len).clamp(0.0, 1.0),
                 GradientKind::Conical => {
@@ -642,11 +676,17 @@ pub fn draw_gradient(
                 }
                 GradientKind::Reflected => ((vx * dx + vy * dy) / len_sq).abs().clamp(0.0, 1.0),
             } as f32;
+            let t = if reverse { 1.0 - raw_t } else { raw_t };
+            let dither_bias = if dither {
+                bayer_row[(px & 3) as usize]
+            } else {
+                0.0
+            };
 
             let (rgb, a) = match color_mode {
                 GradientColorMode::FgToBg => {
                     let lerp = |a: u8, b: u8| -> u8 {
-                        (f32::from(a) + (f32::from(b) - f32::from(a)) * t)
+                        (f32::from(a) + (f32::from(b) - f32::from(a)) * t + dither_bias)
                             .round()
                             .clamp(0.0, 255.0) as u8
                     };
@@ -656,10 +696,13 @@ pub fn draw_gradient(
                             lerp(fg_color[1], bg_color[1]),
                             lerp(fg_color[2], bg_color[2]),
                         ],
-                        alpha_scale,
+                        alpha_scale * sel_w,
                     )
                 }
-                GradientColorMode::FgToTransparent => (fg_color, alpha_scale * (1.0 - t)),
+                GradientColorMode::FgToTransparent => {
+                    let a_dither = (alpha_scale * (1.0 - t) + dither_bias / 255.0).clamp(0.0, 1.0);
+                    (fg_color, a_dither * sel_w)
+                }
             };
             if a > 0.0 {
                 let pixel = out.get_pixel_mut(px, py);
@@ -833,9 +876,28 @@ mod tests {
             [255, 0, 0],
             [0, 0, 255],
             1.0,
+            false,
+            false,
+            None,
         );
         assert!(lin.get_pixel(0, 5).0[0] > 230);
         assert!(lin.get_pixel(19, 5).0[2] > 230);
+
+        let lin_rev = draw_gradient(
+            &base,
+            [0.0, 5.0],
+            [20.0, 5.0],
+            GradientKind::Linear,
+            GradientColorMode::FgToBg,
+            [255, 0, 0],
+            [0, 0, 255],
+            1.0,
+            true,
+            true,
+            None,
+        );
+        assert!(lin_rev.get_pixel(0, 5).0[2] > 230);
+        assert!(lin_rev.get_pixel(19, 5).0[0] > 230);
 
         let rad = draw_gradient(
             &base,
@@ -846,6 +908,9 @@ mod tests {
             [0, 255, 0],
             [0, 0, 0],
             1.0,
+            false,
+            false,
+            None,
         );
         // Center is green, far corner stays black
         assert!(rad.get_pixel(10, 5).0[1] > 200);
@@ -860,6 +925,9 @@ mod tests {
             [255, 255, 255],
             [0, 0, 0],
             1.0,
+            false,
+            false,
+            None,
         );
         assert_ne!(con.get_pixel(12, 4).0, con.get_pixel(12, 6).0);
 
@@ -872,10 +940,45 @@ mod tests {
             [255, 0, 0],
             [0, 0, 255],
             1.0,
+            false,
+            false,
+            None,
         );
         // Symmetric around start x=10
         assert!(refl.get_pixel(10, 5).0[0] > 200);
         assert!(refl.get_pixel(2, 5).0[2] > 200);
         assert!(refl.get_pixel(18, 5).0[2] > 200);
+    }
+
+    #[test]
+    fn gradient_selection_mask_clips_and_bayer_dither_varies_substeps() {
+        let base = RgbaImage::from_pixel(32, 16, Rgba([10, 10, 10, 255]));
+        let mut sel = SelectionMask::empty(32, 16);
+        let mask: Vec<u8> = (0..32 * 16)
+            .map(|i| {
+                let x = i % 32;
+                if (8..24).contains(&x) { 255 } else { 0 }
+            })
+            .collect();
+        sel.combine(&mask, SelectionBooleanOp::Replace);
+
+        let out = draw_gradient(
+            &base,
+            [0.0, 8.0],
+            [32.0, 8.0],
+            GradientKind::Linear,
+            GradientColorMode::FgToBg,
+            [200, 200, 200],
+            [210, 210, 210],
+            1.0,
+            false,
+            true,
+            Some((&sel, 0, 0)),
+        );
+        // Outside selection stays untouched
+        assert_eq!(out.get_pixel(2, 8).0, [10, 10, 10, 255]);
+        assert_eq!(out.get_pixel(28, 8).0, [10, 10, 10, 255]);
+        // Inside selection painted
+        assert!(out.get_pixel(16, 8).0[0] >= 200);
     }
 }

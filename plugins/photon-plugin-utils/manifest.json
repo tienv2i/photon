@@ -1,0 +1,54 @@
+{
+  "apiVersion": 1,
+  "id": "photon.utils",
+  "name": "Image Utilities (Non-AI)",
+  "version": "1.2.0",
+  "entry": {
+    "command": "bin/photon-plugin-utils",
+    "args": [],
+    "protocol": "jsonl-stdio"
+  },
+  "permissions": {
+    "network": false,
+    "gpu": false
+  },
+  "models": [],
+  "capabilities": [
+    {
+      "action": "utils.strip_exif",
+      "workspace": "browser",
+      "label": "Strip EXIF / GPS metadata",
+      "output": "rgba_image"
+    },
+    {
+      "action": "utils.optimize_size",
+      "workspace": "browser",
+      "label": "Optimize file size",
+      "output": "rgba_image"
+    }
+  ],
+  "quickActions": [
+    {
+      "id": "utils-strip-exif",
+      "label": "Strip EXIF / GPS metadata",
+      "action": "utils.strip_exif",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {}
+    },
+    {
+      "id": "utils-optimize-size",
+      "label": "Optimize file size",
+      "action": "utils.optimize_size",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "jpegQuality": 86
+      }
+    }
+  ]
+}

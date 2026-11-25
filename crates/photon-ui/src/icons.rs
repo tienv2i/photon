@@ -114,6 +114,11 @@ pub enum Icon {
     BezierPen,
     PaintBucket,
     Gradient,
+    HealingBrush,
+    Transform,
+    Denoise,
+    Cut,
+    Paste,
 }
 
 impl Icon {
@@ -446,6 +451,21 @@ impl Icon {
             Self::Gradient => {
                 r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16"/><path d="M11 4v16" stroke-dasharray="3 2"/><path d="M15 4v16" stroke-dasharray="1.5 2.5"/></svg>"##
             }
+            Self::HealingBrush => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><g transform="rotate(-45 12 12)"><rect x="3" y="8" width="18" height="8" rx="4"/><path d="M8.5 8v8M15.5 8v8"/><circle cx="10.8" cy="10.8" r="0.6" fill="#000000"/><circle cx="13.2" cy="10.8" r="0.6" fill="#000000"/><circle cx="10.8" cy="13.2" r="0.6" fill="#000000"/><circle cx="13.2" cy="13.2" r="0.6" fill="#000000"/></g></svg>"##
+            }
+            Self::Transform => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 7.75h11M19.25 9.5v9M17.5 20.25h-11M4.75 18.5v-9"/><rect x="3" y="6" width="3.5" height="3.5" rx="0.6"/><rect x="17.5" y="6" width="3.5" height="3.5" rx="0.6"/><rect x="3" y="18.5" width="3.5" height="3.5" rx="0.6"/><rect x="17.5" y="18.5" width="3.5" height="3.5" rx="0.6"/><path d="M12 7.75V4.5"/><circle cx="12" cy="3.2" r="1.3"/></svg>"##
+            }
+            Self::Denoise => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="M14.5 4v16" stroke-dasharray="2.5 2.5"/><circle cx="7" cy="7.5" r="0.8" fill="#000000"/><circle cx="11" cy="9" r="0.8" fill="#000000"/><circle cx="8" cy="12" r="0.8" fill="#000000"/><circle cx="11.2" cy="14.8" r="0.8" fill="#000000"/><circle cx="7" cy="16.5" r="0.8" fill="#000000"/><path d="m18 9.2.55 1.25 1.25.55-1.25.55L18 12.8l-.55-1.25-1.25-.55 1.25-.55Z"/></svg>"##
+            }
+            Self::Cut => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88"/><path d="M14.47 14.48 20 20"/><path d="M8.12 8.12 12 12"/></svg>"##
+            }
+            Self::Paste => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M9 12h6M9 16h4"/></svg>"##
+            }
         }
     }
 }
@@ -494,4 +514,32 @@ pub fn render_disabled<'a>(icon: Icon, size: f32) -> svg::Svg<'a> {
                 color: Some(tokens.text_muted.scale_alpha(0.45)),
             }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Icon;
+
+    #[test]
+    fn studio_icons_emit_valid_24x24_svg() {
+        let new_and_core_icons = [
+            Icon::PaintBucket,
+            Icon::Gradient,
+            Icon::HealingBrush,
+            Icon::Transform,
+            Icon::Denoise,
+            Icon::Copy,
+            Icon::Cut,
+            Icon::Paste,
+        ];
+        for icon in new_and_core_icons {
+            let src = icon.svg_source();
+            assert!(src.starts_with("<svg "), "{icon:?} missing <svg");
+            assert!(
+                src.contains(r#"viewBox="0 0 24 24""#),
+                "{icon:?} missing 24x24 viewBox"
+            );
+            assert!(src.ends_with("</svg>"), "{icon:?} missing </svg>");
+        }
+    }
 }

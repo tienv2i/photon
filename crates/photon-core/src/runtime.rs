@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use photon_image::{EditorDocument, LayerThumbnail, render_layer_thumbnails};
+use photon_image::{
+    EditorDocument, LayerThumbnail, composite_stack, composite_stack_excluding,
+    render_layer_thumbnails,
+};
 use photon_protocol::{
     Command, CommandResponse, Envelope, Event, EventKind, ProtocolError, Query, UiStateSnapshot,
     UiText, UiTreeSnapshot,
@@ -15,6 +18,21 @@ use crate::Core;
 use crate::batch::BatchEvent;
 
 pub type PixelFrameData = (u64, u32, u32, Vec<u8>);
+
+/// Composited base excluding the active layer plus active layer RGBA for live GPU Free Transform preview.
+#[derive(Debug, Clone)]
+pub struct EditorTransformFrames {
+    pub pixel_revision: u64,
+    pub layer_id: u64,
+    pub canvas_width: u32,
+    pub canvas_height: u32,
+    pub base_rgba_excluding_active: Vec<u8>,
+    pub active_layer_rgba: Vec<u8>,
+    pub offset_x: i32,
+    pub offset_y: i32,
+    pub layer_width: u32,
+    pub layer_height: u32,
+}
 
 enum GatewayMsg {
     Dispatch {
@@ -39,6 +57,10 @@ enum GatewayMsg {
     },
     ReadEditorSelectionMask {
         reply: oneshot::Sender<Option<PixelFrameData>>,
+    },
+    ReadEditorTransformFrames {
+        layer_id: Option<u64>,
+        reply: oneshot::Sender<Option<EditorTransformFrames>>,
     },
     EmitEvent {
         kind: EventKind,
@@ -136,6 +158,25 @@ impl CoreHandle {
             .await
             .ok()?;
         reply_rx.await.ok()
+    }
+
+    pub async fn read_editor_transform_frames(&self) -> Option<EditorTransformFrames> {
+        self.read_editor_transform_frames_for(None).await
+    }
+
+    pub async fn read_editor_transform_frames_for(
+        &self,
+        layer_id: Option<u64>,
+    ) -> Option<EditorTransformFrames> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(GatewayMsg::ReadEditorTransformFrames {
+                layer_id,
+                reply: reply_tx,
+            })
+            .await
+            .ok()?;
+        reply_rx.await.ok().flatten()
     }
 
     pub async fn emit_event(&self, kind: EventKind) {
@@ -326,6 +367,12 @@ impl CoreRuntime {
                         });
                         let _ = reply.send(mask);
                     }
+                    GatewayMsg::ReadEditorTransformFrames { layer_id, reply } => {
+                        let frames = core
+                            .editor_document()
+                            .and_then(|doc| build_editor_transform_frames(doc, layer_id));
+                        let _ = reply.send(frames);
+                    }
                     GatewayMsg::EmitEvent { kind } => {
                         let _ = event_tx.send(Event {
                             seq_id: seq.fetch_add(1, Ordering::Relaxed),
@@ -394,4 +441,86 @@ impl CoreRuntime {
 
         handle
     }
+}
+
+fn build_editor_transform_frames(
+    doc: &EditorDocument,
+    layer_id: Option<u64>,
+) -> Option<EditorTransformFrames> {
+    let stack = doc.stack();
+    let target_id = layer_id.unwrap_or(stack.active_layer_id);
+    let layer_idx = stack.index_of(target_id)?;
+    let layer = &stack.layers[layer_idx];
+    let (lw, lh) = layer.dimensions();
+
+    if stack.selection.has_selection()
+        && target_id == stack.active_layer_id
+        && let Some([bx, by, bw, bh]) = stack.selection.bounds
+        && bw > 0
+        && bh > 0
+    {
+        let ox = layer.offset_x;
+        let oy = layer.offset_y;
+        let mut extracted = image::RgbaImage::from_pixel(bw, bh, image::Rgba([0, 0, 0, 0]));
+        let mut remainder = (*layer.pixels).clone();
+        for sy in 0..bh {
+            let cy = by as i32 + sy as i32;
+            let ly = cy - oy;
+            if ly < 0 || ly >= lh as i32 {
+                continue;
+            }
+            for sx in 0..bw {
+                let cx = bx as i32 + sx as i32;
+                let lx = cx - ox;
+                if lx < 0 || lx >= lw as i32 {
+                    continue;
+                }
+                let sel_a = stack.selection.alpha_at(cx, cy);
+                if sel_a == 0 {
+                    continue;
+                }
+                let p = remainder.get_pixel(lx as u32, ly as u32).0;
+                let ex_a = ((u16::from(p[3]) * u16::from(sel_a) + 127) / 255) as u8;
+                extracted.put_pixel(sx, sy, image::Rgba([p[0], p[1], p[2], ex_a]));
+
+                let keep = 255 - u16::from(sel_a);
+                let rem_a = ((u16::from(p[3]) * keep + 127) / 255) as u8;
+                let dst_px = remainder.get_pixel_mut(lx as u32, ly as u32);
+                if rem_a == 0 {
+                    dst_px.0 = [0, 0, 0, 0];
+                } else {
+                    dst_px.0[3] = rem_a;
+                }
+            }
+        }
+        let mut tmp_stack = stack.clone();
+        tmp_stack.layers[layer_idx].pixels = Arc::new(remainder);
+        let base = composite_stack(&tmp_stack);
+        return Some(EditorTransformFrames {
+            pixel_revision: doc.pixel_revision,
+            layer_id: target_id,
+            canvas_width: stack.canvas_width,
+            canvas_height: stack.canvas_height,
+            base_rgba_excluding_active: base.as_raw().clone(),
+            active_layer_rgba: extracted.into_raw(),
+            offset_x: bx as i32,
+            offset_y: by as i32,
+            layer_width: bw,
+            layer_height: bh,
+        });
+    }
+
+    let base = composite_stack_excluding(stack, target_id);
+    Some(EditorTransformFrames {
+        pixel_revision: doc.pixel_revision,
+        layer_id: target_id,
+        canvas_width: stack.canvas_width,
+        canvas_height: stack.canvas_height,
+        base_rgba_excluding_active: base.as_raw().clone(),
+        active_layer_rgba: layer.pixels.as_raw().clone(),
+        offset_x: layer.offset_x,
+        offset_y: layer.offset_y,
+        layer_width: lw,
+        layer_height: lh,
+    })
 }

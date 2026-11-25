@@ -10,6 +10,7 @@ name = "photon"
 path = "src/main.rs"
 
 [dependencies]
+arboard = { workspace = true }
 clap = { workspace = true }
 iced = { workspace = true }
 image = { workspace = true }

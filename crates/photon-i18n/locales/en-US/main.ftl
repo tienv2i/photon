@@ -93,7 +93,7 @@ settings-theme = Appearance
 settings-theme-dark = Dark
 settings-theme-light = Light
 settings-language = Interface Language
-settings-system-open = When opened from system
+settings-system-open = Opening Image Files (Direct Open)
 settings-open-fit = Fit Image
 settings-open-fullscreen = Fullscreen
 settings-open-remembered = Last Size
@@ -654,7 +654,7 @@ tooltip-tool-draw-polygon = Polygon Tool (U)
 tooltip-tool-draw-polyline = Polyline Tool (U)
 tooltip-tool-shape-group = Shape & Line Tools (U)
 tooltip-tool-bezier-pen = Bezier Pen Tool (P)
-tooltip-tool-paint-bucket = Paint Bucket Tool (G)
+tooltip-tool-paint-bucket = Paint Bucket Tool (F)
 tooltip-tool-gradient = Gradient Tool (G)
 tooltip-tool-fill-group = Paint Bucket / Gradient (G)
 
@@ -682,3 +682,133 @@ gradient-fg-transparent = FG -> Transparent
 
 label-flood-fill-tolerance = Tolerance
 label-flood-fill-contiguous = Contiguous
+
+# Curves editor & presets
+action-reset-channel = Reset Channel
+label-curve-points = { $count } control points
+label-curve-in = In
+label-curve-out = Out
+label-curve-in-out = In: { $in } · Out: { $out }
+hint-curve-usage = Click to add · Drag to move · Right-click to remove
+curve-preset-linear = Linear
+curve-preset-s-curve = S-Curve
+curve-preset-fade = Fade
+curve-preset-high-contrast = High Contrast
+curve-preset-negative = Negative
+
+# Healing Brush, Gradient & Paint Bucket additions
+tool-healing-brush = Healing Brush
+tooltip-tool-healing-brush = Healing Brush Tool (J)
+label-healing-mode = Mode
+healing-mode-spot = Spot
+healing-mode-sampled = Sampled
+hint-healing-source = Alt+Click canvas to set source point
+label-healing-source-set = Source: ({ $x }, { $y })
+label-healing-source-unset = Source: Not set
+label-gradient-reverse = Reverse
+label-gradient-dither = Dither
+op-healing = Healing Brush
+op-draw-shape = Draw Shape
+op-flood-fill = Paint Bucket Fill
+op-gradient = Gradient Fill
+op-selection-clear = Clear Selection
+
+# Free Transform tool
+tool-transform = Transform
+tooltip-tool-transform = Free Transform (Ctrl+T)
+action-transform = Free Transform…
+label-transform-x = X
+label-transform-y = Y
+label-transform-width = Width (%)
+label-transform-height = Height (%)
+label-transform-angle = Angle (°)
+label-transform-pivot = Pivot
+label-transform-flip = Flip
+action-apply-transform = Apply Transform
+action-cancel-transform = Cancel Transform
+op-transform-layer = Transform Layer
+
+# Plugins menu, Manage Plugins & Core UiText
+action-manage-plugins = Manage Plugins…
+action-reload-plugins = Reload Plugins
+action-install-plugin = Install Plugin…
+action-uninstall-plugin = Uninstall
+action-open-plugins-folder = Open Plugins Folder
+menu-plugins-no-enabled = No enabled plugins
+dialog-manage-plugins-title = Manage Plugins
+dialog-plugin-params-title = Plugin Parameters
+label-plugin-search = Filter plugins…
+label-plugin-parameters = Parameters
+label-plugin-permissions = Permissions
+label-plugin-version = Version
+label-plugin-author = Author
+label-plugin-capabilities = Capabilities
+label-plugin-enabled = Enabled
+label-plugin-disabled = Disabled
+label-plugin-none-selected = Select a plugin to inspect details
+label-plugin-no-permissions = No special permissions declared
+action-run-plugin = Run Plugin
+plugins-refreshed = Reloaded { $count } plugin(s)
+plugin-enabled = Enabled plugin { $name }
+plugin-disabled = Disabled plugin { $name }
+plugin-installed = Installed plugin { $name }
+plugin-uninstalled = Uninstalled plugin { $name }
+plugin-executed = Plugin { $name } finished
+plugin-failed = Plugin { $name } failed: { $error }
+plugin-not-found = Plugin not found: { $id }
+plugin-invalid-manifest = Invalid plugin manifest: { $error }
+op-plugin = Plugin: { $name }
+
+# Startup Window, Renderer, Anti-Aliasing & Denoise
+settings-app-launch-window = App Startup Window (Browser)
+settings-launch-maximized = Maximized
+settings-launch-remembered = Previous State
+settings-system-open-hint = Applies when opening an image file directly, not when launching the app
+settings-active-renderer = Active Renderer
+renderer-gpu-wgpu = GPU (wgpu)
+renderer-software-tiny-skia = Software (tiny-skia)
+settings-restart-required-renderer = Restart required to apply renderer change
+settings-canvas-aa = Canvas Anti-Aliasing
+aa-mode-crisp = Crisp
+aa-mode-smooth = Smooth
+aa-mode-high-quality = High Quality
+settings-viewport-denoise = Viewport Denoise
+denoise-mode-off = Off
+denoise-mode-light = Light
+denoise-mode-medium = Medium
+denoise-mode-strong = Strong
+menu-filter-denoise = Denoise…
+dialog-adjust-denoise = Denoise
+filter-denoise = Denoise
+label-preserve-detail = Preserve Detail
+op-denoise = Denoise
+
+# Clipboard Cut / Copy / Paste
+action-cut = Cut
+action-copy = Copy
+action-copy-merged = Copy Merged
+action-paste = Paste
+action-paste-into-selection = Paste Into Selection
+toast-pasted = Pasted from clipboard
+toast-cut = Cut selection to clipboard
+toast-copied = Copied to clipboard
+toast-clipboard-empty = Clipboard has no image
+op-cut-pixels = Cut Pixels
+op-paste-pixels = Paste Pixels
+
+# Canvas Zoom/Fit/1:1 tooltips & Extended Formats
+tooltip-editor-actual-size = Actual Size 1:1 (1)
+tooltip-editor-zoom-percent = Current Zoom
+tooltip-editor-fit-zero = Fit Image to Canvas (0 / F)
+label-export-format = Format
+format-ora = OpenRaster (.ora)
+format-psd = Photoshop (.psd)
+format-svg = SVG Vector (.svg)
+format-jxl = JPEG XL (.jxl)
+format-avif = AVIF (.avif)
+format-exr = OpenEXR (.exr)
+format-hdr = Radiance HDR (.hdr)
+format-ico = Icon (.ico)
+format-pnm = Netpbm (.ppm/.pgm/.pbm/.pam)
+format-farbfeld = Farbfeld (.ff)
+format-raw = Camera RAW

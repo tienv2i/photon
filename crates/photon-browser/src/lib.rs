@@ -20,7 +20,7 @@ use photon_panels::{
 };
 use photon_protocol::{
     BrowserLeftPanel, BrowserRightPanel, BrowserSortField, BrowserThumbSize, BrowserViewMode,
-    Command, Entry, MoveDirection, SortOrder, Workspace,
+    Command, Entry, MoveDirection, PluginCapability, SortOrder, Workspace,
 };
 use photon_ui::button::{self, ButtonVariant};
 use photon_ui::grid::{BreadcrumbItem, GridCardSpec, breadcrumbs_bar, thumbnail_card};
@@ -143,8 +143,13 @@ pub enum BrowserMessage {
     BrowserCopyTo(Vec<String>),
     BrowserMoveTo(Vec<String>),
     BrowserConfirmDeletePermanently(Vec<String>),
+    BrowserCopyFiles(Vec<String>),
+    BrowserPasteFiles,
     CopyImageToClipboard(Option<String>),
     RevealInFolder(String),
+    OpenManagePlugins,
+    ReloadPlugins,
+    RunPlugin(String),
     BeginDragBrowserPanel(BrowserLeftPanel),
     HoverBrowserPanelDrop(BrowserLeftPanel),
     DropBrowserPanel(BrowserLeftPanel),
@@ -812,8 +817,33 @@ fn build_browser_header(state: BrowserViewState<'_>) -> Element<'_, BrowserMessa
         tr(lang, "tooltip-browser-filter-toggle"),
     );
 
+    let clipboard_actions = row![
+        button::icon_only_tipped(
+            Icon::Copy,
+            ButtonVariant::Ghost,
+            (!state.snapshot.meta.selection.is_empty())
+                .then(|| BrowserMessage::BrowserCopyFiles(state.snapshot.meta.selection.clone())),
+            format!("{} (Ctrl+C)", tr(lang, "action-copy")),
+        ),
+        button::icon_only_tipped(
+            Icon::Paste,
+            ButtonVariant::Ghost,
+            state
+                .snapshot
+                .meta
+                .current_folder
+                .as_ref()
+                .map(|_| BrowserMessage::BrowserPasteFiles),
+            format!("{} (Ctrl+V)", tr(lang, "action-paste")),
+        ),
+    ]
+    .spacing(2)
+    .align_y(Alignment::Center);
+
     let mut bar = row![
         nav_left,
+        toolbar_divider(),
+        clipboard_actions,
         toolbar_divider(),
         filter_toggle_btn,
         sort_controls
@@ -1691,6 +1721,20 @@ pub fn build_browser_context_menu_entries<'a>(
         MenuEntry::Separator,
         MenuEntry::Item(
             MenuItem::new(
+                tr(lang, "action-copy"),
+                BrowserMessage::BrowserCopyFiles(paths.clone()),
+            )
+            .icon(Icon::Copy)
+            .shortcut("Ctrl+C"),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(tr(lang, "action-paste"), BrowserMessage::BrowserPasteFiles)
+                .icon(Icon::Paste)
+                .shortcut("Ctrl+V")
+                .enabled(state.snapshot.meta.current_folder.is_some()),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
                 tr(lang, "action-copy-image"),
                 BrowserMessage::CopyImageToClipboard(Some(entry_path.to_owned())),
             )
@@ -1824,6 +1868,53 @@ pub fn build_quick_access_context_menu<'a>(
     }
 
     menu_panel_entries(entries, 220.0)
+}
+
+pub fn build_browser_plugins_menu_entries<'a>(
+    state: BrowserViewState<'a>,
+) -> Vec<MenuEntry<'a, BrowserMessage>> {
+    let lang = state.snapshot.meta.language;
+    let enabled_plugins: Vec<_> = state
+        .snapshot
+        .meta
+        .plugins
+        .iter()
+        .filter(|p| p.enabled && p.capabilities.contains(&PluginCapability::BrowserAction))
+        .collect();
+
+    let mut entries = Vec::new();
+    if enabled_plugins.is_empty() {
+        entries.push(MenuEntry::Item(
+            MenuItem::new(tr(lang, "menu-plugins-no-enabled"), BrowserMessage::Noop).enabled(false),
+        ));
+    } else {
+        for plugin in enabled_plugins {
+            entries.push(MenuEntry::Item(
+                MenuItem::new(
+                    plugin.name.clone(),
+                    BrowserMessage::RunPlugin(plugin.id.clone()),
+                )
+                .icon(Icon::Plug),
+            ));
+        }
+    }
+
+    entries.push(MenuEntry::Separator);
+    entries.push(MenuEntry::Item(
+        MenuItem::new(
+            tr(lang, "action-manage-plugins"),
+            BrowserMessage::OpenManagePlugins,
+        )
+        .icon(Icon::Plug),
+    ));
+    entries.push(MenuEntry::Item(
+        MenuItem::new(
+            tr(lang, "action-reload-plugins"),
+            BrowserMessage::ReloadPlugins,
+        )
+        .icon(Icon::Refresh),
+    ));
+    entries
 }
 
 /// Reusable browser Window / Help menu entry builders for `app.rs::build_active_menu`.

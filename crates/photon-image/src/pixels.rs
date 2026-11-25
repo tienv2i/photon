@@ -5,9 +5,11 @@ use image::imageops::{self, FilterType};
 use image::{Rgba, RgbaImage};
 use photon_protocol::{
     BrushSettings, BrushTip, CanvasAnchor, ColorAdjustments, ColorBalanceAdjustment,
-    CurvesAdjustment, HsvAdjustment, ResizeFilter, ResizeMode,
+    CurvesAdjustment, HsvAdjustment, LayerTransformSpec, ResizeFilter, ResizeMode,
 };
 use rayon::prelude::*;
+
+use crate::selection::SelectionMask;
 
 #[inline]
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
@@ -1137,4 +1139,322 @@ pub fn sepia_rgba(src: &RgbaImage) -> RgbaImage {
             .clamp(0.0, 255.0) as u8;
     }
     out
+}
+
+/// Selection-aware edge-preserving bilateral denoise.
+/// When `selection` is active, neighbor taps are weighted by `sel.alpha_at(nx, ny)` so
+/// exterior pixels across the selection border are NEVER sampled (zero border halo).
+pub fn denoise_rgba(
+    src: &RgbaImage,
+    strength: f32,
+    detail_preserve: f32,
+    selection: Option<(&SelectionMask, i32, i32)>,
+) -> RgbaImage {
+    let (w, h) = src.dimensions();
+    let strength = strength.clamp(0.0, 1.0);
+    if w == 0 || h == 0 || strength <= 1e-4 {
+        return src.clone();
+    }
+    let detail_preserve = detail_preserve.clamp(0.0, 1.0);
+    let radius: i32 = if strength > 0.65 { 3 } else { 2 };
+    let sigma_s = 1.0 + strength * 2.0;
+    let inv_two_s2 = 1.0 / (2.0 * sigma_s * sigma_s);
+    let sigma_r = (0.04 + (1.0 - detail_preserve) * 0.28) * (0.4 + 0.6 * strength);
+    let inv_two_r2 = 1.0 / (2.0 * sigma_r * sigma_r);
+    let active_sel = selection.filter(|(s, _, _)| s.has_selection());
+
+    let row_stride = (w as usize) * 4;
+    let mut dst = vec![0u8; (h as usize) * row_stride];
+    let src_raw = src.as_raw();
+
+    dst.par_chunks_exact_mut(row_stride)
+        .enumerate()
+        .for_each(|(y_usize, row)| {
+            let y = y_usize as i32;
+            for x in 0..w {
+                let xi = x as i32;
+                let base_idx = (y_usize * (w as usize) + x as usize) * 4;
+                let center = [
+                    src_raw[base_idx],
+                    src_raw[base_idx + 1],
+                    src_raw[base_idx + 2],
+                    src_raw[base_idx + 3],
+                ];
+                let center_sa = if let Some((sel, ox, oy)) = active_sel {
+                    let sa = sel.alpha_at(ox + xi, oy + y);
+                    if sa == 0 {
+                        let out_off = (x as usize) * 4;
+                        row[out_off..out_off + 4].copy_from_slice(&center);
+                        continue;
+                    }
+                    sa
+                } else {
+                    255
+                };
+
+                let cr = f32::from(center[0]) / 255.0;
+                let cg = f32::from(center[1]) / 255.0;
+                let cb = f32::from(center[2]) / 255.0;
+
+                let mut acc_r = 0.0f32;
+                let mut acc_g = 0.0f32;
+                let mut acc_b = 0.0f32;
+                let mut w_sum = 0.0f32;
+
+                for dy in -radius..=radius {
+                    let ny = y + dy;
+                    if ny < 0 || ny >= h as i32 {
+                        continue;
+                    }
+                    for dx in -radius..=radius {
+                        let nx = xi + dx;
+                        if nx < 0 || nx >= w as i32 {
+                            continue;
+                        }
+                        let sel_w = if let Some((sel, ox, oy)) = active_sel {
+                            let sa = sel.alpha_at(ox + nx, oy + ny);
+                            if sa == 0 {
+                                continue;
+                            }
+                            f32::from(sa) / 255.0
+                        } else {
+                            1.0
+                        };
+                        let n_idx = ((ny as usize) * (w as usize) + (nx as usize)) * 4;
+                        let na = src_raw[n_idx + 3];
+                        if center[3] > 0 && na == 0 {
+                            continue;
+                        }
+                        let nr = f32::from(src_raw[n_idx]) / 255.0;
+                        let ng = f32::from(src_raw[n_idx + 1]) / 255.0;
+                        let nb = f32::from(src_raw[n_idx + 2]) / 255.0;
+
+                        let d2_s = (dx * dx + dy * dy) as f32;
+                        let dr = nr - cr;
+                        let dg = ng - cg;
+                        let db = nb - cb;
+                        let d2_r = dr * dr + dg * dg + db * db;
+                        let wt = (-d2_s * inv_two_s2 - d2_r * inv_two_r2).exp() * sel_w;
+                        acc_r += nr * wt;
+                        acc_g += ng * wt;
+                        acc_b += nb * wt;
+                        w_sum += wt;
+                    }
+                }
+
+                let out_off = (x as usize) * 4;
+                if w_sum > 1e-6 {
+                    let fr = acc_r / w_sum;
+                    let fg = acc_g / w_sum;
+                    let fb = acc_b / w_sum;
+                    let mix_t = (strength * (f32::from(center_sa) / 255.0)).clamp(0.0, 1.0);
+                    let mr = cr * (1.0 - mix_t) + fr * mix_t;
+                    let mg = cg * (1.0 - mix_t) + fg * mix_t;
+                    let mb = cb * (1.0 - mix_t) + fb * mix_t;
+                    row[out_off] = (mr.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    row[out_off + 1] = (mg.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    row[out_off + 2] = (mb.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    row[out_off + 3] = center[3];
+                } else {
+                    row[out_off..out_off + 4].copy_from_slice(&center);
+                }
+            }
+        });
+
+    RgbaImage::from_raw(w, h, dst).unwrap_or_else(|| src.clone())
+}
+
+#[inline]
+fn catmull_rom_weight(x: f64) -> f64 {
+    let ax = x.abs();
+    if ax < 1.0 {
+        1.5 * ax * ax * ax - 2.5 * ax * ax + 1.0
+    } else if ax < 2.0 {
+        -0.5 * ax * ax * ax + 2.5 * ax * ax - 4.0 * ax + 2.0
+    } else {
+        0.0
+    }
+}
+
+fn sample_bicubic_premultiplied(src: &RgbaImage, sx: f64, sy: f64) -> [u8; 4] {
+    let (w, h) = src.dimensions();
+    if w == 0 || h == 0 {
+        return [0, 0, 0, 0];
+    }
+    if sx <= -1.0 || sy <= -1.0 || sx >= f64::from(w) || sy >= f64::from(h) {
+        return [0, 0, 0, 0];
+    }
+
+    let ix = sx.floor() as i32;
+    let iy = sy.floor() as i32;
+    let fx = sx - f64::from(ix);
+    let fy = sy - f64::from(iy);
+
+    if fx.abs() < 1e-7 && fy.abs() < 1e-7 {
+        if ix >= 0 && iy >= 0 && (ix as u32) < w && (iy as u32) < h {
+            return src.get_pixel(ix as u32, iy as u32).0;
+        }
+        return [0, 0, 0, 0];
+    }
+
+    let mut wx = [0.0f64; 4];
+    let mut wy = [0.0f64; 4];
+    for i in 0..4 {
+        wx[i] = catmull_rom_weight(f64::from(i as i32 - 1) - fx);
+        wy[i] = catmull_rom_weight(f64::from(i as i32 - 1) - fy);
+    }
+
+    let mut pr = 0.0f64;
+    let mut pg = 0.0f64;
+    let mut pb = 0.0f64;
+    let mut pa = 0.0f64;
+
+    for (j, &w_y) in wy.iter().enumerate() {
+        let py = iy + (j as i32 - 1);
+        if py < 0 || py >= h as i32 {
+            continue;
+        }
+        for (i, &w_x) in wx.iter().enumerate() {
+            let px = ix + (i as i32 - 1);
+            if px < 0 || px >= w as i32 {
+                continue;
+            }
+            let wt = w_x * w_y;
+            let p = src.get_pixel(px as u32, py as u32).0;
+            let a = f64::from(p[3]) / 255.0;
+            pr += f64::from(p[0]) * a * wt;
+            pg += f64::from(p[1]) * a * wt;
+            pb += f64::from(p[2]) * a * wt;
+            pa += a * wt;
+        }
+    }
+
+    let out_a = pa.clamp(0.0, 1.0);
+    if out_a <= 1e-6 {
+        return [0, 0, 0, 0];
+    }
+    let inv_a = out_a.recip();
+    [
+        (pr * inv_a).round().clamp(0.0, 255.0) as u8,
+        (pg * inv_a).round().clamp(0.0, 255.0) as u8,
+        (pb * inv_a).round().clamp(0.0, 255.0) as u8,
+        (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
+    ]
+}
+
+#[inline]
+fn snap_near_int(v: f64) -> f64 {
+    let r = v.round();
+    if (v - r).abs() < 1e-6 { r } else { v }
+}
+
+/// Apply an affine transform (`translate`, `scale`, `rotation`, `pivot`, `flip_h`, `flip_v`)
+/// to `src`, returning `(transformed_rgba, delta_offset_x, delta_offset_y)`.
+pub fn transform_rgba_affine(src: &RgbaImage, spec: &LayerTransformSpec) -> (RgbaImage, i32, i32) {
+    let (w, h) = src.dimensions();
+    if w == 0 || h == 0 || spec.is_identity() {
+        return (src.clone(), 0, 0);
+    }
+
+    let wf = f64::from(w);
+    let hf = f64::from(h);
+    let px = f64::from(spec.pivot_x) * wf;
+    let py = f64::from(spec.pivot_y) * hf;
+    let sx_mag = if spec.scale_x.abs() < 1e-4 {
+        1e-4_f64.copysign(f64::from(spec.scale_x))
+    } else {
+        f64::from(spec.scale_x)
+    };
+    let sy_mag = if spec.scale_y.abs() < 1e-4 {
+        1e-4_f64.copysign(f64::from(spec.scale_y))
+    } else {
+        f64::from(spec.scale_y)
+    };
+    let eff_sx = if spec.flip_h { -sx_mag } else { sx_mag };
+    let eff_sy = if spec.flip_v { -sy_mag } else { sy_mag };
+    let rad = f64::from(spec.rotation_deg).to_radians();
+    let cos_t = rad.cos();
+    let sin_t = rad.sin();
+    let tx_off = f64::from(spec.translate_x);
+    let ty_off = f64::from(spec.translate_y);
+
+    let forward = |x: f64, y: f64| -> (f64, f64) {
+        let dx = (x - px) * eff_sx;
+        let dy = (y - py) * eff_sy;
+        (
+            dx * cos_t - dy * sin_t + px + tx_off,
+            dx * sin_t + dy * cos_t + py + ty_off,
+        )
+    };
+
+    let corners = [
+        forward(0.0, 0.0),
+        forward(wf, 0.0),
+        forward(0.0, hf),
+        forward(wf, hf),
+    ];
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for (cx, cy) in corners {
+        min_x = min_x.min(cx);
+        min_y = min_y.min(cy);
+        max_x = max_x.max(cx);
+        max_y = max_y.max(cy);
+    }
+
+    let delta_ox = snap_near_int(min_x).floor() as i32;
+    let delta_oy = snap_near_int(min_y).floor() as i32;
+    let end_x = snap_near_int(max_x).ceil() as i32;
+    let end_y = snap_near_int(max_y).ceil() as i32;
+    let out_w = (end_x - delta_ox).clamp(1, crate::MAX_IMAGE_DIMENSION as i32) as u32;
+    let out_h = (end_y - delta_oy).clamp(1, crate::MAX_IMAGE_DIMENSION as i32) as u32;
+
+    let inv_sx = eff_sx.recip();
+    let inv_sy = eff_sy.recip();
+    let row_stride = (out_w as usize) * 4;
+    let mut buf = vec![0u8; (out_h as usize) * row_stride];
+
+    buf.par_chunks_exact_mut(row_stride)
+        .enumerate()
+        .for_each(|(oy, row)| {
+            let ty = oy as f64 + 0.5 + f64::from(delta_oy);
+            let ry = ty - py - ty_off;
+            for ox in 0..out_w {
+                let tx = f64::from(ox) + 0.5 + f64::from(delta_ox);
+                let rx = tx - px - tx_off;
+                let ux = rx * cos_t + ry * sin_t;
+                let uy = -rx * sin_t + ry * cos_t;
+                let src_x = ux * inv_sx + px;
+                let src_y = uy * inv_sy + py;
+                let px_rgba = sample_bicubic_premultiplied(src, src_x - 0.5, src_y - 0.5);
+                let off = (ox as usize) * 4;
+                row[off..off + 4].copy_from_slice(&px_rgba);
+            }
+        });
+
+    let out_img = RgbaImage::from_raw(out_w, out_h, buf).unwrap_or_else(|| src.clone());
+    (out_img, delta_ox, delta_oy)
+}
+
+/// Transform an 8-bit grayscale mask buffer with [`LayerTransformSpec`].
+pub fn transform_mask_affine(
+    mask: &[u8],
+    w: u32,
+    h: u32,
+    spec: &LayerTransformSpec,
+) -> (Vec<u8>, u32, u32, i32, i32) {
+    let img = crate::drawing::mask_to_rgba(mask, w, h);
+    let (transformed, dx, dy) = transform_rgba_affine(&img, spec);
+    let (nw, nh) = transformed.dimensions();
+    let mut out = vec![0u8; (nw as usize) * (nh as usize)];
+    for y in 0..nh {
+        let row = (y as usize) * (nw as usize);
+        for x in 0..nw {
+            let p = transformed.get_pixel(x, y).0;
+            out[row + x as usize] = ((u16::from(p[0]) * u16::from(p[3]) + 127) / 255) as u8;
+        }
+    }
+    (out, nw, nh, dx, dy)
 }

@@ -8,25 +8,28 @@ use std::time::{Duration, Instant};
 use iced::keyboard::{self, Key, Modifiers, key::Named};
 use iced::widget::{
     checkbox, column, container, image as iced_image, operation as widget_operation, row,
-    scrollable, slider, text,
+    scrollable, slider, text, text_input,
 };
 use iced::{
-    Alignment, Element, Fill, Length, Point, Rectangle, Size, Subscription, Task,
+    Alignment, Color, Element, Fill, Length, Point, Rectangle, Size, Subscription, Task,
     Theme as IcedTheme, event, mouse, window,
 };
 use image::RgbaImage;
-use photon_core::CoreHandle;
+use photon_core::{CoreHandle, EditorTransformFrames};
 use photon_i18n::{tr, tr_ui_text};
 use photon_panels::SidebarOrderState;
 use photon_protocol::{
-    ApplyTarget, BrowserLeftPanel, BrowserRightPanel, BrowserSortField, BrowserThumbSize,
-    BrowserViewMode, ClientKind, ColorAdjustments, Command, CommandResponse, EditorRightPanel,
-    EditorToolTab, Envelope, EventKind, FlipAxis, Language, LayerEffect, LiquifyMode,
-    LiveStrokeKind, MoveDirection, Query, ResizeFilter, ResizeMode, SelectionBooleanOp,
-    SelectionModifyOp, SelectionShape, SortOrder, SystemOpenWindowMode, Theme, UiStateSnapshot,
-    UiText, ViewerRightPanel, ViewerViewMode, WebtoonFitMode, Workspace,
+    AppLaunchWindowMode, ApplyTarget, BrowserLeftPanel, BrowserRightPanel, BrowserSortField,
+    BrowserThumbSize, BrowserViewMode, CanvasAntiAliasingMode, ClientKind, ColorAdjustments,
+    Command, CommandResponse, EditorRightPanel, EditorToolTab, Envelope, EventKind, FlipAxis,
+    HealingMode, Language, LayerEffect, LayerTransformSpec, LiquifyMode, LiveStrokeKind,
+    MoveDirection, PluginCapability, PluginInfo, PluginParamKind, PluginParamSpec,
+    PluginParamValue, Query, ResizeFilter, ResizeMode, SelectionBooleanOp, SelectionModifyOp,
+    SelectionShape, SortOrder, SystemOpenWindowMode, Theme, UiStateSnapshot, UiText,
+    ViewerRightPanel, ViewerViewMode, ViewportDenoiseMode, WebtoonFitMode, Workspace,
 };
 use photon_ui::button::{self, ButtonVariant};
+use photon_ui::curve_editor::{CurveGraphEvent, curve_graph};
 use photon_ui::dialog::{
     ConfirmDialogSpec, DialogEvent, DialogManager, DialogSpec, DialogWindowState,
     ManagedDialogSpec, OverlayMode, PromptDialogSpec, ToastKind, ToastSpec, alert_dialog_spec,
@@ -49,27 +52,28 @@ use photon_browser::batch_dialog::{
 };
 use photon_browser::{
     BrowserMenuKind, BrowserMessage, BrowserViewState, browser_filter_input_id,
-    build_browser_context_menu_entries, build_browser_help_menu_entries, build_browser_sort_menu,
-    build_browser_toolbar, build_browser_view, build_browser_window_menu_entries,
-    build_quick_access_context_menu,
+    build_browser_context_menu_entries, build_browser_help_menu_entries,
+    build_browser_plugins_menu_entries, build_browser_sort_menu, build_browser_toolbar,
+    build_browser_view, build_browser_window_menu_entries, build_quick_access_context_menu,
 };
 use photon_canvas::{
-    CanvasEvent, CpuImageFrame, CpuMaskFrame, default_viewport_bg_rgb, dual_spread_geometry,
+    CanvasEvent, CpuImageFrame, CpuMaskFrame, TransformPreview, default_viewport_bg_rgb,
+    dual_spread_geometry,
 };
 use photon_editor::panel_splitter::{DockDragState, DockSplitterKind};
 use photon_editor::{
     AdjustmentPopupTab, ColorBalanceZone, ColorPickerTarget, CompareMode, CurvesChannel,
     DimGridAction, DimensionInputState, EditorMenuKind, EditorMessage, EditorTool, EditorUiState,
     EditorViewState, build_color_picker_dialog, build_editor_add_layer_menu,
-    build_editor_canvas_context_menu, build_editor_layer_context_menu, build_editor_toolbar,
-    build_editor_view, build_export_dialog, crop_uv_to_signed, default_curves, format_hex,
-    parse_hex_rgb,
+    build_editor_canvas_context_menu, build_editor_layer_context_menu,
+    build_editor_plugins_menu_entries, build_editor_toolbar, build_editor_view,
+    build_export_dialog, crop_uv_to_signed, default_curves, format_hex, parse_hex_rgb,
 };
 use photon_viewer::{
-    ViewerMessage, ViewerViewState, build_viewer_context_menu, build_viewer_toolbar,
-    build_viewer_view, dual_spread_slots, dual_spread_slots_for, step_dual_spread,
-    viewer_counter_summary, viewer_reader_options_right_offset, viewer_status_summary,
-    webtoon_index_at_scroll, webtoon_offset_for_index, webtoon_scroll_id,
+    ViewerMessage, ViewerViewState, build_viewer_context_menu, build_viewer_quality_menu_entries,
+    build_viewer_toolbar, build_viewer_view, dual_spread_slots, dual_spread_slots_for,
+    step_dual_spread, viewer_counter_summary, viewer_reader_options_right_offset,
+    viewer_status_summary, webtoon_index_at_scroll, webtoon_offset_for_index, webtoon_scroll_id,
 };
 
 static CORE_HANDLE: OnceLock<CoreHandle> = OnceLock::new();
@@ -102,6 +106,7 @@ pub(crate) enum ActiveMenu {
     EditorEdit,
     EditorImage,
     EditorFilter,
+    EditorPlugins,
     EditorSelect,
     EditorView,
     EditorWindow,
@@ -132,7 +137,10 @@ pub enum DesktopDialogId {
     AdjustHsv,
     AdjustColorBalance,
     AdjustCurves,
+    AdjustDenoise,
     SelectionModify,
+    ManagePlugins,
+    PluginParams,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -310,11 +318,34 @@ pub(crate) enum InAppDialog {
     ConfirmDeletePermanently {
         paths: Vec<String>,
     },
+    AdjustDenoise {
+        strength: f32,
+        detail_preserve: f32,
+        target: ApplyTarget,
+    },
+    ManagePlugins {
+        search: String,
+        selected_id: Option<String>,
+    },
+    PluginParams {
+        plugin_id: String,
+        plugin_name: String,
+        specs: Vec<PluginParamSpec>,
+        values: BTreeMap<String, PluginParamValue>,
+        target: ApplyTarget,
+        show_target: bool,
+    },
     Alert {
         id: DesktopDialogId,
         title: String,
         message: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum BrowserClipboardPaste {
+    Files(Vec<String>),
+    ImagePng(Vec<u8>),
 }
 
 #[derive(Debug, Clone)]
@@ -353,8 +384,13 @@ pub struct PhotonGui {
     pub(crate) editor_frame: Option<CpuImageFrame>,
     pub(crate) editor_original_frame: Option<CpuImageFrame>,
     pub(crate) editor_selection_mask: Option<CpuMaskFrame>,
+    pub(crate) editor_histogram: Option<(u64, Arc<[u32; 256]>)>,
+    pub(crate) transform_preview: Option<TransformPreview>,
+    pub(crate) transform_layer_id: Option<u64>,
     pub(crate) marching_ants_phase: f32,
     pub(crate) editor_ui: EditorUiState,
+    pub(crate) browser_file_clipboard: Vec<String>,
+    pub(crate) last_synced_clipboard_png: Option<Vec<u8>>,
     pub(crate) viewer_mode: ViewerViewMode,
     pub(crate) viewer_manga_rtl: bool,
     pub(crate) viewer_manga_cover_separate: bool,
@@ -596,6 +632,9 @@ pub enum Message {
     SetMangaPageGap(u16),
     SetWebtoonFitMode(WebtoonFitMode),
     SetSystemOpenWindowMode(SystemOpenWindowMode),
+    SetAppLaunchWindowMode(AppLaunchWindowMode),
+    SetAntiAliasingMode(CanvasAntiAliasingMode),
+    SetViewportDenoiseMode(ViewportDenoiseMode),
     WebtoonScrolled(scrollable::Viewport),
     WebtoonPagesLoaded(Vec<(String, u32, u32, Vec<u8>)>),
     Browser(BrowserMessage),
@@ -655,7 +694,62 @@ pub enum Message {
     EditorApplyColorBalance,
     EditorSelectCurvesChannel(CurvesChannel),
     EditorCurvesChanged(Vec<[f32; 2]>),
+    EditorResetActiveCurvesChannel,
     EditorApplyCurves,
+    EditorZoomActual,
+    CanvasPanTo {
+        pan_x: f32,
+        pan_y: f32,
+    },
+    EditorSetFloodFillOpacity(f32),
+    EditorToggleFloodFillSampleAll,
+    EditorSetGradientOpacity(f32),
+    EditorToggleGradientReverse,
+    EditorToggleGradientDither,
+    EditorSetHealingMode(HealingMode),
+    EditorSetHealingRadius(f32),
+    EditorSetHealingHardness(f32),
+    EditorSetHealingStrength(f32),
+    EditorToggleHealingSampleAll,
+    EditorSetHealingSource(Option<[f32; 2]>),
+    EditorSetDenoiseStrength(f32),
+    EditorSetDenoiseDetail(f32),
+    OpenDenoiseDialog,
+    DenoiseDialogStrengthChanged(f32),
+    DenoiseDialogDetailChanged(f32),
+    DenoiseDialogTargetChanged(ApplyTarget),
+    ConfirmDenoiseDialog,
+    EditorSetTransformSpec(LayerTransformSpec),
+    EditorTransformFramesLoaded(Option<EditorTransformFrames>),
+    EditorTransformCommit,
+    EditorTransformCancel,
+    OpenManagePlugins,
+    ManagePluginsSearchChanged(String),
+    ManagePluginsSelect(String),
+    PickPluginInstallFolder,
+    PluginInstallFolderPicked(Option<PathBuf>),
+    OpenPluginsFolder,
+    RunPlugin(String),
+    PluginParamChanged(String, PluginParamValue),
+    PluginParamTargetChanged(ApplyTarget),
+    ConfirmPluginParams,
+    BrowserCopyFiles(Vec<String>),
+    BrowserPasteFiles,
+    BrowserPasteResolved(Option<BrowserClipboardPaste>),
+    EditorCopyPixels {
+        merged: bool,
+    },
+    EditorCutPixels,
+    EditorPastePixels {
+        into_selection: bool,
+    },
+    EditorPasteResolved {
+        into_selection: bool,
+        png_bytes: Option<Vec<u8>>,
+        clipboard_empty: bool,
+    },
+    EditorPixelsCopiedSyncClipboard(Result<CommandResponse, String>),
+    RecordSyncedClipboardPng(Vec<u8>),
     EditorSetRotateAngle(f64),
     EditorApplyRotateAngle,
     EditorCanvasDimAction(DimGridAction),
@@ -715,6 +809,10 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
     );
     let launch_mode = snapshot.meta.layout.system_open_window_mode;
     let start_fullscreen = opened_with_files && launch_mode == SystemOpenWindowMode::Fullscreen;
+    let start_maximized = !opened_with_files
+        && (snapshot.meta.layout.app_launch_window_mode == AppLaunchWindowMode::Maximized
+            || (snapshot.meta.layout.app_launch_window_mode == AppLaunchWindowMode::Remembered
+                && snapshot.meta.layout.window_maximized));
     let mut suppress_resize_until = None;
     let init_size = if opened_with_files {
         match launch_mode {
@@ -740,8 +838,9 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
             SystemOpenWindowMode::Remembered => remembered_size,
         }
     } else {
-        // Ignore initial WM map/configure resize jitter so remembered size isn't overwritten.
-        suppress_resize_until = Some(Instant::now() + Duration::from_millis(600));
+        // Ignore initial WM map/configure/maximize resize jitter so remembered size isn't overwritten.
+        suppress_resize_until =
+            Some(Instant::now() + Duration::from_millis(if start_maximized { 1200 } else { 600 }));
         remembered_size
     };
 
@@ -826,8 +925,13 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
         editor_frame: None,
         editor_original_frame: None,
         editor_selection_mask: None,
+        editor_histogram: None,
+        transform_preview: None,
+        transform_layer_id: None,
         marching_ants_phase: 0.0,
         editor_ui,
+        browser_file_clipboard: Vec::new(),
+        last_synced_clipboard_png: None,
         viewer_mode,
         viewer_manga_rtl,
         viewer_manga_cover_separate,
@@ -911,11 +1015,17 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
     } else {
         Task::none()
     };
+    let max_task = if start_maximized && !start_fullscreen {
+        window::maximize(id, true)
+    } else {
+        Task::none()
+    };
     (
         app,
         Task::batch([
             open_task.map(Message::WindowOpened),
             fs_task,
+            max_task,
             load_task,
             tree_task,
             tree_load_tasks,
@@ -1182,8 +1292,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 };
                 let vp_w = (state.window_size.width - 40.0).max(120.0);
                 let vp_h = (state.window_size.height - 130.0).max(120.0);
-                let fit_scale = (vp_w / iw.max(1.0)).min(vp_h / ih.max(1.0));
-                state.zoom = (1.0 / fit_scale.max(0.05)).clamp(0.1, 16.0);
+                let (actual_zoom, min_z, max_z) =
+                    actual_zoom_for_bounds(iw.max(1.0) as u32, ih.max(1.0) as u32, vp_w, vp_h);
+                state.zoom = actual_zoom.clamp(min_z, max_z);
                 state.pan_x = 0.0;
                 state.pan_y = 0.0;
             }
@@ -1335,22 +1446,18 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     return sync_ui_tree_task(state);
                 }
                 state.suppress_resize_until = None;
-                let w = (size.width.round() as u32).clamp(960, 3840);
-                let h = (size.height.round() as u32).clamp(540, 2160);
-                let layout = &state.snapshot.meta.layout;
-                if w != layout.window_width || h != layout.window_height {
-                    state.resize_save_seq = state.resize_save_seq.wrapping_add(1);
-                    let seq = state.resize_save_seq;
-                    let save_task = Task::perform(
-                        async move {
-                            tokio::time::sleep(Duration::from_millis(400)).await;
-                            Message::PersistWindowSize(seq, w, h)
-                        },
-                        |m| m,
-                    );
-                    return Task::batch([sync_ui_tree_task(state), save_task]);
-                }
-                return sync_ui_tree_task(state);
+                let w = (size.width.round() as u32).clamp(680, 3840);
+                let h = (size.height.round() as u32).clamp(500, 2160);
+                state.resize_save_seq = state.resize_save_seq.wrapping_add(1);
+                let seq = state.resize_save_seq;
+                let save_task = Task::perform(
+                    async move {
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                        Message::PersistWindowSize(seq, w, h)
+                    },
+                    |m| m,
+                );
+                return Task::batch([sync_ui_tree_task(state), save_task]);
             }
             Task::none()
         }
@@ -1370,14 +1477,23 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 .map(move |is_max| Message::PersistWindowSizeIfWindowed(seq, w, h, is_max))
         }
         Message::PersistWindowSizeIfWindowed(seq, w, h, is_maximized) => {
-            if is_maximized || seq != state.resize_save_seq || state.is_fullscreen {
+            if seq != state.resize_save_seq || state.is_fullscreen {
                 return Task::none();
             }
             let layout = &state.snapshot.meta.layout;
-            if layout.window_width == w && layout.window_height == h {
+            if is_maximized {
+                if layout.window_maximized {
+                    return Task::none();
+                }
+                return commit_layout_with(state, |layout| {
+                    layout.window_maximized = true;
+                });
+            }
+            if !layout.window_maximized && layout.window_width == w && layout.window_height == h {
                 return Task::none();
             }
             commit_layout_with(state, |layout| {
+                layout.window_maximized = false;
                 layout.window_width = w;
                 layout.window_height = h;
             })
@@ -1511,6 +1627,10 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     state.zoom = 1.0;
                     state.pan_x = 0.0;
                     state.pan_y = 0.0;
+                } else {
+                    state.transform_preview = None;
+                    state.transform_layer_id = None;
+                    state.editor_ui.transform_spec = LayerTransformSpec::default();
                 }
             }
             if snap.meta.editor.is_some()
@@ -1627,8 +1747,17 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 if state.snapshot.meta.editor.is_some() {
                     tasks.push(load_editor_frame_task(state.core.clone()));
                     tasks.push(load_editor_thumbnails_task(state.core.clone()));
+                    if state.editor_ui.tool == EditorTool::Transform {
+                        tasks.push(load_editor_transform_frames_task(
+                            state.core.clone(),
+                            state.transform_layer_id,
+                        ));
+                    }
                 } else {
                     state.editor_frame = None;
+                    state.editor_histogram = None;
+                    state.transform_preview = None;
+                    state.transform_layer_id = None;
                     state.editor_layer_thumbs.clear();
                     state.editor_mask_thumbs.clear();
                 }
@@ -1741,6 +1870,15 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                         | "renamed_item"
                         | "translate_done"
                         | "batch_done"
+                        | "plugins_refreshed"
+                        | "plugin_enabled"
+                        | "plugin_disabled"
+                        | "plugin_installed"
+                        | "plugin_uninstalled"
+                        | "plugin_executed"
+                        | "toast_copied"
+                        | "toast_cut"
+                        | "toast_pasted"
                 )
             {
                 return show_toast(state, tr_ui_text(lang, ui), ToastKind::Success);
@@ -2416,6 +2554,21 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         Message::SetSystemOpenWindowMode(mode) => commit_layout_with(state, |layout| {
             layout.system_open_window_mode = mode;
         }),
+        Message::SetAppLaunchWindowMode(mode) => commit_layout_with(state, |layout| {
+            layout.app_launch_window_mode = mode;
+        }),
+        Message::SetAntiAliasingMode(mode) => {
+            state.active_menu = None;
+            commit_layout_with(state, |layout| {
+                layout.canvas_anti_aliasing = mode;
+            })
+        }
+        Message::SetViewportDenoiseMode(mode) => {
+            state.active_menu = None;
+            commit_layout_with(state, |layout| {
+                layout.viewport_denoise = mode;
+            })
+        }
         Message::WebtoonScrolled(vp) => {
             let y = vp.absolute_offset().y;
             let vh = vp.bounds().height;
@@ -2502,8 +2655,26 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 state.webtoon_zoom = (state.webtoon_zoom * factor).clamp(0.4, 3.0);
                 return Task::none();
             }
-            state.zoom = (state.zoom * factor).clamp(0.1, 16.0);
+            let (min_z, max_z) = active_workspace_zoom_bounds(state, None);
+            state.zoom = (state.zoom * factor).clamp(min_z, max_z);
             sync_ui_tree_task(state)
+        }
+        Message::EditorZoomActual => {
+            state.context_menu = None;
+            if let Some(frame) = &state.editor_frame {
+                let rect = resolved_editor_canvas_bounds(state);
+                let (actual, min_z, max_z) =
+                    actual_zoom_for_bounds(frame.width, frame.height, rect.width, rect.height);
+                state.zoom = actual.clamp(min_z, max_z);
+                state.pan_x = 0.0;
+                state.pan_y = 0.0;
+            }
+            sync_ui_tree_task(state)
+        }
+        Message::CanvasPanTo { pan_x, pan_y } => {
+            state.pan_x = pan_x;
+            state.pan_y = pan_y;
+            Task::none()
         }
         Message::Canvas(ev) => {
             match ev {
@@ -2522,30 +2693,27 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     cursor,
                     bounds,
                 } => {
-                    let old_zoom = state.zoom;
-                    let new_zoom = (old_zoom * factor).clamp(0.1, 16.0);
-                    let ratio = new_zoom / old_zoom.max(0.05);
-                    if let Some([cx, cy]) = cursor {
-                        let half_w = bounds[0] * 0.5;
-                        let half_h = bounds[1] * 0.5;
-                        state.pan_x = (cx - half_w) - ((cx - half_w) - state.pan_x) * ratio;
-                        state.pan_y = (cy - half_h) - ((cy - half_h) - state.pan_y) * ratio;
-                    }
-                    state.zoom = new_zoom;
-                    if state.snapshot.meta.workspace == Workspace::Editor {
-                        clamp_editor_pan(state, bounds);
-                    }
+                    let (min_z, max_z) = active_workspace_zoom_bounds(state, Some(bounds));
+                    apply_canvas_zoom_at_cursor(
+                        &mut state.zoom,
+                        &mut state.pan_x,
+                        &mut state.pan_y,
+                        factor,
+                        cursor,
+                        bounds,
+                        min_z,
+                        max_z,
+                    );
                 }
                 CanvasEvent::PanBy { dx, dy } => {
-                    state.pan_x += dx;
-                    state.pan_y += dy;
-                    if state.snapshot.meta.workspace == Workspace::Editor {
-                        let rect = resolved_editor_canvas_bounds(state);
-                        clamp_editor_pan(state, [rect.width, rect.height]);
-                    }
+                    apply_canvas_pan(&mut state.pan_x, &mut state.pan_y, dx, dy);
                 }
                 CanvasEvent::CropUpdated(uv) => {
                     state.crop_uv = Some(uv);
+                    return Task::none();
+                }
+                CanvasEvent::HealingSourcePicked([x, y]) => {
+                    state.editor_ui.healing_source_px = Some([x as f32, y as f32]);
                     return Task::none();
                 }
                 CanvasEvent::StrokeBegin([x, y]) => {
@@ -2555,6 +2723,17 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                             mode: state.editor_ui.liquify_mode,
                             radius: state.editor_ui.liquify_radius,
                             strength: state.editor_ui.liquify_strength,
+                        }
+                    } else if state.editor_ui.tool == EditorTool::HealingBrush {
+                        LiveStrokeKind::Healing {
+                            mode: state.editor_ui.healing_mode,
+                            radius: state.editor_ui.healing_radius,
+                            hardness: state.editor_ui.healing_hardness,
+                            strength: state.editor_ui.healing_strength,
+                            source: state
+                                .editor_ui
+                                .healing_source_px
+                                .map(|[sx, sy]| [f64::from(sx), f64::from(sy)]),
                         }
                     } else {
                         LiveStrokeKind::Paint {
@@ -2729,6 +2908,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                             nodes,
                             fill_mode: state.editor_ui.shape_fill_mode,
                             closed,
+                            color: Some(state.editor_ui.fg_color),
+                            radius: Some(state.editor_ui.shape_stroke_width),
+                            opacity: Some(state.editor_ui.brush_opacity),
                         },
                     );
                 }
@@ -2762,6 +2944,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                             y,
                             tolerance: state.editor_ui.flood_fill_tolerance,
                             contiguous: state.editor_ui.flood_fill_contiguous,
+                            color: Some(state.editor_ui.fg_color),
+                            opacity: Some(state.editor_ui.flood_fill_opacity),
+                            sample_all_layers: state.editor_ui.flood_fill_sample_all,
                         },
                     );
                 }
@@ -2773,8 +2958,26 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                             end,
                             kind: state.editor_ui.gradient_kind,
                             color_mode: state.editor_ui.gradient_color_mode,
+                            fg_color: Some(state.editor_ui.fg_color),
+                            bg_color: state.editor_ui.bg_color,
+                            opacity: Some(state.editor_ui.gradient_opacity),
+                            reverse: state.editor_ui.gradient_reverse,
+                            dither: state.editor_ui.gradient_dither,
                         },
                     );
+                }
+                CanvasEvent::TransformUpdated(spec) => {
+                    state.editor_ui.transform_spec = spec;
+                    if let Some(tp) = &mut state.transform_preview {
+                        tp.spec = spec;
+                    }
+                    return Task::none();
+                }
+                CanvasEvent::TransformCommit => {
+                    return update(state, Message::EditorTransformCommit);
+                }
+                CanvasEvent::TransformCancel => {
+                    return update(state, Message::EditorTransformCancel);
                 }
             }
             sync_ui_tree_task(state)
@@ -2941,6 +3144,28 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 && let Some(ed) = &state.snapshot.meta.editor
             {
                 state.editor_ui.sync_document_dims(ed.width, ed.height);
+            }
+            if tool == EditorTool::Transform {
+                state.editor_ui.transform_spec = LayerTransformSpec::default();
+                state.transform_layer_id = state
+                    .snapshot
+                    .meta
+                    .editor
+                    .as_ref()
+                    .map(|ed| ed.active_layer_id);
+                if state.snapshot.meta.editor.is_some() {
+                    return Task::batch([
+                        load_editor_transform_frames_task(
+                            state.core.clone(),
+                            state.transform_layer_id,
+                        ),
+                        sync_ui_tree_task(state),
+                    ]);
+                }
+            } else {
+                state.transform_preview = None;
+                state.transform_layer_id = None;
+                state.editor_ui.transform_spec = LayerTransformSpec::default();
             }
             sync_ui_tree_task(state)
         }
@@ -3319,6 +3544,16 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::EditorResetActiveCurvesChannel => {
+            let linear = vec![[0.0, 0.0], [1.0, 1.0]];
+            match state.editor_ui.curves_channel {
+                CurvesChannel::Rgb => state.editor_ui.curves.rgb = linear,
+                CurvesChannel::Red => state.editor_ui.curves.red = linear,
+                CurvesChannel::Green => state.editor_ui.curves.green = linear,
+                CurvesChannel::Blue => state.editor_ui.curves.blue = linear,
+            }
+            Task::none()
+        }
         Message::EditorApplyCurves => {
             let c = state.editor_ui.curves.clone();
             state.editor_ui.curves = default_curves();
@@ -3330,6 +3565,510 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     green: c.green,
                     blue: c.blue,
                     target: state.editor_ui.apply_target,
+                },
+            )
+        }
+        Message::EditorSetFloodFillOpacity(v) => {
+            state.editor_ui.flood_fill_opacity = v.clamp(0.01, 1.0);
+            Task::none()
+        }
+        Message::EditorToggleFloodFillSampleAll => {
+            state.editor_ui.flood_fill_sample_all = !state.editor_ui.flood_fill_sample_all;
+            Task::none()
+        }
+        Message::EditorSetGradientOpacity(v) => {
+            state.editor_ui.gradient_opacity = v.clamp(0.01, 1.0);
+            Task::none()
+        }
+        Message::EditorToggleGradientReverse => {
+            state.editor_ui.gradient_reverse = !state.editor_ui.gradient_reverse;
+            Task::none()
+        }
+        Message::EditorToggleGradientDither => {
+            state.editor_ui.gradient_dither = !state.editor_ui.gradient_dither;
+            Task::none()
+        }
+        Message::EditorSetHealingMode(m) => {
+            state.editor_ui.healing_mode = m;
+            Task::none()
+        }
+        Message::EditorSetHealingRadius(r) => {
+            state.editor_ui.healing_radius = r.clamp(1.0, 200.0);
+            Task::none()
+        }
+        Message::EditorSetHealingHardness(h) => {
+            state.editor_ui.healing_hardness = h.clamp(0.0, 1.0);
+            Task::none()
+        }
+        Message::EditorSetHealingStrength(s) => {
+            state.editor_ui.healing_strength = s.clamp(0.05, 1.0);
+            Task::none()
+        }
+        Message::EditorToggleHealingSampleAll => {
+            state.editor_ui.healing_sample_all = !state.editor_ui.healing_sample_all;
+            Task::none()
+        }
+        Message::EditorSetHealingSource(src) => {
+            state.editor_ui.healing_source_px = src;
+            Task::none()
+        }
+        Message::EditorSetDenoiseStrength(v) => {
+            state.editor_ui.denoise_strength = v.clamp(0.0, 1.0);
+            Task::none()
+        }
+        Message::EditorSetDenoiseDetail(v) => {
+            state.editor_ui.denoise_detail = v.clamp(0.0, 1.0);
+            Task::none()
+        }
+        Message::OpenDenoiseDialog => {
+            state.active_menu = None;
+            state.context_menu = None;
+            if state.snapshot.meta.editor.is_some() {
+                state.dialog = Some(InAppDialog::AdjustDenoise {
+                    strength: state.editor_ui.denoise_strength,
+                    detail_preserve: state.editor_ui.denoise_detail,
+                    target: state.editor_ui.apply_target,
+                });
+                open_dialog_window(state, DesktopDialogId::AdjustDenoise);
+                return sync_ui_tree_task(state);
+            }
+            Task::none()
+        }
+        Message::DenoiseDialogStrengthChanged(v) => {
+            let clamped = v.clamp(0.0, 1.0);
+            state.editor_ui.denoise_strength = clamped;
+            if let Some(InAppDialog::AdjustDenoise { strength, .. }) = &mut state.dialog {
+                *strength = clamped;
+            }
+            Task::none()
+        }
+        Message::DenoiseDialogDetailChanged(v) => {
+            let clamped = v.clamp(0.0, 1.0);
+            state.editor_ui.denoise_detail = clamped;
+            if let Some(InAppDialog::AdjustDenoise {
+                detail_preserve, ..
+            }) = &mut state.dialog
+            {
+                *detail_preserve = clamped;
+            }
+            Task::none()
+        }
+        Message::DenoiseDialogTargetChanged(t) => {
+            state.editor_ui.apply_target = t;
+            if let Some(InAppDialog::AdjustDenoise { target, .. }) = &mut state.dialog {
+                *target = t;
+            }
+            Task::none()
+        }
+        Message::ConfirmDenoiseDialog => {
+            let Some(InAppDialog::AdjustDenoise {
+                strength,
+                detail_preserve,
+                target,
+            }) = state.dialog.take()
+            else {
+                return Task::none();
+            };
+            state.dialog_manager.close(&DesktopDialogId::AdjustDenoise);
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorDenoise {
+                    strength,
+                    detail_preserve,
+                    target,
+                },
+            )
+        }
+        Message::EditorSetTransformSpec(spec) => {
+            state.editor_ui.transform_spec = spec;
+            if let Some(tp) = &mut state.transform_preview {
+                tp.spec = spec;
+            }
+            Task::none()
+        }
+        Message::EditorTransformFramesLoaded(maybe_frames) => {
+            if state.editor_ui.tool != EditorTool::Transform {
+                return Task::none();
+            }
+            let Some(frames) = maybe_frames else {
+                state.transform_preview = None;
+                return Task::none();
+            };
+            let rev_matches = state
+                .snapshot
+                .meta
+                .editor
+                .as_ref()
+                .is_some_and(|ed| ed.pixel_revision == frames.pixel_revision);
+            if !rev_matches {
+                return Task::none();
+            }
+            state.transform_layer_id = Some(frames.layer_id);
+            state.transform_preview = Some(TransformPreview {
+                base_frame: Some(CpuImageFrame {
+                    key: format!("editor:transform-base:{}", frames.layer_id),
+                    revision: frames.pixel_revision,
+                    width: frames.canvas_width,
+                    height: frames.canvas_height,
+                    rgba: Arc::new(frames.base_rgba_excluding_active),
+                }),
+                layer_frame: CpuImageFrame {
+                    key: format!("editor:transform-layer:{}", frames.layer_id),
+                    revision: frames.pixel_revision,
+                    width: frames.layer_width,
+                    height: frames.layer_height,
+                    rgba: Arc::new(frames.active_layer_rgba),
+                },
+                layer_offset: [frames.offset_x, frames.offset_y],
+                layer_size: [frames.layer_width, frames.layer_height],
+                spec: state.editor_ui.transform_spec,
+            });
+            Task::none()
+        }
+        Message::EditorTransformCommit => {
+            let spec = state.editor_ui.transform_spec;
+            let layer_id = state.transform_layer_id;
+            state.editor_ui.transform_spec = LayerTransformSpec::default();
+            state.transform_preview = None;
+            state.transform_layer_id = None;
+            if state.editor_ui.tool == EditorTool::Transform {
+                state.editor_ui.tool = EditorTool::Pointer;
+            }
+            if !spec.is_identity() {
+                return dispatch_to_core(
+                    state.core.clone(),
+                    Command::EditorTransformLayer {
+                        layer_id,
+                        transform: spec,
+                    },
+                );
+            }
+            sync_ui_tree_task(state)
+        }
+        Message::EditorTransformCancel => {
+            state.editor_ui.transform_spec = LayerTransformSpec::default();
+            state.transform_preview = None;
+            state.transform_layer_id = None;
+            if state.editor_ui.tool == EditorTool::Transform {
+                state.editor_ui.tool = EditorTool::Pointer;
+            }
+            sync_ui_tree_task(state)
+        }
+        Message::OpenManagePlugins => {
+            state.active_menu = None;
+            state.context_menu = None;
+            let selected_id = state.snapshot.meta.plugins.first().map(|p| p.id.clone());
+            state.dialog = Some(InAppDialog::ManagePlugins {
+                search: String::new(),
+                selected_id,
+            });
+            open_dialog_window(state, DesktopDialogId::ManagePlugins);
+            sync_ui_tree_task(state)
+        }
+        Message::ManagePluginsSearchChanged(val) => {
+            if let Some(InAppDialog::ManagePlugins { search, .. }) = &mut state.dialog {
+                *search = val;
+            }
+            Task::none()
+        }
+        Message::ManagePluginsSelect(id) => {
+            if let Some(InAppDialog::ManagePlugins { selected_id, .. }) = &mut state.dialog {
+                *selected_id = Some(id);
+            }
+            Task::none()
+        }
+        Message::PickPluginInstallFolder => {
+            let title = tr(state.snapshot.meta.language, "action-install-plugin");
+            Task::perform(
+                async move { photon_dialogs::pick_folder(&title, None).await },
+                Message::PluginInstallFolderPicked,
+            )
+        }
+        Message::PluginInstallFolderPicked(Some(path)) => dispatch_to_core(
+            state.core.clone(),
+            Command::PluginInstall {
+                source_dir: path.to_string_lossy().into_owned(),
+            },
+        ),
+        Message::PluginInstallFolderPicked(None) => Task::none(),
+        Message::OpenPluginsFolder => {
+            let dir = resolve_desktop_plugins_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            open_folder_in_file_manager(&dir);
+            Task::none()
+        }
+        Message::RunPlugin(id) => {
+            state.active_menu = None;
+            state.context_menu = None;
+            let Some(plugin) = state
+                .snapshot
+                .meta
+                .plugins
+                .iter()
+                .find(|p| p.id == id)
+                .cloned()
+            else {
+                return Task::none();
+            };
+            if plugin.params.is_empty() {
+                return dispatch_to_core(
+                    state.core.clone(),
+                    Command::PluginRun {
+                        id,
+                        params: BTreeMap::new(),
+                        target: state.editor_ui.apply_target,
+                    },
+                );
+            }
+            let mut values = BTreeMap::new();
+            for spec in &plugin.params {
+                values.insert(spec.key.clone(), default_value_for_plugin_param(spec));
+            }
+            let show_target = state.snapshot.meta.workspace == Workspace::Editor
+                && plugin
+                    .capabilities
+                    .contains(&PluginCapability::EditorFilter);
+            state.dialog = Some(InAppDialog::PluginParams {
+                plugin_id: plugin.id,
+                plugin_name: plugin.name,
+                specs: plugin.params,
+                values,
+                target: state.editor_ui.apply_target,
+                show_target,
+            });
+            open_dialog_window(state, DesktopDialogId::PluginParams);
+            sync_ui_tree_task(state)
+        }
+        Message::PluginParamChanged(key, val) => {
+            if let Some(InAppDialog::PluginParams { values, .. }) = &mut state.dialog {
+                values.insert(key, val);
+            }
+            Task::none()
+        }
+        Message::PluginParamTargetChanged(t) => {
+            state.editor_ui.apply_target = t;
+            if let Some(InAppDialog::PluginParams { target, .. }) = &mut state.dialog {
+                *target = t;
+            }
+            Task::none()
+        }
+        Message::ConfirmPluginParams => {
+            let Some(InAppDialog::PluginParams {
+                plugin_id,
+                values,
+                target,
+                ..
+            }) = state.dialog.take()
+            else {
+                return Task::none();
+            };
+            state.dialog_manager.close(&DesktopDialogId::PluginParams);
+            dispatch_to_core(
+                state.core.clone(),
+                Command::PluginRun {
+                    id: plugin_id,
+                    params: values,
+                    target,
+                },
+            )
+        }
+        Message::BrowserCopyFiles(paths) => {
+            state.active_menu = None;
+            state.context_menu = None;
+            let chosen = if paths.is_empty() {
+                state.snapshot.meta.selection.clone()
+            } else {
+                paths
+            };
+            if chosen.is_empty() {
+                return Task::none();
+            }
+            state.browser_file_clipboard = chosen.clone();
+            state.last_synced_clipboard_png = None;
+            let toast_task = show_toast(
+                state,
+                tr(state.snapshot.meta.language, "toast-copied"),
+                ToastKind::Success,
+            );
+            let uri_task = Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || write_file_uris_to_clipboard(&chosen))
+                        .await
+                        .unwrap_or(false)
+                },
+                |_| Message::Noop,
+            );
+            Task::batch([toast_task, uri_task])
+        }
+        Message::BrowserPasteFiles => {
+            state.active_menu = None;
+            state.context_menu = None;
+            if state.snapshot.meta.current_folder.is_none() {
+                return Task::none();
+            }
+            let in_app_files = state.browser_file_clipboard.clone();
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        resolve_browser_clipboard_paste(in_app_files)
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                },
+                Message::BrowserPasteResolved,
+            )
+        }
+        Message::BrowserPasteResolved(Some(paste)) => {
+            let Some(folder) = state.snapshot.meta.current_folder.clone() else {
+                return Task::none();
+            };
+            match paste {
+                BrowserClipboardPaste::Files(paths) => dispatch_to_core(
+                    state.core.clone(),
+                    Command::CopyTo {
+                        paths,
+                        destination: folder,
+                    },
+                ),
+                BrowserClipboardPaste::ImagePng(png_bytes) => dispatch_to_core(
+                    state.core.clone(),
+                    Command::PasteImageBytes {
+                        folder,
+                        filename_hint: "pasted".to_owned(),
+                        png_bytes,
+                    },
+                ),
+            }
+        }
+        Message::BrowserPasteResolved(None) => show_toast(
+            state,
+            tr(state.snapshot.meta.language, "toast-clipboard-empty"),
+            ToastKind::Info,
+        ),
+        Message::EditorCopyPixels { merged } => {
+            state.active_menu = None;
+            state.context_menu = None;
+            state.browser_file_clipboard.clear();
+            let core = state.core.clone();
+            Task::perform(
+                async move {
+                    let env = Envelope::new(
+                        format!("gui-{}", std::process::id()),
+                        ClientKind::Gui,
+                        Command::EditorCopyPixels { merged },
+                    );
+                    core.dispatch(env).await
+                },
+                Message::EditorPixelsCopiedSyncClipboard,
+            )
+        }
+        Message::EditorCutPixels => {
+            state.active_menu = None;
+            state.context_menu = None;
+            state.browser_file_clipboard.clear();
+            let core = state.core.clone();
+            Task::perform(
+                async move {
+                    let env = Envelope::new(
+                        format!("gui-{}", std::process::id()),
+                        ClientKind::Gui,
+                        Command::EditorCutPixels,
+                    );
+                    core.dispatch(env).await
+                },
+                Message::EditorPixelsCopiedSyncClipboard,
+            )
+        }
+        Message::EditorPixelsCopiedSyncClipboard(res) => {
+            let toast_task = update(state, Message::CommandCompleted(res.clone()));
+            if res.as_ref().is_ok_and(|r| r.ok) {
+                let core = state.core.clone();
+                let sync_task = Task::perform(
+                    async move {
+                        let Ok(Ok(val)) = core.query(Query::EditorClipboardPng).await else {
+                            return None;
+                        };
+                        let bytes: Vec<u8> = val
+                            .get("pngBytes")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())?;
+                        let png_for_hash = bytes.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let _ = write_png_bytes_to_clipboard(&bytes);
+                        })
+                        .await
+                        .ok()?;
+                        Some(png_for_hash)
+                    },
+                    |maybe_png| {
+                        if let Some(png) = maybe_png {
+                            Message::RecordSyncedClipboardPng(png)
+                        } else {
+                            Message::Noop
+                        }
+                    },
+                );
+                return Task::batch([toast_task, sync_task]);
+            }
+            toast_task
+        }
+        Message::RecordSyncedClipboardPng(png) => {
+            state.last_synced_clipboard_png = Some(png);
+            Task::none()
+        }
+        Message::EditorPastePixels { into_selection } => {
+            state.active_menu = None;
+            state.context_menu = None;
+            let has_internal = state.snapshot.meta.has_pixel_clipboard;
+            let last_synced = state.last_synced_clipboard_png.clone();
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        let os_png = read_clipboard_png_bytes();
+                        match os_png {
+                            Some(bytes) => {
+                                if has_internal && last_synced.as_ref() == Some(&bytes) {
+                                    (None, false)
+                                } else {
+                                    (Some(bytes), false)
+                                }
+                            }
+                            None => {
+                                if has_internal {
+                                    (None, false)
+                                } else {
+                                    (None, true)
+                                }
+                            }
+                        }
+                    })
+                    .await
+                    .unwrap_or((None, !has_internal))
+                },
+                move |(png_bytes, clipboard_empty)| Message::EditorPasteResolved {
+                    into_selection,
+                    png_bytes,
+                    clipboard_empty,
+                },
+            )
+        }
+        Message::EditorPasteResolved {
+            into_selection,
+            png_bytes,
+            clipboard_empty,
+        } => {
+            if clipboard_empty {
+                return show_toast(
+                    state,
+                    tr(state.snapshot.meta.language, "toast-clipboard-empty"),
+                    ToastKind::Info,
+                );
+            }
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorPastePixels {
+                    png_bytes,
+                    into_selection,
                 },
             )
         }
@@ -3858,6 +4597,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::EditorFrameLoaded(frame) => {
+            state.editor_histogram = frame
+                .as_ref()
+                .map(|f| (f.revision, compute_luminance_histogram(f)));
             state.editor_frame = frame;
             Task::none()
         }
@@ -3990,6 +4732,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         }
         Message::CopyImageToClipboard(target_path) => {
             state.context_menu = None;
+            state.browser_file_clipboard.clear();
             let frame_rgba =
                 if state.snapshot.meta.workspace == Workspace::Editor && target_path.is_none() {
                     state
@@ -4468,6 +5211,11 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
             state.crop_uv = None;
             return sync_ui_tree_task(state);
         }
+        if state.snapshot.meta.workspace == Workspace::Editor
+            && state.editor_ui.tool == EditorTool::Transform
+        {
+            return update(state, Message::EditorTransformCancel);
+        }
         match state.snapshot.meta.workspace {
             Workspace::Editor => {
                 return update(
@@ -4535,10 +5283,69 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
             {
                 return update(state, Message::OpenExportDialog);
             }
-            Key::Character("c")
+            Key::Character("c") | Key::Character("C")
                 if modifiers.shift() && state.snapshot.meta.workspace == Workspace::Editor =>
             {
-                return update(state, Message::CopyImageToClipboard(None));
+                return update(state, Message::EditorCopyPixels { merged: true });
+            }
+            Key::Character("c") | Key::Character("C")
+                if state.snapshot.meta.workspace == Workspace::Editor =>
+            {
+                return update(state, Message::EditorCopyPixels { merged: false });
+            }
+            Key::Character("x") | Key::Character("X")
+                if state.snapshot.meta.workspace == Workspace::Editor =>
+            {
+                return update(state, Message::EditorCutPixels);
+            }
+            Key::Character("v") | Key::Character("V")
+                if state.snapshot.meta.workspace == Workspace::Editor =>
+            {
+                return update(
+                    state,
+                    Message::EditorPastePixels {
+                        into_selection: modifiers.shift(),
+                    },
+                );
+            }
+            Key::Character("t") | Key::Character("T")
+                if state.snapshot.meta.workspace == Workspace::Editor =>
+            {
+                return update(state, Message::EditorSelectTool(EditorTool::Transform));
+            }
+            Key::Character("c") | Key::Character("C")
+                if modifiers.shift() && state.snapshot.meta.workspace == Workspace::Browser =>
+            {
+                let selected_img = state
+                    .snapshot
+                    .meta
+                    .selection
+                    .iter()
+                    .find(|p| {
+                        state
+                            .snapshot
+                            .entries
+                            .iter()
+                            .any(|e| &e.path == *p && e.is_image)
+                    })
+                    .cloned();
+                if selected_img.is_some() {
+                    return update(state, Message::CopyImageToClipboard(selected_img));
+                }
+                return Task::none();
+            }
+            Key::Character("c") | Key::Character("C")
+                if state.snapshot.meta.workspace == Workspace::Browser =>
+            {
+                return update(
+                    state,
+                    Message::BrowserCopyFiles(state.snapshot.meta.selection.clone()),
+                );
+            }
+            Key::Character("v") | Key::Character("V")
+                if state.snapshot.meta.workspace == Workspace::Browser =>
+            {
+                return update(state, Message::BrowserPasteFiles);
             }
             Key::Character("c")
                 if modifiers.shift() && state.snapshot.meta.workspace == Workspace::Viewer =>
@@ -4676,15 +5483,51 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
             Key::Character("g") | Key::Character("G") => {
                 update(state, Message::EditorSelectTool(EditorTool::Gradient))
             }
+            Key::Character("j") | Key::Character("J") => {
+                update(state, Message::EditorSelectTool(EditorTool::HealingBrush))
+            }
             Key::Character("x") | Key::Character("X") => update(state, Message::EditorSwapColors),
-            Key::Character("[") => update(
-                state,
-                Message::EditorSetBrushRadius((state.editor_ui.brush_radius - 2.0).max(1.0)),
-            ),
-            Key::Character("]") => update(
-                state,
-                Message::EditorSetBrushRadius((state.editor_ui.brush_radius + 2.0).min(200.0)),
-            ),
+            Key::Character("0") => update(state, Message::Canvas(CanvasEvent::ResetFit)),
+            Key::Character("1") => update(state, Message::EditorZoomActual),
+            Key::Character("+") | Key::Character("=") => update(state, Message::ZoomStep(1.25)),
+            Key::Character("-") => update(state, Message::ZoomStep(0.8)),
+            Key::Named(Named::Enter) if state.editor_ui.tool == EditorTool::Transform => {
+                update(state, Message::EditorTransformCommit)
+            }
+            Key::Character("[") => {
+                if state.editor_ui.tool == EditorTool::HealingBrush {
+                    update(
+                        state,
+                        Message::EditorSetHealingRadius(
+                            (state.editor_ui.healing_radius - 2.0).max(1.0),
+                        ),
+                    )
+                } else {
+                    update(
+                        state,
+                        Message::EditorSetBrushRadius(
+                            (state.editor_ui.brush_radius - 2.0).max(1.0),
+                        ),
+                    )
+                }
+            }
+            Key::Character("]") => {
+                if state.editor_ui.tool == EditorTool::HealingBrush {
+                    update(
+                        state,
+                        Message::EditorSetHealingRadius(
+                            (state.editor_ui.healing_radius + 2.0).min(200.0),
+                        ),
+                    )
+                } else {
+                    update(
+                        state,
+                        Message::EditorSetBrushRadius(
+                            (state.editor_ui.brush_radius + 2.0).min(200.0),
+                        ),
+                    )
+                }
+            }
             // Space is handled by photon-canvas for temporary Hand pan while held.
             Key::Named(Named::Space) => Task::none(),
             _ => Task::none(),
@@ -5489,16 +6332,10 @@ fn build_active_menu(
         }
         (Workspace::Browser, ActiveMenu::BrowserPlugins) => (
             Some(156.0),
-            vec![
-                MenuEntry::Item(
-                    MenuItem::new(tr(lang, "menu-plugins-ai-disabled"), Message::Noop)
-                        .enabled(false),
-                ),
-                MenuEntry::Separator,
-                MenuEntry::Item(
-                    MenuItem::new(tr(lang, "menu-plugins-disabled"), Message::Noop).enabled(false),
-                ),
-            ],
+            build_browser_plugins_menu_entries(state.browser_view_state())
+                .into_iter()
+                .map(|e| e.map(Message::Browser))
+                .collect(),
         ),
         (Workspace::Browser, ActiveMenu::BrowserWindow) => (
             Some(214.0),
@@ -5578,38 +6415,97 @@ fn build_active_menu(
                 ),
             ],
         ),
-        (Workspace::Editor, ActiveMenu::EditorEdit) => (
-            Some(54.0),
-            vec![
-                MenuEntry::Item(
-                    MenuItem::new(
-                        tr(lang, "action-undo"),
-                        Message::Dispatch(Command::EditorUndo),
-                    )
-                    .icon(Icon::Undo)
-                    .shortcut("Ctrl+Z")
-                    .enabled(ed.is_some_and(|d| d.can_undo)),
-                ),
-                MenuEntry::Item(
-                    MenuItem::new(
-                        tr(lang, "action-redo"),
-                        Message::Dispatch(Command::EditorRedo),
-                    )
-                    .icon(Icon::Redo)
-                    .shortcut("Ctrl+Y")
-                    .enabled(ed.is_some_and(|d| d.can_redo)),
-                ),
-                MenuEntry::Separator,
-                MenuEntry::Item(
-                    MenuItem::new(
-                        tr(lang, "action-reset"),
-                        Message::Dispatch(Command::EditorReset),
-                    )
-                    .icon(Icon::Reset)
-                    .enabled(ed.is_some_and(|d| d.modified)),
-                ),
-            ],
-        ),
+        (Workspace::Editor, ActiveMenu::EditorEdit) => {
+            let has_sel = ed.is_some_and(|e| e.selection.has_selection);
+            (
+                Some(54.0),
+                vec![
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-undo"),
+                            Message::Dispatch(Command::EditorUndo),
+                        )
+                        .icon(Icon::Undo)
+                        .shortcut("Ctrl+Z")
+                        .enabled(ed.is_some_and(|d| d.can_undo)),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-redo"),
+                            Message::Dispatch(Command::EditorRedo),
+                        )
+                        .icon(Icon::Redo)
+                        .shortcut("Ctrl+Y")
+                        .enabled(ed.is_some_and(|d| d.can_redo)),
+                    ),
+                    MenuEntry::Separator,
+                    MenuEntry::Item(
+                        MenuItem::new(tr(lang, "action-cut"), Message::EditorCutPixels)
+                            .icon(Icon::Cut)
+                            .shortcut("Ctrl+X")
+                            .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-copy"),
+                            Message::EditorCopyPixels { merged: false },
+                        )
+                        .icon(Icon::Copy)
+                        .shortcut("Ctrl+C")
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-copy-merged"),
+                            Message::EditorCopyPixels { merged: true },
+                        )
+                        .icon(Icon::Copy)
+                        .shortcut("Ctrl+Shift+C")
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-paste"),
+                            Message::EditorPastePixels {
+                                into_selection: false,
+                            },
+                        )
+                        .icon(Icon::Paste)
+                        .shortcut("Ctrl+V")
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-paste-into-selection"),
+                            Message::EditorPastePixels {
+                                into_selection: true,
+                            },
+                        )
+                        .icon(Icon::Paste)
+                        .enabled(has_sel),
+                    ),
+                    MenuEntry::Separator,
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-transform"),
+                            Message::EditorSelectTool(EditorTool::Transform),
+                        )
+                        .icon(Icon::Transform)
+                        .shortcut("Ctrl+T")
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Separator,
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-reset"),
+                            Message::Dispatch(Command::EditorReset),
+                        )
+                        .icon(Icon::Reset)
+                        .enabled(ed.is_some_and(|d| d.modified)),
+                    ),
+                ],
+            )
+        }
         (Workspace::Editor, ActiveMenu::EditorImage) => (
             Some(96.0),
             vec![
@@ -5724,7 +6620,20 @@ fn build_active_menu(
                     .icon(Icon::Curves)
                     .enabled(ed.is_some()),
                 ),
+                MenuEntry::Separator,
+                MenuEntry::Item(
+                    MenuItem::new(tr(lang, "menu-filter-denoise"), Message::OpenDenoiseDialog)
+                        .icon(Icon::Denoise)
+                        .enabled(ed.is_some()),
+                ),
             ],
+        ),
+        (Workspace::Editor, ActiveMenu::EditorPlugins) => (
+            Some(260.0),
+            build_editor_plugins_menu_entries(state.editor_view_state())
+                .into_iter()
+                .map(|e| e.map(Message::Editor))
+                .collect(),
         ),
         (Workspace::Editor, ActiveMenu::EditorSelect) => {
             let has_sel = ed.is_some_and(|e| e.selection.has_selection);
@@ -5870,22 +6779,82 @@ fn build_active_menu(
             )
         }
         (Workspace::Editor, ActiveMenu::EditorView) => (
-            Some(258.0),
+            Some(316.0),
             vec![
                 MenuEntry::Item(
                     MenuItem::new(tr(lang, "action-zoom-in"), Message::ZoomStep(1.25))
-                        .icon(Icon::ZoomIn),
+                        .icon(Icon::ZoomIn)
+                        .shortcut("+"),
                 ),
                 MenuEntry::Item(
                     MenuItem::new(tr(lang, "action-zoom-out"), Message::ZoomStep(0.8))
-                        .icon(Icon::ZoomOut),
+                        .icon(Icon::ZoomOut)
+                        .shortcut("-"),
                 ),
                 MenuEntry::Item(
                     MenuItem::new(
                         tr(lang, "action-fit"),
                         Message::Canvas(CanvasEvent::ResetFit),
                     )
-                    .icon(Icon::Fit),
+                    .icon(Icon::Fit)
+                    .shortcut("0"),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(tr(lang, "action-actual-size"), Message::EditorZoomActual)
+                        .shortcut("1"),
+                ),
+                MenuEntry::Separator,
+                MenuEntry::Header(tr(lang, "settings-canvas-aa")),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "aa-mode-crisp"),
+                        Message::SetAntiAliasingMode(CanvasAntiAliasingMode::Crisp),
+                    )
+                    .checked(layout.canvas_anti_aliasing == CanvasAntiAliasingMode::Crisp),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "aa-mode-smooth"),
+                        Message::SetAntiAliasingMode(CanvasAntiAliasingMode::Smooth),
+                    )
+                    .checked(layout.canvas_anti_aliasing == CanvasAntiAliasingMode::Smooth),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "aa-mode-high-quality"),
+                        Message::SetAntiAliasingMode(CanvasAntiAliasingMode::HighQuality),
+                    )
+                    .checked(layout.canvas_anti_aliasing == CanvasAntiAliasingMode::HighQuality),
+                ),
+                MenuEntry::Separator,
+                MenuEntry::Header(tr(lang, "settings-viewport-denoise")),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "denoise-mode-off"),
+                        Message::SetViewportDenoiseMode(ViewportDenoiseMode::Off),
+                    )
+                    .checked(layout.viewport_denoise == ViewportDenoiseMode::Off),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "denoise-mode-light"),
+                        Message::SetViewportDenoiseMode(ViewportDenoiseMode::Light),
+                    )
+                    .checked(layout.viewport_denoise == ViewportDenoiseMode::Light),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "denoise-mode-medium"),
+                        Message::SetViewportDenoiseMode(ViewportDenoiseMode::Medium),
+                    )
+                    .checked(layout.viewport_denoise == ViewportDenoiseMode::Medium),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "denoise-mode-strong"),
+                        Message::SetViewportDenoiseMode(ViewportDenoiseMode::Strong),
+                    )
+                    .checked(layout.viewport_denoise == ViewportDenoiseMode::Strong),
                 ),
                 MenuEntry::Separator,
                 MenuEntry::Item(
@@ -5937,7 +6906,7 @@ fn build_active_menu(
             ],
         ),
         (Workspace::Editor, ActiveMenu::EditorWindow) => (
-            Some(308.0),
+            Some(364.0),
             vec![
                 MenuEntry::Item(
                     MenuItem::new(tr(lang, "panel-tools"), Message::ToggleEditorToolsVisible)
@@ -5980,7 +6949,7 @@ fn build_active_menu(
             ],
         ),
         (Workspace::Editor, ActiveMenu::EditorHelp) => (
-            Some(376.0),
+            Some(428.0),
             vec![
                 MenuEntry::Item(
                     MenuItem::new(tr(lang, "action-shortcuts"), Message::OpenShortcutsDialog)
@@ -5993,9 +6962,8 @@ fn build_active_menu(
                 ),
             ],
         ),
-        (Workspace::Viewer, ActiveMenu::ReaderOptions) => (
-            None,
-            vec![
+        (Workspace::Viewer, ActiveMenu::ReaderOptions) => {
+            let mut entries = vec![
                 MenuEntry::Item(
                     MenuItem::new(
                         tr(lang, "action-viewer-single"),
@@ -6106,8 +7074,15 @@ fn build_active_menu(
                     )
                     .checked(state.viewer_webtoon_fit_mode == WebtoonFitMode::Original),
                 ),
-            ],
-        ),
+                MenuEntry::Separator,
+            ];
+            entries.extend(
+                build_viewer_quality_menu_entries(state.viewer_view_state(true))
+                    .into_iter()
+                    .map(|e| e.map(Message::Viewer)),
+            );
+            (None, entries)
+        }
         _ => return None,
     };
 
@@ -6132,8 +7107,14 @@ fn build_settings_body(state: &PhotonGui) -> Element<'_, Message> {
     let lang = state.snapshot.meta.language;
     let meta = &state.snapshot.meta;
     let is_dark = meta.theme == Theme::Dark;
+    let app_launch_mode = meta.layout.app_launch_window_mode;
     let sys_open_mode = meta.layout.system_open_window_mode;
     let vmode = meta.layout.viewer_view_mode;
+    let aa_mode = meta.layout.canvas_anti_aliasing;
+    let denoise_mode = meta.layout.viewport_denoise;
+    let active_backend = GPU_BACKEND_NAME.get().map(String::as_str).unwrap_or("wgpu");
+    let renderer_is_gpu = active_backend == "wgpu";
+    let renderer_restart_needed = !meta.safe_mode && meta.hardware_acceleration != renderer_is_gpu;
 
     let appearance_card = section_card(
         tr(lang, "settings-section-general"),
@@ -6204,6 +7185,33 @@ fn build_settings_body(state: &PhotonGui) -> Element<'_, Message> {
         tr(lang, "settings-section-viewer"),
         column![
             setting_row(
+                tr(lang, "settings-app-launch-window"),
+                row![
+                    button::labeled(
+                        tr(lang, "settings-launch-maximized"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: app_launch_mode == AppLaunchWindowMode::Maximized,
+                        },
+                        Some(Message::SetAppLaunchWindowMode(
+                            AppLaunchWindowMode::Maximized,
+                        )),
+                    ),
+                    button::labeled(
+                        tr(lang, "settings-launch-remembered"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: app_launch_mode == AppLaunchWindowMode::Remembered,
+                        },
+                        Some(Message::SetAppLaunchWindowMode(
+                            AppLaunchWindowMode::Remembered,
+                        )),
+                    ),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ),
+            setting_row(
                 tr(lang, "settings-system-open"),
                 row![
                     button::labeled(
@@ -6240,6 +7248,11 @@ fn build_settings_body(state: &PhotonGui) -> Element<'_, Message> {
                 .spacing(6)
                 .align_y(Alignment::Center),
             ),
+            text(tr(lang, "settings-system-open-hint"))
+                .size(11)
+                .style(|theme| text::Style {
+                    color: Some(PaletteTokens::for_theme(theme).text_muted),
+                }),
             setting_row(
                 tr(lang, "settings-default-viewer-mode"),
                 row![
@@ -6271,82 +7284,176 @@ fn build_settings_body(state: &PhotonGui) -> Element<'_, Message> {
                 .spacing(6)
                 .align_y(Alignment::Center),
             ),
+            setting_row(
+                tr(lang, "settings-canvas-aa"),
+                row![
+                    button::labeled(
+                        tr(lang, "aa-mode-crisp"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: aa_mode == CanvasAntiAliasingMode::Crisp,
+                        },
+                        Some(Message::SetAntiAliasingMode(CanvasAntiAliasingMode::Crisp)),
+                    ),
+                    button::labeled(
+                        tr(lang, "aa-mode-smooth"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: aa_mode == CanvasAntiAliasingMode::Smooth,
+                        },
+                        Some(Message::SetAntiAliasingMode(CanvasAntiAliasingMode::Smooth)),
+                    ),
+                    button::labeled(
+                        tr(lang, "aa-mode-high-quality"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: aa_mode == CanvasAntiAliasingMode::HighQuality,
+                        },
+                        Some(Message::SetAntiAliasingMode(
+                            CanvasAntiAliasingMode::HighQuality,
+                        )),
+                    ),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ),
+            setting_row(
+                tr(lang, "settings-viewport-denoise"),
+                row![
+                    button::labeled(
+                        tr(lang, "denoise-mode-off"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: denoise_mode == ViewportDenoiseMode::Off,
+                        },
+                        Some(Message::SetViewportDenoiseMode(ViewportDenoiseMode::Off)),
+                    ),
+                    button::labeled(
+                        tr(lang, "denoise-mode-light"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: denoise_mode == ViewportDenoiseMode::Light,
+                        },
+                        Some(Message::SetViewportDenoiseMode(ViewportDenoiseMode::Light)),
+                    ),
+                    button::labeled(
+                        tr(lang, "denoise-mode-medium"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: denoise_mode == ViewportDenoiseMode::Medium,
+                        },
+                        Some(Message::SetViewportDenoiseMode(ViewportDenoiseMode::Medium)),
+                    ),
+                    button::labeled(
+                        tr(lang, "denoise-mode-strong"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: denoise_mode == ViewportDenoiseMode::Strong,
+                        },
+                        Some(Message::SetViewportDenoiseMode(ViewportDenoiseMode::Strong)),
+                    ),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ),
         ]
         .spacing(10),
     );
 
-    let behavior_card = section_card(
-        tr(lang, "settings-section-behavior"),
-        column![
-            setting_row(
-                tr(lang, "settings-remember-folder"),
-                row![
-                    button::labeled(
-                        tr(lang, "action-on"),
-                        None,
-                        ButtonVariant::Tab {
-                            active: meta.remember_last_folder,
-                        },
-                        Some(Message::Dispatch(Command::SetSettings {
-                            theme: meta.theme,
-                            language: meta.language,
-                            remember_last_folder: true,
-                            hardware_acceleration: meta.hardware_acceleration,
-                        })),
-                    ),
-                    button::labeled(
-                        tr(lang, "action-off"),
-                        None,
-                        ButtonVariant::Tab {
-                            active: !meta.remember_last_folder,
-                        },
-                        Some(Message::Dispatch(Command::SetSettings {
-                            theme: meta.theme,
-                            language: meta.language,
-                            remember_last_folder: false,
-                            hardware_acceleration: meta.hardware_acceleration,
-                        })),
-                    ),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center),
-            ),
-            setting_row(
-                tr(lang, "settings-hw-accel"),
-                row![
-                    button::labeled(
-                        tr(lang, "action-on"),
-                        None,
-                        ButtonVariant::Tab {
-                            active: meta.hardware_acceleration,
-                        },
-                        Some(Message::Dispatch(Command::SetSettings {
-                            theme: meta.theme,
-                            language: meta.language,
-                            remember_last_folder: meta.remember_last_folder,
-                            hardware_acceleration: true,
-                        })),
-                    ),
-                    button::labeled(
-                        tr(lang, "action-off"),
-                        None,
-                        ButtonVariant::Tab {
-                            active: !meta.hardware_acceleration,
-                        },
-                        Some(Message::Dispatch(Command::SetSettings {
-                            theme: meta.theme,
-                            language: meta.language,
-                            remember_last_folder: meta.remember_last_folder,
-                            hardware_acceleration: false,
-                        })),
-                    ),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center),
-            ),
-        ]
-        .spacing(10),
-    );
+    let mut behavior_col = column![
+        setting_row(
+            tr(lang, "settings-remember-folder"),
+            row![
+                button::labeled(
+                    tr(lang, "action-on"),
+                    None,
+                    ButtonVariant::Tab {
+                        active: meta.remember_last_folder,
+                    },
+                    Some(Message::Dispatch(Command::SetSettings {
+                        theme: meta.theme,
+                        language: meta.language,
+                        remember_last_folder: true,
+                        hardware_acceleration: meta.hardware_acceleration,
+                    })),
+                ),
+                button::labeled(
+                    tr(lang, "action-off"),
+                    None,
+                    ButtonVariant::Tab {
+                        active: !meta.remember_last_folder,
+                    },
+                    Some(Message::Dispatch(Command::SetSettings {
+                        theme: meta.theme,
+                        language: meta.language,
+                        remember_last_folder: false,
+                        hardware_acceleration: meta.hardware_acceleration,
+                    })),
+                ),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        ),
+        setting_row(
+            tr(lang, "settings-hw-accel"),
+            row![
+                button::labeled(
+                    tr(lang, "action-on"),
+                    None,
+                    ButtonVariant::Tab {
+                        active: meta.hardware_acceleration,
+                    },
+                    Some(Message::Dispatch(Command::SetSettings {
+                        theme: meta.theme,
+                        language: meta.language,
+                        remember_last_folder: meta.remember_last_folder,
+                        hardware_acceleration: true,
+                    })),
+                ),
+                button::labeled(
+                    tr(lang, "action-off"),
+                    None,
+                    ButtonVariant::Tab {
+                        active: !meta.hardware_acceleration,
+                    },
+                    Some(Message::Dispatch(Command::SetSettings {
+                        theme: meta.theme,
+                        language: meta.language,
+                        remember_last_folder: meta.remember_last_folder,
+                        hardware_acceleration: false,
+                    })),
+                ),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        ),
+        setting_row(
+            tr(lang, "settings-active-renderer"),
+            text(tr(
+                lang,
+                if renderer_is_gpu {
+                    "renderer-gpu-wgpu"
+                } else {
+                    "renderer-software-tiny-skia"
+                },
+            ))
+            .size(TEXT_SIZE_CONTROL)
+            .style(|theme| text::Style {
+                color: Some(PaletteTokens::for_theme(theme).text_secondary),
+            }),
+        ),
+    ]
+    .spacing(10);
+    if renderer_restart_needed {
+        behavior_col = behavior_col.push(
+            text(tr(lang, "settings-restart-required-renderer"))
+                .size(11)
+                .style(|theme| text::Style {
+                    color: Some(PaletteTokens::for_theme(theme).accent),
+                }),
+        );
+    }
+    let behavior_card = section_card(tr(lang, "settings-section-behavior"), behavior_col);
 
     let current_folder = meta.current_folder.as_deref();
     let can_pin_current =
@@ -6494,12 +7601,21 @@ pub(crate) fn default_window_state_for(id: DesktopDialogId) -> DialogWindowState
         DesktopDialogId::AdjustColorBalance => DialogWindowState::new(460.0, 365.0)
             .min_size(360.0, 280.0)
             .max_size(760.0, 760.0),
-        DesktopDialogId::AdjustCurves => DialogWindowState::new(460.0, 255.0)
-            .min_size(360.0, 220.0)
-            .max_size(760.0, 760.0),
+        DesktopDialogId::AdjustCurves => DialogWindowState::new(460.0, 520.0)
+            .min_size(380.0, 440.0)
+            .max_size(760.0, 860.0),
+        DesktopDialogId::AdjustDenoise => DialogWindowState::new(440.0, 290.0)
+            .min_size(340.0, 240.0)
+            .max_size(720.0, 640.0),
         DesktopDialogId::SelectionModify => {
             DialogWindowState::new(400.0, 195.0).min_size(320.0, 170.0)
         }
+        DesktopDialogId::ManagePlugins => DialogWindowState::new(640.0, 480.0)
+            .min_size(500.0, 380.0)
+            .max_size(1040.0, 820.0),
+        DesktopDialogId::PluginParams => DialogWindowState::new(440.0, 420.0)
+            .min_size(340.0, 280.0)
+            .max_size(760.0, 800.0),
     }
 }
 
@@ -6644,53 +7760,39 @@ fn dialog_id_for_in_app(dialog: &InAppDialog) -> DesktopDialogId {
         InAppDialog::Batch(b) => batch_dialog_id(b.kind),
         InAppDialog::RenameItem { .. } => DesktopDialogId::RenameItem,
         InAppDialog::ConfirmDeletePermanently { .. } => DesktopDialogId::ConfirmDeletePermanently,
+        InAppDialog::AdjustDenoise { .. } => DesktopDialogId::AdjustDenoise,
+        InAppDialog::ManagePlugins { .. } => DesktopDialogId::ManagePlugins,
+        InAppDialog::PluginParams { .. } => DesktopDialogId::PluginParams,
         InAppDialog::Alert { id, .. } => *id,
     }
 }
 
-pub(crate) fn clamp_pan_for_bounds(
-    pan_x: &mut f32,
-    pan_y: &mut f32,
-    img_width: u32,
-    img_height: u32,
-    zoom: f32,
-    bounds: [f32; 2],
-) {
-    let vp_w = bounds[0].max(1.0);
-    let vp_h = bounds[1].max(1.0);
-    let iw = img_width.max(1) as f32;
-    let ih = img_height.max(1) as f32;
-    let fit_scale = (vp_w / iw).min(vp_h / ih);
-    let disp_w = iw * fit_scale * zoom;
-    let disp_h = ih * fit_scale * zoom;
-
-    if disp_w <= vp_w {
-        *pan_x = 0.0;
-    } else {
-        let max_x = (disp_w - vp_w) * 0.5;
-        *pan_x = pan_x.clamp(-max_x, max_x);
-    }
-
-    if disp_h <= vp_h {
-        *pan_y = 0.0;
-    } else {
-        let max_y = (disp_h - vp_h) * 0.5;
-        *pan_y = pan_y.clamp(-max_y, max_y);
-    }
+pub(crate) fn apply_canvas_pan(pan_x: &mut f32, pan_y: &mut f32, dx: f32, dy: f32) {
+    *pan_x += dx;
+    *pan_y += dy;
 }
 
-pub(crate) fn clamp_editor_pan(state: &mut PhotonGui, bounds: [f32; 2]) {
-    let Some(frame) = state.editor_frame.as_ref() else {
-        return;
-    };
-    clamp_pan_for_bounds(
-        &mut state.pan_x,
-        &mut state.pan_y,
-        frame.width,
-        frame.height,
-        state.zoom,
-        bounds,
-    );
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_canvas_zoom_at_cursor(
+    zoom: &mut f32,
+    pan_x: &mut f32,
+    pan_y: &mut f32,
+    factor: f32,
+    cursor: Option<[f32; 2]>,
+    bounds: [f32; 2],
+    min_zoom: f32,
+    max_zoom: f32,
+) {
+    let old_zoom = *zoom;
+    let new_zoom = (old_zoom * factor).clamp(min_zoom, max_zoom);
+    let ratio = new_zoom / old_zoom.max(0.001);
+    if let Some([cx, cy]) = cursor {
+        let half_w = bounds[0] * 0.5;
+        let half_h = bounds[1] * 0.5;
+        *pan_x = (cx - half_w) - ((cx - half_w) - *pan_x) * ratio;
+        *pan_y = (cy - half_h) - ((cy - half_h) - *pan_y) * ratio;
+    }
+    *zoom = new_zoom;
 }
 
 pub(crate) fn resolved_editor_canvas_bounds(state: &PhotonGui) -> Rectangle {
@@ -6921,12 +8023,30 @@ fn build_editor_adjustment_dialog<'a>(
             .into()
         }
         AdjustmentPopupTab::Curves => {
-            let pts_count = match ui.curves_channel {
-                CurvesChannel::Rgb => ui.curves.rgb.len(),
-                CurvesChannel::Red => ui.curves.red.len(),
-                CurvesChannel::Green => ui.curves.green.len(),
-                CurvesChannel::Blue => ui.curves.blue.len(),
+            let active_pts = match ui.curves_channel {
+                CurvesChannel::Rgb => ui.curves.rgb.clone(),
+                CurvesChannel::Red => ui.curves.red.clone(),
+                CurvesChannel::Green => ui.curves.green.clone(),
+                CurvesChannel::Blue => ui.curves.blue.clone(),
             };
+            let pts_count = active_pts.len();
+            let channel_color = match ui.curves_channel {
+                CurvesChannel::Rgb => {
+                    if state.snapshot.meta.theme == Theme::Dark {
+                        Color::from_rgb8(228, 228, 231)
+                    } else {
+                        Color::from_rgb8(39, 39, 42)
+                    }
+                }
+                CurvesChannel::Red => Color::from_rgb8(239, 68, 68),
+                CurvesChannel::Green => Color::from_rgb8(34, 197, 94),
+                CurvesChannel::Blue => Color::from_rgb8(59, 130, 246),
+            };
+            let histogram = state.editor_histogram.as_ref().map(|(_, h)| Arc::clone(h));
+            let graph = curve_graph(active_pts, channel_color, histogram, |ev| match ev {
+                CurveGraphEvent::PointsChanged(pts) => Message::EditorCurvesChanged(pts),
+                CurveGraphEvent::ResetChannel => Message::EditorResetActiveCurvesChannel,
+            });
             column![
                 row![
                     button::labeled(
@@ -6967,20 +8087,42 @@ fn build_editor_adjustment_dialog<'a>(
                     .width(Fill),
                 ]
                 .spacing(4),
-                text(format!("{pts_count} control points"))
+                container(graph)
+                    .width(Fill)
+                    .align_x(iced::alignment::Horizontal::Center),
+                row![
+                    text(tr_ui_text(
+                        lang,
+                        &UiText::with("label_curve_points", [("count", pts_count.to_string())]),
+                    ))
+                    .size(11)
+                    .style(|th| text::Style {
+                        color: Some(PaletteTokens::for_theme(th).text_muted),
+                    }),
+                    iced::widget::space::horizontal(),
+                    button::labeled(
+                        tr(lang, "action-reset-channel"),
+                        Some(Icon::Reset),
+                        ButtonVariant::Ghost,
+                        Some(Message::EditorResetActiveCurvesChannel),
+                    )
+                    .padding([2, 8]),
+                ]
+                .align_y(Alignment::Center),
+                text(tr(lang, "hint-curve-usage"))
                     .size(11)
                     .style(|th| text::Style {
                         color: Some(PaletteTokens::for_theme(th).text_muted),
                     }),
                 row![
                     button::labeled(
-                        "Linear",
+                        tr(lang, "curve-preset-linear"),
                         None,
                         ButtonVariant::Secondary,
                         Some(Message::EditorCurvesChanged(vec![[0.0, 0.0], [1.0, 1.0]])),
                     ),
                     button::labeled(
-                        "S-Curve",
+                        tr(lang, "curve-preset-s-curve"),
                         None,
                         ButtonVariant::Secondary,
                         Some(Message::EditorCurvesChanged(vec![
@@ -6991,7 +8133,7 @@ fn build_editor_adjustment_dialog<'a>(
                         ])),
                     ),
                     button::labeled(
-                        "Fade",
+                        tr(lang, "curve-preset-fade"),
                         None,
                         ButtonVariant::Secondary,
                         Some(Message::EditorCurvesChanged(vec![
@@ -7002,8 +8144,28 @@ fn build_editor_adjustment_dialog<'a>(
                     ),
                 ]
                 .spacing(6),
+                row![
+                    button::labeled(
+                        tr(lang, "curve-preset-high-contrast"),
+                        None,
+                        ButtonVariant::Secondary,
+                        Some(Message::EditorCurvesChanged(vec![
+                            [0.0, 0.0],
+                            [0.20, 0.10],
+                            [0.80, 0.90],
+                            [1.0, 1.0],
+                        ])),
+                    ),
+                    button::labeled(
+                        tr(lang, "curve-preset-negative"),
+                        None,
+                        ButtonVariant::Secondary,
+                        Some(Message::EditorCurvesChanged(vec![[0.0, 1.0], [1.0, 0.0]])),
+                    ),
+                ]
+                .spacing(6),
             ]
-            .spacing(8)
+            .spacing(6)
             .into()
         }
     };
@@ -7419,6 +8581,577 @@ fn build_in_app_dialog<'a>(
             lang,
             theme,
         ),
+        InAppDialog::AdjustDenoise {
+            strength,
+            detail_preserve,
+            target,
+        } => {
+            let body = column![
+                row![
+                    text(tr(lang, "label-apply-target")).size(11),
+                    iced::widget::space::horizontal(),
+                    button::labeled(
+                        tr(lang, "target-active-layer"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: *target == ApplyTarget::ActiveLayer,
+                        },
+                        Some(Message::DenoiseDialogTargetChanged(
+                            ApplyTarget::ActiveLayer
+                        )),
+                    ),
+                    button::labeled(
+                        tr(lang, "target-whole-image"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: *target == ApplyTarget::WholeImage,
+                        },
+                        Some(Message::DenoiseDialogTargetChanged(ApplyTarget::WholeImage)),
+                    ),
+                    button::labeled(
+                        tr(lang, "target-new-layer"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: *target == ApplyTarget::NewLayer,
+                        },
+                        Some(Message::DenoiseDialogTargetChanged(ApplyTarget::NewLayer)),
+                    ),
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center),
+                row![
+                    text(tr(lang, "label-strength")).size(12),
+                    iced::widget::space::horizontal(),
+                    text(format!("{:.0}%", *strength * 100.0)).size(12),
+                ],
+                slider(0.05..=1.0, *strength, Message::DenoiseDialogStrengthChanged)
+                    .step(0.05_f32)
+                    .style(slider_style),
+                row![
+                    text(tr(lang, "label-preserve-detail")).size(12),
+                    iced::widget::space::horizontal(),
+                    text(format!("{:.0}%", *detail_preserve * 100.0)).size(12),
+                ],
+                slider(
+                    0.0..=1.0,
+                    *detail_preserve,
+                    Message::DenoiseDialogDetailChanged
+                )
+                .step(0.05_f32)
+                .style(slider_style),
+            ]
+            .spacing(8);
+
+            let footer = row![
+                button::labeled(
+                    tr(lang, "dialog-cancel"),
+                    None,
+                    ButtonVariant::Secondary,
+                    Some(Message::CloseDialog),
+                ),
+                iced::widget::space::horizontal(),
+                button::labeled(
+                    tr(lang, "action-apply"),
+                    Some(Icon::Check),
+                    ButtonVariant::Primary,
+                    Some(Message::ConfirmDenoiseDialog),
+                ),
+            ]
+            .align_y(Alignment::Center);
+
+            dialog_spec_to_managed(
+                id,
+                DialogSpec {
+                    open: true,
+                    title: tr(lang, "dialog-adjust-denoise"),
+                    width: 440.0,
+                    body: body.into(),
+                    footer: footer.into(),
+                    on_close: Message::CloseDialog,
+                    on_noop: Message::Noop,
+                },
+                default_window_state_for(id),
+                overlay,
+                lang,
+                theme,
+            )
+        }
+        InAppDialog::ManagePlugins {
+            search,
+            selected_id,
+        } => {
+            let query = search.trim().to_ascii_lowercase();
+            let plugins: Vec<&PluginInfo> = state
+                .snapshot
+                .meta
+                .plugins
+                .iter()
+                .filter(|p| {
+                    query.is_empty()
+                        || p.name.to_ascii_lowercase().contains(&query)
+                        || p.id.to_ascii_lowercase().contains(&query)
+                        || p.description.to_ascii_lowercase().contains(&query)
+                })
+                .collect();
+            let active_plugin = selected_id
+                .as_deref()
+                .and_then(|sid| plugins.iter().copied().find(|p| p.id == sid))
+                .or_else(|| plugins.first().copied());
+
+            let top_bar = row![
+                text_input(&tr(lang, "label-plugin-search"), search)
+                    .on_input(Message::ManagePluginsSearchChanged)
+                    .size(TEXT_SIZE_CONTROL)
+                    .padding([6, 8])
+                    .width(Fill),
+                button::labeled(
+                    tr(lang, "action-install-plugin"),
+                    Some(Icon::Plus),
+                    ButtonVariant::Secondary,
+                    Some(Message::PickPluginInstallFolder),
+                ),
+                button::labeled(
+                    tr(lang, "action-open-plugins-folder"),
+                    Some(Icon::FolderOpen),
+                    ButtonVariant::Ghost,
+                    Some(Message::OpenPluginsFolder),
+                ),
+                button::compact_icon_tipped(
+                    Icon::Refresh,
+                    ButtonVariant::Ghost,
+                    Some(Message::Dispatch(Command::PluginRefresh)),
+                    tr(lang, "action-reload-plugins"),
+                ),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center);
+
+            let mut list_col = column![].spacing(4).width(Fill);
+            if plugins.is_empty() {
+                list_col = list_col.push(text(tr(lang, "menu-plugins-no-enabled")).size(12).style(
+                    |th| text::Style {
+                        color: Some(PaletteTokens::for_theme(th).text_muted),
+                    },
+                ));
+            } else {
+                for p in &plugins {
+                    let is_sel = active_plugin.is_some_and(|a| a.id == p.id);
+                    let status_text = if p.error.is_some() {
+                        "!".to_owned()
+                    } else if p.enabled {
+                        tr(lang, "label-plugin-enabled")
+                    } else {
+                        tr(lang, "label-plugin-disabled")
+                    };
+                    list_col = list_col.push(
+                        button::labeled(
+                            format!("{} ({status_text})", p.name),
+                            Some(Icon::Plug),
+                            ButtonVariant::Tab { active: is_sel },
+                            Some(Message::ManagePluginsSelect(p.id.clone())),
+                        )
+                        .width(Fill),
+                    );
+                }
+            }
+
+            let details: Element<'a, Message> = if let Some(p) = active_plugin {
+                let caps = if p.capabilities.is_empty() {
+                    "—".to_owned()
+                } else {
+                    p.capabilities
+                        .iter()
+                        .map(|c| match c {
+                            PluginCapability::EditorFilter => "editor_filter",
+                            PluginCapability::BrowserAction => "browser_action",
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let perms = if p.permissions.is_empty() {
+                    tr(lang, "label-plugin-no-permissions")
+                } else {
+                    p.permissions.join(", ")
+                };
+                let can_run = p.enabled
+                    && p.error.is_none()
+                    && ((state.snapshot.meta.workspace == Workspace::Editor
+                        && state.snapshot.meta.editor.is_some()
+                        && p.capabilities.contains(&PluginCapability::EditorFilter))
+                        || (state.snapshot.meta.workspace == Workspace::Browser
+                            && p.capabilities.contains(&PluginCapability::BrowserAction)));
+
+                let mut det_col = column![
+                    text(p.name.clone()).size(16),
+                    text(format!(
+                        "{}: {} · {}: {}",
+                        tr(lang, "label-plugin-version"),
+                        p.version,
+                        tr(lang, "label-plugin-author"),
+                        if p.author.is_empty() {
+                            "—"
+                        } else {
+                            &p.author
+                        }
+                    ))
+                    .size(11)
+                    .style(|th| text::Style {
+                        color: Some(PaletteTokens::for_theme(th).text_muted),
+                    }),
+                ]
+                .spacing(6);
+                if !p.description.is_empty() {
+                    det_col = det_col.push(text(p.description.clone()).size(12));
+                }
+                det_col = det_col
+                    .push(
+                        text(format!("{}: {caps}", tr(lang, "label-plugin-capabilities"))).size(12),
+                    )
+                    .push(
+                        text(format!("{}: {perms}", tr(lang, "label-plugin-permissions"))).size(12),
+                    )
+                    .push(
+                        text(p.install_dir.clone())
+                            .size(11)
+                            .style(|th| text::Style {
+                                color: Some(PaletteTokens::for_theme(th).text_muted),
+                            }),
+                    );
+                if let Some(err) = &p.error {
+                    det_col = det_col.push(text(err.clone()).size(12).style(|th| text::Style {
+                        color: Some(PaletteTokens::for_theme(th).danger),
+                    }));
+                }
+                det_col = det_col.push(
+                    row![
+                        button::labeled(
+                            if p.enabled {
+                                tr(lang, "action-off")
+                            } else {
+                                tr(lang, "action-on")
+                            },
+                            None,
+                            ButtonVariant::Secondary,
+                            Some(Message::Dispatch(Command::PluginSetEnabled {
+                                id: p.id.clone(),
+                                enabled: !p.enabled,
+                            })),
+                        ),
+                        button::labeled(
+                            tr(lang, "action-run-plugin"),
+                            Some(Icon::Check),
+                            ButtonVariant::Primary,
+                            can_run.then(|| Message::RunPlugin(p.id.clone())),
+                        ),
+                        iced::widget::space::horizontal(),
+                        button::labeled(
+                            tr(lang, "action-uninstall-plugin"),
+                            Some(Icon::Trash),
+                            ButtonVariant::Danger,
+                            Some(Message::Dispatch(Command::PluginUninstall {
+                                id: p.id.clone(),
+                            })),
+                        ),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                );
+                scrollable(det_col).height(Fill).width(Fill).into()
+            } else {
+                container(
+                    text(tr(lang, "label-plugin-none-selected"))
+                        .size(12)
+                        .style(|th| text::Style {
+                            color: Some(PaletteTokens::for_theme(th).text_muted),
+                        }),
+                )
+                .padding(12)
+                .width(Fill)
+                .height(Fill)
+                .into()
+            };
+
+            let dlg_rect = state
+                .dialog_manager
+                .state(&DesktopDialogId::ManagePlugins)
+                .cloned()
+                .unwrap_or_else(|| default_window_state_for(id))
+                .resolved_rect(state.window_size);
+            let list_pane_h = (dlg_rect.height - 180.0).max(220.0);
+
+            let body = column![
+                top_bar,
+                row![
+                    container(scrollable(list_col).height(Fill))
+                        .width(Length::Fixed(220.0))
+                        .height(Fill),
+                    container(details).width(Fill).height(Fill),
+                ]
+                .spacing(12)
+                .height(Length::Fixed(list_pane_h)),
+            ]
+            .spacing(10)
+            .width(Fill);
+
+            let footer = row![
+                iced::widget::space::horizontal(),
+                button::labeled(
+                    tr(lang, "action-close"),
+                    None,
+                    ButtonVariant::Primary,
+                    Some(Message::CloseDialog),
+                ),
+            ];
+
+            dialog_spec_to_managed(
+                id,
+                DialogSpec {
+                    open: true,
+                    title: tr(lang, "dialog-manage-plugins-title"),
+                    width: 640.0,
+                    body: body.into(),
+                    footer: footer.into(),
+                    on_close: Message::CloseDialog,
+                    on_noop: Message::Noop,
+                },
+                default_window_state_for(id),
+                overlay,
+                lang,
+                theme,
+            )
+        }
+        InAppDialog::PluginParams {
+            plugin_name,
+            specs,
+            values,
+            target,
+            show_target,
+            ..
+        } => {
+            let mut body_col = column![text(plugin_name.clone()).size(14)].spacing(8);
+            if *show_target {
+                body_col = body_col.push(
+                    row![
+                        text(tr(lang, "label-apply-target")).size(11),
+                        iced::widget::space::horizontal(),
+                        button::labeled(
+                            tr(lang, "target-active-layer"),
+                            None,
+                            ButtonVariant::Tab {
+                                active: *target == ApplyTarget::ActiveLayer,
+                            },
+                            Some(Message::PluginParamTargetChanged(ApplyTarget::ActiveLayer)),
+                        ),
+                        button::labeled(
+                            tr(lang, "target-whole-image"),
+                            None,
+                            ButtonVariant::Tab {
+                                active: *target == ApplyTarget::WholeImage,
+                            },
+                            Some(Message::PluginParamTargetChanged(ApplyTarget::WholeImage)),
+                        ),
+                        button::labeled(
+                            tr(lang, "target-new-layer"),
+                            None,
+                            ButtonVariant::Tab {
+                                active: *target == ApplyTarget::NewLayer,
+                            },
+                            Some(Message::PluginParamTargetChanged(ApplyTarget::NewLayer)),
+                        ),
+                    ]
+                    .spacing(4)
+                    .align_y(Alignment::Center),
+                );
+            }
+
+            for spec in specs {
+                let key = spec.key.clone();
+                let label = spec.label.clone();
+                let current = values
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| default_value_for_plugin_param(spec));
+                match spec.kind {
+                    PluginParamKind::Float => {
+                        let min = spec.min.unwrap_or(0.0);
+                        let max = spec.max.unwrap_or(1.0).max(min + 0.001);
+                        let step = spec.step.unwrap_or(0.05).max(0.001);
+                        let val = match current {
+                            PluginParamValue::Float(v) => v,
+                            PluginParamValue::Int(v) => v as f64,
+                            _ => min,
+                        }
+                        .clamp(min, max);
+                        body_col = body_col.push(
+                            column![
+                                row![
+                                    text(label).size(12),
+                                    iced::widget::space::horizontal(),
+                                    text(format!("{val:.2}")).size(12),
+                                ],
+                                slider(min..=max, val, move |v| {
+                                    Message::PluginParamChanged(
+                                        key.clone(),
+                                        PluginParamValue::Float(v),
+                                    )
+                                })
+                                .step(step)
+                                .style(slider_style),
+                            ]
+                            .spacing(4),
+                        );
+                    }
+                    PluginParamKind::Int => {
+                        let min = spec.min.unwrap_or(0.0).round() as i64;
+                        let max = (spec.max.unwrap_or(100.0).round() as i64).max(min + 1);
+                        let step = spec.step.unwrap_or(1.0).max(1.0);
+                        let val = match current {
+                            PluginParamValue::Int(v) => v,
+                            PluginParamValue::Float(v) => v.round() as i64,
+                            _ => min,
+                        }
+                        .clamp(min, max);
+                        body_col = body_col.push(
+                            column![
+                                row![
+                                    text(label).size(12),
+                                    iced::widget::space::horizontal(),
+                                    text(val.to_string()).size(12),
+                                ],
+                                slider(min as f64..=max as f64, val as f64, move |v| {
+                                    Message::PluginParamChanged(
+                                        key.clone(),
+                                        PluginParamValue::Int(v.round() as i64),
+                                    )
+                                })
+                                .step(step)
+                                .style(slider_style),
+                            ]
+                            .spacing(4),
+                        );
+                    }
+                    PluginParamKind::Bool => {
+                        let checked = matches!(current, PluginParamValue::Bool(true));
+                        body_col = body_col.push(
+                            checkbox(checked)
+                                .label(label)
+                                .text_size(TEXT_SIZE_CONTROL)
+                                .on_toggle(move |b| {
+                                    Message::PluginParamChanged(
+                                        key.clone(),
+                                        PluginParamValue::Bool(b),
+                                    )
+                                }),
+                        );
+                    }
+                    PluginParamKind::Select => {
+                        let selected = match current {
+                            PluginParamValue::Select(s) => s,
+                            _ => spec.options.first().cloned().unwrap_or_default(),
+                        };
+                        let mut opts_row = row![].spacing(4);
+                        for opt in &spec.options {
+                            let active = opt == &selected;
+                            let k = key.clone();
+                            let o = opt.clone();
+                            opts_row = opts_row.push(button::labeled(
+                                opt.clone(),
+                                None,
+                                ButtonVariant::Tab { active },
+                                Some(Message::PluginParamChanged(k, PluginParamValue::Select(o))),
+                            ));
+                        }
+                        body_col =
+                            body_col.push(column![text(label).size(12), opts_row].spacing(4));
+                    }
+                    PluginParamKind::Color => {
+                        let rgb = match current {
+                            PluginParamValue::Color(c) => c,
+                            _ => [0, 0, 0],
+                        };
+                        let k0 = key.clone();
+                        let k1 = key.clone();
+                        let k2 = key;
+                        body_col = body_col.push(
+                            column![
+                                row![
+                                    text(label).size(12),
+                                    iced::widget::space::horizontal(),
+                                    text(format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2]))
+                                        .size(11),
+                                ],
+                                slider(0.0..=255.0, f32::from(rgb[0]), move |v| {
+                                    Message::PluginParamChanged(
+                                        k0.clone(),
+                                        PluginParamValue::Color([v.round() as u8, rgb[1], rgb[2]]),
+                                    )
+                                })
+                                .step(1.0_f32)
+                                .style(slider_style),
+                                slider(0.0..=255.0, f32::from(rgb[1]), move |v| {
+                                    Message::PluginParamChanged(
+                                        k1.clone(),
+                                        PluginParamValue::Color([rgb[0], v.round() as u8, rgb[2]]),
+                                    )
+                                })
+                                .step(1.0_f32)
+                                .style(slider_style),
+                                slider(0.0..=255.0, f32::from(rgb[2]), move |v| {
+                                    Message::PluginParamChanged(
+                                        k2.clone(),
+                                        PluginParamValue::Color([rgb[0], rgb[1], v.round() as u8]),
+                                    )
+                                })
+                                .step(1.0_f32)
+                                .style(slider_style),
+                            ]
+                            .spacing(4),
+                        );
+                    }
+                }
+                if let Some(desc) = &spec.description
+                    && !desc.trim().is_empty()
+                {
+                    body_col = body_col.push(text(desc.clone()).size(11).style(|th| text::Style {
+                        color: Some(PaletteTokens::for_theme(th).text_muted),
+                    }));
+                }
+            }
+
+            let footer = row![
+                button::labeled(
+                    tr(lang, "dialog-cancel"),
+                    None,
+                    ButtonVariant::Secondary,
+                    Some(Message::CloseDialog),
+                ),
+                iced::widget::space::horizontal(),
+                button::labeled(
+                    tr(lang, "action-run-plugin"),
+                    Some(Icon::Check),
+                    ButtonVariant::Primary,
+                    Some(Message::ConfirmPluginParams),
+                ),
+            ]
+            .align_y(Alignment::Center);
+
+            dialog_spec_to_managed(
+                id,
+                DialogSpec {
+                    open: true,
+                    title: tr(lang, "dialog-plugin-params-title"),
+                    width: 440.0,
+                    body: body_col.into(),
+                    footer: footer.into(),
+                    on_close: Message::CloseDialog,
+                    on_noop: Message::Noop,
+                },
+                default_window_state_for(id),
+                overlay,
+                lang,
+                theme,
+            )
+        }
         InAppDialog::Alert { title, message, .. } => dialog_spec_to_managed(
             id,
             alert_dialog_spec(
@@ -7549,8 +9282,13 @@ fn map_browser_message(msg: BrowserMessage) -> Message {
         BrowserMessage::BrowserConfirmDeletePermanently(ps) => {
             Message::BrowserConfirmDeletePermanently(ps)
         }
+        BrowserMessage::BrowserCopyFiles(ps) => Message::BrowserCopyFiles(ps),
+        BrowserMessage::BrowserPasteFiles => Message::BrowserPasteFiles,
         BrowserMessage::CopyImageToClipboard(p) => Message::CopyImageToClipboard(p),
         BrowserMessage::RevealInFolder(p) => Message::RevealInFolder(p),
+        BrowserMessage::OpenManagePlugins => Message::OpenManagePlugins,
+        BrowserMessage::ReloadPlugins => Message::Dispatch(Command::PluginRefresh),
+        BrowserMessage::RunPlugin(id) => Message::RunPlugin(id),
         BrowserMessage::BeginDragBrowserPanel(p) => Message::BeginDragBrowserPanel(p),
         BrowserMessage::HoverBrowserPanelDrop(p) => Message::HoverBrowserPanelDrop(p),
         BrowserMessage::DropBrowserPanel(p) => Message::DropBrowserPanel(p),
@@ -7601,6 +9339,7 @@ fn map_editor_message(msg: EditorMessage) -> Message {
                 EditorMenuKind::Edit => ActiveMenu::EditorEdit,
                 EditorMenuKind::Image => ActiveMenu::EditorImage,
                 EditorMenuKind::Filter => ActiveMenu::EditorFilter,
+                EditorMenuKind::Plugins => ActiveMenu::EditorPlugins,
                 EditorMenuKind::Select => ActiveMenu::EditorSelect,
                 EditorMenuKind::View => ActiveMenu::EditorView,
                 EditorMenuKind::Window => ActiveMenu::EditorWindow,
@@ -7616,6 +9355,7 @@ fn map_editor_message(msg: EditorMessage) -> Message {
                 EditorMenuKind::Edit => ActiveMenu::EditorEdit,
                 EditorMenuKind::Image => ActiveMenu::EditorImage,
                 EditorMenuKind::Filter => ActiveMenu::EditorFilter,
+                EditorMenuKind::Plugins => ActiveMenu::EditorPlugins,
                 EditorMenuKind::Select => ActiveMenu::EditorSelect,
                 EditorMenuKind::View => ActiveMenu::EditorView,
                 EditorMenuKind::Window => ActiveMenu::EditorWindow,
@@ -7661,8 +9401,39 @@ fn map_editor_message(msg: EditorMessage) -> Message {
         EditorMessage::EditorSetShapeStrokeWidth(w) => Message::EditorSetShapeStrokeWidth(w),
         EditorMessage::EditorSetFloodFillTolerance(t) => Message::EditorSetFloodFillTolerance(t),
         EditorMessage::EditorToggleFloodFillContiguous => Message::EditorToggleFloodFillContiguous,
+        EditorMessage::EditorSetFloodFillOpacity(v) => Message::EditorSetFloodFillOpacity(v),
+        EditorMessage::EditorToggleFloodFillSampleAll => Message::EditorToggleFloodFillSampleAll,
         EditorMessage::EditorSetGradientKind(k) => Message::EditorSetGradientKind(k),
         EditorMessage::EditorSetGradientColorMode(c) => Message::EditorSetGradientColorMode(c),
+        EditorMessage::EditorSetGradientOpacity(v) => Message::EditorSetGradientOpacity(v),
+        EditorMessage::EditorToggleGradientReverse => Message::EditorToggleGradientReverse,
+        EditorMessage::EditorToggleGradientDither => Message::EditorToggleGradientDither,
+        EditorMessage::EditorSetHealingMode(m) => Message::EditorSetHealingMode(m),
+        EditorMessage::EditorSetHealingRadius(r) => Message::EditorSetHealingRadius(r),
+        EditorMessage::EditorSetHealingHardness(h) => Message::EditorSetHealingHardness(h),
+        EditorMessage::EditorSetHealingStrength(s) => Message::EditorSetHealingStrength(s),
+        EditorMessage::EditorToggleHealingSampleAll => Message::EditorToggleHealingSampleAll,
+        EditorMessage::EditorSetHealingSource(src) => Message::EditorSetHealingSource(src),
+        EditorMessage::EditorSetDenoiseStrength(v) => Message::EditorSetDenoiseStrength(v),
+        EditorMessage::EditorSetDenoiseDetail(v) => Message::EditorSetDenoiseDetail(v),
+        EditorMessage::EditorSetTransformSpec(spec) => Message::EditorSetTransformSpec(spec),
+        EditorMessage::EditorTransformCommit => Message::EditorTransformCommit,
+        EditorMessage::EditorTransformCancel => Message::EditorTransformCancel,
+        EditorMessage::OpenDenoiseDialog => Message::OpenDenoiseDialog,
+        EditorMessage::OpenManagePlugins => Message::OpenManagePlugins,
+        EditorMessage::ReloadPlugins => Message::Dispatch(Command::PluginRefresh),
+        EditorMessage::RunPlugin(id) => Message::RunPlugin(id),
+        EditorMessage::EditorCopyPixels { merged } => Message::EditorCopyPixels { merged },
+        EditorMessage::EditorCutPixels => Message::EditorCutPixels,
+        EditorMessage::EditorPastePixels { into_selection } => {
+            Message::EditorPastePixels { into_selection }
+        }
+        EditorMessage::ZoomStep(f) => Message::ZoomStep(f),
+        EditorMessage::ZoomFit => Message::Canvas(CanvasEvent::ResetFit),
+        EditorMessage::ZoomActual => Message::EditorZoomActual,
+        EditorMessage::CanvasPanTo { pan_x, pan_y } => Message::CanvasPanTo { pan_x, pan_y },
+        EditorMessage::SetAntiAliasingMode(m) => Message::SetAntiAliasingMode(m),
+        EditorMessage::SetViewportDenoiseMode(m) => Message::SetViewportDenoiseMode(m),
         EditorMessage::SelectEditorToolTab(t) => Message::SelectEditorToolTab(t),
         EditorMessage::EditorSwapColors => Message::EditorSwapColors,
         EditorMessage::EditorResetColors => Message::EditorResetColors,
@@ -7722,6 +9493,8 @@ fn map_viewer_message(msg: ViewerMessage) -> Message {
         ViewerMessage::ViewerRotatePreview(d) => Message::ViewerRotatePreview(d),
         ViewerMessage::ToggleFullscreen => Message::ToggleFullscreen,
         ViewerMessage::SetViewerViewMode(m) => Message::SetViewerViewMode(m),
+        ViewerMessage::SetAntiAliasingMode(m) => Message::SetAntiAliasingMode(m),
+        ViewerMessage::SetViewportDenoiseMode(m) => Message::SetViewportDenoiseMode(m),
         ViewerMessage::ToggleReaderOptions => Message::ToggleMenu(ActiveMenu::ReaderOptions),
         ViewerMessage::ToggleWorkspaceSwitcher => {
             Message::ToggleMenu(ActiveMenu::WorkspaceSwitcher)
@@ -7765,6 +9538,7 @@ impl PhotonGui {
             Some(ActiveMenu::EditorEdit) => Some(EditorMenuKind::Edit),
             Some(ActiveMenu::EditorImage) => Some(EditorMenuKind::Image),
             Some(ActiveMenu::EditorFilter) => Some(EditorMenuKind::Filter),
+            Some(ActiveMenu::EditorPlugins) => Some(EditorMenuKind::Plugins),
             Some(ActiveMenu::EditorSelect) => Some(EditorMenuKind::Select),
             Some(ActiveMenu::EditorView) => Some(EditorMenuKind::View),
             Some(ActiveMenu::EditorWindow) => Some(EditorMenuKind::Window),
@@ -7772,6 +9546,11 @@ impl PhotonGui {
             Some(ActiveMenu::EditorAddLayer) => Some(EditorMenuKind::AddLayer),
             Some(ActiveMenu::WorkspaceSwitcher) => Some(EditorMenuKind::WorkspaceSwitcher),
             _ => None,
+        };
+        let curve_lut = if self.editor_ui.adjust_popup_tab == Some(AdjustmentPopupTab::Curves) {
+            Some(compute_editor_curve_lut(&self.editor_ui.curves))
+        } else {
+            None
         };
         EditorViewState {
             snapshot: &self.snapshot,
@@ -7783,6 +9562,10 @@ impl PhotonGui {
             editor_mask_thumbs: &self.editor_mask_thumbs,
             editor_ui: &self.editor_ui,
             pending_adj: &self.pending_adj,
+            curve_lut,
+            aa_mode: self.snapshot.meta.layout.canvas_anti_aliasing,
+            denoise_mode: self.snapshot.meta.layout.viewport_denoise,
+            transform_preview: self.transform_preview.as_ref(),
             crop_uv: self.crop_uv,
             viewport_background: self.viewport_background,
             editor_tool_tab: self.editor_tool_tab,
@@ -7873,6 +9656,8 @@ impl PhotonGui {
             is_main_window,
             reader_options_open: self.active_menu == Some(ActiveMenu::ReaderOptions),
             workspace_switcher_open: self.active_menu == Some(ActiveMenu::WorkspaceSwitcher),
+            aa_mode: self.snapshot.meta.layout.canvas_anti_aliasing,
+            denoise_mode: self.snapshot.meta.layout.viewport_denoise,
         }
     }
 
@@ -7991,6 +9776,12 @@ fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) -> Task<Mes
             update(state, Message::OpenBatchDialog(BatchDialogKind::Convert))
         }
         "browser.menu.plugins" => update(state, Message::ToggleMenu(ActiveMenu::BrowserPlugins)),
+        "browser.menu.plugins.manage" | "editor.menu.plugins.manage" => {
+            update(state, Message::OpenManagePlugins)
+        }
+        "browser.menu.plugins.reload" | "editor.menu.plugins.reload" => {
+            dispatch_to_core(state.core.clone(), Command::PluginRefresh)
+        }
         "browser.menu.window" => update(state, Message::ToggleMenu(ActiveMenu::BrowserWindow)),
         "browser.menu.window.quick_access" => update(
             state,
@@ -8111,6 +9902,14 @@ fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) -> Task<Mes
             update(state, Message::EditorSelectTool(EditorTool::PaintBucket))
         }
         "editor.tool.gradient" => update(state, Message::EditorSelectTool(EditorTool::Gradient)),
+        "editor.tool.healing_brush" => {
+            update(state, Message::EditorSelectTool(EditorTool::HealingBrush))
+        }
+        "editor.tool.transform" => update(state, Message::EditorSelectTool(EditorTool::Transform)),
+        "editor.zoom_in" => update(state, Message::ZoomStep(1.25)),
+        "editor.zoom_out" => update(state, Message::ZoomStep(0.8)),
+        "editor.zoom_fit" => update(state, Message::Canvas(CanvasEvent::ResetFit)),
+        "editor.zoom_actual" => update(state, Message::EditorZoomActual),
         "editor.adjust_popup.open" | "editor.adjust_popup.tab.color" | "editor.adjust.color" => {
             update(
                 state,
@@ -8137,6 +9936,8 @@ fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) -> Task<Mes
             update(state, Message::EditorCloseAdjustPopup { apply: true })
         }
         "editor.menu.filter" => update(state, Message::ToggleMenu(ActiveMenu::EditorFilter)),
+        "editor.menu.filter.denoise" => update(state, Message::OpenDenoiseDialog),
+        "editor.menu.plugins" => update(state, Message::ToggleMenu(ActiveMenu::EditorPlugins)),
         "editor.menu.file.open_viewer" => update(
             state,
             Message::RequestEditorLeave {
@@ -9040,13 +10841,343 @@ fn load_editor_thumbnails_task(core: CoreHandle) -> Task<Message> {
     )
 }
 
+fn load_editor_transform_frames_task(core: CoreHandle, layer_id: Option<u64>) -> Task<Message> {
+    Task::perform(
+        async move { core.read_editor_transform_frames_for(layer_id).await },
+        Message::EditorTransformFramesLoaded,
+    )
+}
+
+pub(crate) fn actual_zoom_for_bounds(
+    img_w: u32,
+    img_h: u32,
+    vp_w: f32,
+    vp_h: f32,
+) -> (f32, f32, f32) {
+    let vp_w = vp_w.max(1.0);
+    let vp_h = vp_h.max(1.0);
+    let iw = img_w.max(1) as f32;
+    let ih = img_h.max(1) as f32;
+    let fit_scale = (vp_w / iw).min(vp_h / ih).max(1e-6);
+    let min_zoom = 0.02_f32;
+    let max_zoom = (32.0 / fit_scale).max(32.0);
+    let actual_zoom = (1.0 / fit_scale).clamp(min_zoom, max_zoom);
+    (actual_zoom, min_zoom, max_zoom)
+}
+
+fn active_workspace_zoom_bounds(
+    state: &PhotonGui,
+    bounds_override: Option<[f32; 2]>,
+) -> (f32, f32) {
+    match state.snapshot.meta.workspace {
+        Workspace::Editor => {
+            if let Some(frame) = &state.editor_frame {
+                let [vp_w, vp_h] = bounds_override.unwrap_or_else(|| {
+                    let r = resolved_editor_canvas_bounds(state);
+                    [r.width, r.height]
+                });
+                let (_, min_z, max_z) =
+                    actual_zoom_for_bounds(frame.width, frame.height, vp_w, vp_h);
+                (min_z, max_z)
+            } else {
+                (0.02, 32.0)
+            }
+        }
+        Workspace::Viewer => {
+            if let Some(frame) = &state.viewer_frame {
+                let (base_w, base_h) = if state.viewer_mode == ViewerViewMode::Double
+                    && let Some(pair) = &state.viewer_pair_frame
+                {
+                    let (sw, sh, _, _) = dual_spread_geometry(
+                        (frame.width, frame.height),
+                        (pair.width, pair.height),
+                        f32::from(state.viewer_manga_page_gap),
+                    );
+                    (sw, sh)
+                } else {
+                    (frame.width as f32, frame.height as f32)
+                };
+                let odd = (state.viewer_quarter_turns % 2) == 1;
+                let (iw, ih) = if odd {
+                    (base_h, base_w)
+                } else {
+                    (base_w, base_h)
+                };
+                let [vp_w, vp_h] = bounds_override.unwrap_or([
+                    (state.window_size.width - 40.0).max(120.0),
+                    (state.window_size.height - 130.0).max(120.0),
+                ]);
+                let (_, min_z, max_z) =
+                    actual_zoom_for_bounds(iw.max(1.0) as u32, ih.max(1.0) as u32, vp_w, vp_h);
+                (min_z, max_z)
+            } else {
+                (0.02, 32.0)
+            }
+        }
+        Workspace::Browser => (0.02, 32.0),
+    }
+}
+
+fn compute_luminance_histogram(frame: &CpuImageFrame) -> Arc<[u32; 256]> {
+    let mut bins = [0u32; 256];
+    let total_pixels = frame.rgba.len() / 4;
+    let step = (total_pixels / 250_000).max(1);
+    let mut i = 0usize;
+    while i < total_pixels {
+        let off = i * 4;
+        if off + 3 < frame.rgba.len() && frame.rgba[off + 3] > 0 {
+            let r = u32::from(frame.rgba[off]);
+            let g = u32::from(frame.rgba[off + 1]);
+            let b = u32::from(frame.rgba[off + 2]);
+            let luma = ((54 * r + 183 * g + 19 * b) >> 8).min(255) as usize;
+            bins[luma] = bins[luma].saturating_add(1);
+        }
+        i += step;
+    }
+    Arc::new(bins)
+}
+
+pub(crate) fn compute_editor_curve_lut(curves: &photon_protocol::CurvesAdjustment) -> [u8; 1024] {
+    let lut_rgb = photon_image::pixels::build_curve_lut(&curves.rgb);
+    let lut_r = photon_image::pixels::build_curve_lut(&curves.red);
+    let lut_g = photon_image::pixels::build_curve_lut(&curves.green);
+    let lut_b = photon_image::pixels::build_curve_lut(&curves.blue);
+    let mut out = [0u8; 1024];
+    for i in 0..256 {
+        let base = i * 4;
+        out[base] = lut_rgb[usize::from(lut_r[i])];
+        out[base + 1] = lut_rgb[usize::from(lut_g[i])];
+        out[base + 2] = lut_rgb[usize::from(lut_b[i])];
+        out[base + 3] = 255;
+    }
+    out
+}
+
+fn resolve_desktop_plugins_dir() -> PathBuf {
+    if let Ok(env_dir) = std::env::var("PHOTON_PLUGINS_DIR")
+        && !env_dir.trim().is_empty()
+    {
+        return PathBuf::from(env_dir.trim());
+    }
+    photon_storage::AppPaths::current().data_dir.join("plugins")
+}
+
+fn open_folder_in_file_manager(dir: &Path) {
+    use std::process::{Command as ProcessCommand, Stdio};
+    let _ = ProcessCommand::new("xdg-open")
+        .arg(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+fn default_value_for_plugin_param(spec: &PluginParamSpec) -> PluginParamValue {
+    if let Some(def) = &spec.default {
+        return def.clone();
+    }
+    match spec.kind {
+        PluginParamKind::Float => PluginParamValue::Float(spec.min.unwrap_or(0.0)),
+        PluginParamKind::Int => PluginParamValue::Int(spec.min.unwrap_or(0.0).round() as i64),
+        PluginParamKind::Bool => PluginParamValue::Bool(false),
+        PluginParamKind::Select => {
+            PluginParamValue::Select(spec.options.first().cloned().unwrap_or_default())
+        }
+        PluginParamKind::Color => PluginParamValue::Color([0, 0, 0]),
+    }
+}
+
+fn write_png_bytes_to_clipboard(png_bytes: &[u8]) -> bool {
+    use std::io::Write;
+    use std::process::{Command as ProcessCommand, Stdio};
+
+    let try_pipe = |program: &str, args: &[&str]| -> bool {
+        let Ok(mut child) = ProcessCommand::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(png_bytes);
+        }
+        child.wait().is_ok_and(|s| s.success())
+    };
+
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && try_pipe("wl-copy", &["--type", "image/png"])
+    {
+        return true;
+    }
+    if try_pipe("wl-copy", &["--type", "image/png"])
+        || try_pipe("xclip", &["-selection", "clipboard", "-t", "image/png"])
+    {
+        return true;
+    }
+
+    if let Ok(dyn_img) = image::load_from_memory(png_bytes) {
+        let rgba = dyn_img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            return cb
+                .set_image(arboard::ImageData {
+                    width: w as usize,
+                    height: h as usize,
+                    bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+                })
+                .is_ok();
+        }
+    }
+    false
+}
+
+fn read_clipboard_png_bytes() -> Option<Vec<u8>> {
+    use image::ImageEncoder;
+    use std::process::Command as ProcessCommand;
+
+    let try_read = |program: &str, args: &[&str]| -> Option<Vec<u8>> {
+        let out = ProcessCommand::new(program).args(args).output().ok()?;
+        if out.status.success() && !out.stdout.is_empty() {
+            Some(out.stdout)
+        } else {
+            None
+        }
+    };
+
+    if let Ok(mut cb) = arboard::Clipboard::new()
+        && let Ok(img) = cb.get_image()
+    {
+        let mut png_bytes = Vec::new();
+        if image::codecs::png::PngEncoder::new(&mut png_bytes)
+            .write_image(
+                img.bytes.as_ref(),
+                img.width as u32,
+                img.height as u32,
+                image::ExtendedColorType::Rgba8,
+            )
+            .is_ok()
+            && !png_bytes.is_empty()
+        {
+            return Some(png_bytes);
+        }
+    }
+
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && let Some(bytes) = try_read("wl-paste", &["--no-newline", "--type", "image/png"])
+            .or_else(|| try_read("wl-paste", &["--type", "image/png"]))
+    {
+        return Some(bytes);
+    }
+    try_read(
+        "xclip",
+        &["-selection", "clipboard", "-t", "image/png", "-o"],
+    )
+}
+
+fn write_file_uris_to_clipboard(paths: &[String]) -> bool {
+    use std::io::Write;
+    use std::process::{Command as ProcessCommand, Stdio};
+
+    let uris: String = paths.iter().map(|p| format!("file://{p}\n")).collect();
+    let try_pipe = |program: &str, args: &[&str]| -> bool {
+        let Ok(mut child) = ProcessCommand::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(uris.as_bytes());
+        }
+        child.wait().is_ok_and(|s| s.success())
+    };
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && try_pipe("wl-copy", &["--type", "text/uri-list"])
+    {
+        return true;
+    }
+    if try_pipe("wl-copy", &["--type", "text/uri-list"])
+        || try_pipe("xclip", &["-selection", "clipboard", "-t", "text/uri-list"])
+    {
+        return true;
+    }
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        return cb.set_text(uris).is_ok();
+    }
+    false
+}
+
+fn read_clipboard_uri_list() -> Vec<String> {
+    use std::process::Command as ProcessCommand;
+
+    let try_read = |program: &str, args: &[&str]| -> Option<String> {
+        let out = ProcessCommand::new(program).args(args).output().ok()?;
+        if out.status.success() {
+            String::from_utf8(out.stdout).ok()
+        } else {
+            None
+        }
+    };
+
+    let raw = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        try_read("wl-paste", &["--no-newline", "--type", "text/uri-list"]).or_else(|| {
+            try_read(
+                "xclip",
+                &["-selection", "clipboard", "-t", "text/uri-list", "-o"],
+            )
+        })
+    } else {
+        try_read(
+            "xclip",
+            &["-selection", "clipboard", "-t", "text/uri-list", "-o"],
+        )
+        .or_else(|| try_read("wl-paste", &["--no-newline", "--type", "text/uri-list"]))
+    };
+    let Some(text) = raw else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return None;
+            }
+            let path = trimmed.strip_prefix("file://").unwrap_or(trimmed);
+            let p = Path::new(path);
+            if p.exists() {
+                Some(path.to_owned())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn resolve_browser_clipboard_paste(in_app_files: Vec<String>) -> Option<BrowserClipboardPaste> {
+    let os_uris = read_clipboard_uri_list();
+    if !os_uris.is_empty() {
+        return Some(BrowserClipboardPaste::Files(os_uris));
+    }
+    if let Some(png_bytes) = read_clipboard_png_bytes() {
+        return Some(BrowserClipboardPaste::ImagePng(png_bytes));
+    }
+    if !in_app_files.is_empty() {
+        return Some(BrowserClipboardPaste::Files(in_app_files));
+    }
+    None
+}
+
 fn copy_image_png_to_clipboard(
     path: Option<&str>,
     cached_rgba: Option<(u32, u32, Arc<Vec<u8>>)>,
 ) -> bool {
     use image::ImageEncoder;
-    use std::io::Write;
-    use std::process::{Command as ProcessCommand, Stdio};
 
     let (w, h, raw): (u32, u32, Vec<u8>) = if let Some((w, h, arc)) = cached_rgba {
         (w, h, arc.as_ref().clone())
@@ -9068,29 +11199,7 @@ fn copy_image_png_to_clipboard(
         return false;
     }
 
-    let try_pipe = |program: &str, args: &[&str]| -> bool {
-        let Ok(mut child) = ProcessCommand::new(program)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            return false;
-        };
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(&png_bytes);
-        }
-        child.wait().is_ok_and(|s| s.success())
-    };
-
-    if std::env::var_os("WAYLAND_DISPLAY").is_some()
-        && try_pipe("wl-copy", &["--type", "image/png"])
-    {
-        return true;
-    }
-    try_pipe("wl-copy", &["--type", "image/png"])
-        || try_pipe("xclip", &["-selection", "clipboard", "-t", "image/png"])
+    write_png_bytes_to_clipboard(&png_bytes)
 }
 
 fn reveal_path_in_folder(path: &str) {
@@ -9114,26 +11223,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clamp_editor_pan_centers_when_smaller_than_viewport_and_clamps_when_larger() {
-        // 1000x500 image in 1000x1000 viewport => fit_scale = 1.0.
-        // At zoom = 1.0: disp = (1000, 500) <= (1000, 1000) => pan resets to 0.0.
-        let (mut pan_x, mut pan_y) = (120.0, -80.0);
-        clamp_pan_for_bounds(&mut pan_x, &mut pan_y, 1000, 500, 1.0, [1000.0, 1000.0]);
-        assert_eq!(pan_x, 0.0);
-        assert_eq!(pan_y, 0.0);
+    fn free_pan_allows_overscroll_and_cursor_zoom_without_locking() {
+        let (mut pan_x, mut pan_y) = (0.0_f32, 0.0_f32);
+        let mut zoom = 1.0_f32;
 
-        // At zoom = 2.0: disp = (2000, 1000).
-        // disp_w (2000) > 1000 => max_x = 500; disp_h (1000) <= 1000 => pan_y = 0.0.
-        pan_x = 800.0;
-        pan_y = 40.0;
-        clamp_pan_for_bounds(&mut pan_x, &mut pan_y, 1000, 500, 2.0, [1000.0, 1000.0]);
-        assert_eq!(pan_x, 500.0);
-        assert_eq!(pan_y, 0.0);
+        // Even at zoom = 1.0 (fit), panning freely moves off-center without snapping back to 0.
+        apply_canvas_pan(&mut pan_x, &mut pan_y, 120.0, -80.0);
+        assert_eq!(pan_x, 120.0);
+        assert_eq!(pan_y, -80.0);
 
-        // Negative pan clamps to -500.0.
-        pan_x = -900.0;
-        clamp_pan_for_bounds(&mut pan_x, &mut pan_y, 1000, 500, 2.0, [1000.0, 1000.0]);
-        assert_eq!(pan_x, -500.0);
+        // Large-image dynamic zoom range allows 1:1 and beyond without clamping to 16.0.
+        let (actual, min_z, max_z) = actual_zoom_for_bounds(16000, 12000, 800.0, 600.0);
+        assert!(actual >= 20.0);
+        apply_canvas_zoom_at_cursor(
+            &mut zoom,
+            &mut pan_x,
+            &mut pan_y,
+            actual,
+            Some([400.0, 300.0]),
+            [800.0, 600.0],
+            min_z,
+            max_z,
+        );
+        assert!((zoom - actual).abs() < 1e-4);
     }
 
     #[test]
@@ -9196,5 +11308,54 @@ mod tests {
                 .parse_and_validate("256", lang)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn dynamic_large_image_actual_zoom_reaches_one_to_one_beyond_16x() {
+        // 16000x12000 image in a 1000x800 viewport => fit_scale = 1000/16000 = 0.0625.
+        // 1:1 pixel zoom = 16.0; for 32768x24576 in 800x600 => fit_scale = 800/32768 ≈ 0.0244,
+        // so 1:1 pixel zoom ≈ 40.96 (well above the old hardcoded 16.0 ceiling).
+        let (actual_32k, min_z, max_z) = actual_zoom_for_bounds(32768, 24576, 800.0, 600.0);
+        assert_eq!(min_z, 0.02);
+        assert!(
+            actual_32k > 40.0,
+            "expected 1:1 zoom > 40, got {actual_32k}"
+        );
+        assert!(max_z > actual_32k * 30.0);
+        let fit_scale = (800.0_f32 / 32768.0).min(600.0_f32 / 24576.0);
+        assert!((actual_32k * fit_scale - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn dialog_defaults_cover_curves_denoise_and_plugins() {
+        let curves = default_window_state_for(DesktopDialogId::AdjustCurves);
+        assert_eq!(curves.width, 460.0);
+        assert_eq!(curves.height, 520.0);
+        assert_eq!(curves.min_width, 380.0);
+        assert_eq!(curves.min_height, 440.0);
+
+        let plugins = default_window_state_for(DesktopDialogId::ManagePlugins);
+        assert_eq!(plugins.width, 640.0);
+        assert_eq!(plugins.height, 480.0);
+
+        let denoise = default_window_state_for(DesktopDialogId::AdjustDenoise);
+        assert_eq!(denoise.width, 440.0);
+    }
+
+    #[test]
+    fn combined_editor_curve_lut_composes_channel_and_master_curves() {
+        let curves = photon_protocol::CurvesAdjustment {
+            rgb: vec![[0.0, 1.0], [1.0, 0.0]],
+            red: vec![[0.0, 0.0], [1.0, 1.0]],
+            green: vec![[0.0, 0.0], [1.0, 1.0]],
+            blue: vec![[0.0, 0.0], [1.0, 1.0]],
+        };
+        let lut = compute_editor_curve_lut(&curves);
+        assert_eq!(lut[0], 255);
+        assert_eq!(lut[1], 255);
+        assert_eq!(lut[2], 255);
+        assert_eq!(lut[3], 255);
+        assert_eq!(lut[255 * 4], 0);
+        assert_eq!(lut[255 * 4 + 3], 255);
     }
 }

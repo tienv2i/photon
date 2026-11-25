@@ -178,19 +178,26 @@ pub fn rename_path(path: &Path, new_name: &str) -> Result<PathBuf, ProtocolError
     Ok(target)
 }
 
+fn split_stem_ext(name: &OsStr) -> (String, String) {
+    let p = Path::new(name);
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "item".to_owned());
+    let ext = p
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    (stem, ext)
+}
+
 fn unique_target(destination: &Path, name: &OsStr) -> PathBuf {
     let mut target = destination.join(name);
     if !target.exists() {
         return target;
     }
-    let stem = Path::new(name)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "item".to_owned());
-    let ext = Path::new(name)
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
+    let (stem, ext) = split_stem_ext(name);
     let mut idx = 1usize;
     loop {
         target = destination.join(format!("{stem} ({idx}){ext}"));
@@ -201,14 +208,60 @@ fn unique_target(destination: &Path, name: &OsStr) -> PathBuf {
     }
 }
 
+fn unique_copy_target(destination: &Path, name: &OsStr) -> PathBuf {
+    let target = destination.join(name);
+    if !target.exists() {
+        return target;
+    }
+    let (stem, ext) = split_stem_ext(name);
+    let first = destination.join(format!("{stem} (copy){ext}"));
+    if !first.exists() {
+        return first;
+    }
+    let mut idx = 2usize;
+    loop {
+        let candidate = destination.join(format!("{stem} (copy {idx}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        idx += 1;
+    }
+}
+
+/// Sanitize a filename hint and return a non-colliding `.png` path inside `folder`.
+pub fn unique_png_path(folder: &Path, filename_hint: &str) -> PathBuf {
+    let raw_name = Path::new(filename_hint.trim())
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    let stem = if valid_entry_name(raw_name) {
+        Path::new(raw_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::trim)
+            .filter(|s| valid_entry_name(s))
+            .unwrap_or("pasted")
+    } else {
+        "pasted"
+    };
+    let candidate = format!("{stem}.png");
+    unique_copy_target(folder, OsStr::new(&candidate))
+}
+
 pub fn copy_path(source: &Path, destination: &Path) -> Result<PathBuf, String> {
     if !destination.is_dir() {
         return Err(format!("{} is not a directory", destination.display()));
     }
+    if source.is_dir() && normalize_path(destination).starts_with(normalize_path(source)) {
+        return Err(format!(
+            "cannot copy folder {} inside itself",
+            source.display()
+        ));
+    }
     let name = source
         .file_name()
         .ok_or_else(|| format!("{} has no file name", source.display()))?;
-    let target = unique_target(destination, name);
+    let target = unique_copy_target(destination, name);
     copy_recursive(source, &target)?;
     Ok(target)
 }

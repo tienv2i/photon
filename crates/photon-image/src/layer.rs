@@ -686,6 +686,26 @@ pub fn composite_stack(stack: &LayerStack) -> Arc<RgbaImage> {
     Arc::new(canvas)
 }
 
+/// Composite all visible layers in `stack` except `exclude_layer_id` (used for live GPU Transform preview).
+pub fn composite_stack_excluding(stack: &LayerStack, exclude_layer_id: u64) -> Arc<RgbaImage> {
+    let base_px = match stack.background {
+        Some([r, g, b]) => Rgba([r, g, b, 255]),
+        None => Rgba([0, 0, 0, 0]),
+    };
+    let mut canvas = RgbaImage::from_pixel(
+        stack.canvas_width.max(1),
+        stack.canvas_height.max(1),
+        base_px,
+    );
+    for layer in &stack.layers {
+        if layer.id == exclude_layer_id || !layer.visible || layer.opacity <= 1e-4 {
+            continue;
+        }
+        blend_layer_onto(&mut canvas, layer);
+    }
+    Arc::new(canvas)
+}
+
 fn composite_pair(canvas_w: u32, canvas_h: u32, bottom: &Layer, top: &Layer) -> RgbaImage {
     let mut canvas = RgbaImage::from_pixel(canvas_w.max(1), canvas_h.max(1), Rgba([0, 0, 0, 0]));
     if bottom.visible && bottom.opacity > 1e-4 {
@@ -724,6 +744,10 @@ fn apply_layer_effect(canvas: &RgbaImage, effect: &LayerEffect) -> RgbaImage {
         LayerEffect::Curves(curves) => crate::pixels::adjust_curves(canvas, curves),
         LayerEffect::Blur { radius } => crate::pixels::box_blur_rgba(canvas, *radius),
         LayerEffect::Sharpen { amount } => crate::pixels::sharpen_rgba(canvas, *amount),
+        LayerEffect::Denoise {
+            strength,
+            detail_preserve,
+        } => crate::pixels::denoise_rgba(canvas, *strength, *detail_preserve, None),
         LayerEffect::Invert => crate::pixels::invert_rgba(canvas),
         LayerEffect::Desaturate => crate::pixels::desaturate_rgba(canvas),
         LayerEffect::Sepia => crate::pixels::sepia_rgba(canvas),

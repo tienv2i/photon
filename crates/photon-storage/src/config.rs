@@ -23,6 +23,8 @@ pub struct Config {
     #[serde(default)]
     pub favorites_initialized: bool,
     pub translate: TranslateSettings,
+    #[serde(default)]
+    pub disabled_plugins: Vec<String>,
 }
 
 impl Default for Config {
@@ -37,6 +39,7 @@ impl Default for Config {
             favorites: Vec::new(),
             favorites_initialized: false,
             translate: TranslateSettings::default(),
+            disabled_plugins: Vec::new(),
         }
     }
 }
@@ -213,6 +216,27 @@ mod tests {
         assert_eq!(loaded.theme, Theme::Light);
         assert_eq!(loaded.last_folder.as_deref(), Some("/tmp/photos"));
         assert!(loaded.remember_last_folder);
+        assert!(loaded.disabled_plugins.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disabled_plugins_persists_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("photon-cfg-plugins-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        let cfg = Config {
+            disabled_plugins: vec!["com.example.one".to_owned()],
+            ..Default::default()
+        };
+        cfg.save(&path).unwrap();
+
+        let (loaded, warn) = Config::load_or_create(&path);
+        assert!(warn.is_none());
+        assert_eq!(loaded.disabled_plugins, vec!["com.example.one"]);
 
         let _ = fs::remove_dir_all(&dir);
     }

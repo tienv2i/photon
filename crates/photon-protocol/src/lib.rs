@@ -27,7 +27,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Supported image extensions recognized by Browser, Viewer, and Editor.
 pub const IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "jpe", "jfif", "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "ico", "pnm",
-    "pbm", "pgm", "ppm", "qoi", "tga", "hdr", "exr",
+    "pbm", "pgm", "ppm", "qoi", "tga", "hdr", "exr", "ora", "svg", "svgz", "apng", "pam", "dds",
+    "ff", "cur", "jxl", "psd", "heic", "heif", "dng", "cr2", "cr3", "nef", "arw", "raf", "orf",
+    "rw2",
 ];
 
 /// Three unified workspaces sharing one Core and state owner.

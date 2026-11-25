@@ -4,8 +4,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BatchState, Language, LayerSummary, LayoutState, Theme, TranslateSettings, TranslationResult,
-    UiText, Workspace, default_one_f32,
+    BatchState, Language, LayerSummary, LayoutState, PluginInfo, Theme, TranslateSettings,
+    TranslationResult, UiText, Workspace, default_one_f32,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -168,6 +168,10 @@ pub struct UiStateMeta {
     pub translation: Option<TranslationResult>,
     #[serde(default)]
     pub translate_settings: TranslateSettings,
+    #[serde(default)]
+    pub plugins: Vec<PluginInfo>,
+    #[serde(default)]
+    pub has_pixel_clipboard: bool,
 }
 
 /// Full state snapshot returned by `Query::State`.

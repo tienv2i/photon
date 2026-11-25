@@ -6,6 +6,7 @@ members = [
     "crates/photon-i18n",
     "crates/photon-image",
     "crates/photon-core",
+    "crates/photon-plugins",
     "crates/photon-dialogs",
     "crates/photon-ipc",
     "crates/photon-ui",
@@ -30,6 +31,7 @@ photon-storage = { path = "crates/photon-storage" }
 photon-i18n = { path = "crates/photon-i18n" }
 photon-image = { path = "crates/photon-image" }
 photon-core = { path = "crates/photon-core" }
+photon-plugins = { path = "crates/photon-plugins" }
 photon-dialogs = { path = "crates/photon-dialogs" }
 photon-ipc = { path = "crates/photon-ipc" }
 photon-ui = { path = "crates/photon-ui" }
@@ -39,12 +41,19 @@ photon-browser = { path = "crates/photon-browser" }
 photon-viewer = { path = "crates/photon-viewer" }
 photon-editor = { path = "crates/photon-editor" }
 
+arboard = "3"
 clap = { version = "4", features = ["derive", "env"] }
+flate2 = "1"
 fluent-templates = "0.15"
 iced = { version = "0.14", features = ["wgpu", "tiny-skia", "tokio", "image", "svg", "advanced"] }
 image = "0.25"
+jxl-oxide = "0.12"
+psd = "0.3"
+rawler = "0.7"
 rayon = "1.10"
+resvg = "0.45"
 rfd = "0.18"
+roxmltree = "0.20"
 schemars = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -54,6 +63,9 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 unic-langid = "0.9"
+usvg = "0.45"
+xmlwriter = "0.1"
+zip = { version = "2.6", default-features = false, features = ["deflate"] }
 
 [profile.release]
 strip = "symbols"

@@ -1,0 +1,136 @@
+{
+  "apiVersion": 1,
+  "id": "photon.ocr.tesseract",
+  "name": "OCR — Copy Text (Tesseract)",
+  "version": "1.3.0",
+  "entry": {
+    "command": "bin/photon-plugin-ocr",
+    "args": [],
+    "protocol": "jsonl-stdio"
+  },
+  "permissions": {
+    "network": false,
+    "gpu": false
+  },
+  "models": [
+    {
+      "id": "ocr-vie",
+      "name": "Tesseract OCR — Vietnamese (vie)",
+      "tier": "ocr",
+      "file": "vie.traineddata",
+      "sizeBytes": 1460000,
+      "sha256": "",
+      "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/main/vie.traineddata"
+    },
+    {
+      "id": "ocr-jpn",
+      "name": "Tesseract OCR — Japanese (jpn)",
+      "tier": "ocr",
+      "file": "jpn.traineddata",
+      "sizeBytes": 2480000,
+      "sha256": "",
+      "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/main/jpn.traineddata"
+    },
+    {
+      "id": "ocr-jpn_vert",
+      "name": "Tesseract OCR — Japanese Vertical / Manga (jpn_vert)",
+      "tier": "ocr",
+      "file": "jpn_vert.traineddata",
+      "sizeBytes": 2860000,
+      "sha256": "",
+      "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/main/jpn_vert.traineddata"
+    },
+    {
+      "id": "ocr-chi_sim",
+      "name": "Tesseract OCR — Chinese Simplified (chi_sim)",
+      "tier": "ocr",
+      "file": "chi_sim.traineddata",
+      "sizeBytes": 2450000,
+      "sha256": "",
+      "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/main/chi_sim.traineddata"
+    },
+    {
+      "id": "ocr-kor",
+      "name": "Tesseract OCR — Korean (kor)",
+      "tier": "ocr",
+      "file": "kor.traineddata",
+      "sizeBytes": 1680000,
+      "sha256": "",
+      "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/main/kor.traineddata"
+    }
+  ],
+  "capabilities": [
+    {
+      "action": "viewer.ocr_copy",
+      "workspace": "viewer",
+      "label": "Copy text (OCR)",
+      "output": "text"
+    }
+  ],
+  "quickActions": [
+    {
+      "id": "ocr-copy-en",
+      "label": "Copy text (OCR — English)",
+      "action": "viewer.ocr_copy",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "lang": "eng"
+      }
+    },
+    {
+      "id": "ocr-copy-vi",
+      "label": "Copy text (OCR — Vietnamese)",
+      "action": "viewer.ocr_copy",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "lang": "vie",
+        "modelId": "ocr-vie"
+      }
+    },
+    {
+      "id": "ocr-copy-jpn",
+      "label": "Copy text (OCR — Japanese)",
+      "action": "viewer.ocr_copy",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "lang": "jpn",
+        "modelId": "ocr-jpn"
+      }
+    },
+    {
+      "id": "ocr-copy-zh",
+      "label": "Copy text (OCR — Chinese)",
+      "action": "viewer.ocr_copy",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "lang": "chi_sim",
+        "modelId": "ocr-chi_sim"
+      }
+    },
+    {
+      "id": "ocr-copy-ko",
+      "label": "Copy text (OCR — Korean)",
+      "action": "viewer.ocr_copy",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "lang": "kor",
+        "modelId": "ocr-kor"
+      }
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "apiVersion": 1,
+  "id": "photon.ocr.ai",
+  "name": "AI OCR — Manga-OCR & RapidOCR (ONNX)",
+  "version": "1.3.0",
+  "entry": {
+    "command": "bin/photon-plugin-ai-ocr",
+    "args": [],
+    "protocol": "jsonl-stdio"
+  },
+  "permissions": {
+    "network": true,
+    "gpu": false
+  },
+  "models": [
+    {
+      "id": "manga-ocr-encoder",
+      "name": "Manga-OCR — Vision Encoder (Japanese Manga)",
+      "tier": "ocr",
+      "file": "manga-ocr-encoder.onnx",
+      "sizeBytes": 22356885,
+      "sha256": "",
+      "url": "https://huggingface.co/l0wgear/manga-ocr-2025-onnx/resolve/main/encoder_model.onnx"
+    },
+    {
+      "id": "manga-ocr-decoder",
+      "name": "Manga-OCR — Text Decoder (Japanese Manga)",
+      "tier": "ocr",
+      "file": "manga-ocr-decoder.onnx",
+      "sizeBytes": 118053454,
+      "sha256": "",
+      "url": "https://huggingface.co/l0wgear/manga-ocr-2025-onnx/resolve/main/decoder_model.onnx"
+    },
+    {
+      "id": "manga-ocr-vocab",
+      "name": "Manga-OCR — Vocabulary (vocab.txt)",
+      "tier": "ocr",
+      "file": "manga-ocr-vocab.txt",
+      "sizeBytes": 24072,
+      "sha256": "",
+      "url": "https://huggingface.co/l0wgear/manga-ocr-2025-onnx/resolve/main/vocab.txt"
+    },
+    {
+      "id": "rapidocr-det",
+      "name": "RapidOCR — PP-OCRv4 Text Detector (Complex BG)",
+      "tier": "ocr",
+      "file": "ch_PP-OCRv4_det_infer.onnx",
+      "sizeBytes": 4745517,
+      "sha256": "",
+      "url": "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx"
+    },
+    {
+      "id": "rapidocr-rec",
+      "name": "RapidOCR — PP-OCRv4 Recognizer (ZH/EN/Multi)",
+      "tier": "ocr",
+      "file": "ch_PP-OCRv4_rec_infer.onnx",
+      "sizeBytes": 10857958,
+      "sha256": "",
+      "url": "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx"
+    },
+    {
+      "id": "rapidocr-keys",
+      "name": "RapidOCR — Character Dictionary (ppocr_keys_v1.txt)",
+      "tier": "ocr",
+      "file": "ppocr_keys_v1.txt",
+      "sizeBytes": 26500,
+      "sha256": "",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/ppocr_keys_v1.txt"
+    }
+  ],
+  "capabilities": [
+    {
+      "action": "viewer.ai_ocr",
+      "workspace": "viewer",
+      "label": "AI OCR (Manga-OCR / RapidOCR)",
+      "output": "translation"
+    }
+  ],
+  "quickActions": []
+}

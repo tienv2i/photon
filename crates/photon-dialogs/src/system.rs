@@ -11,9 +11,12 @@ pub struct FileFilter<'a> {
     pub extensions: &'a [&'a str],
 }
 
-/// Default raster image formats supported by Photon.
+/// Default raster & layered image formats supported by Photon.
 pub const IMAGE_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff", "tif", "ico", "qoi", "tga",
+    "jpg", "jpeg", "jpe", "jfif", "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "ico", "pnm",
+    "pbm", "pgm", "ppm", "qoi", "tga", "hdr", "exr", "ora", "svg", "svgz", "apng", "pam", "dds",
+    "ff", "cur", "jxl", "psd", "heic", "heif", "dng", "cr2", "cr3", "nef", "arw", "raf", "orf",
+    "rw2",
 ];
 
 /// Open a native OS directory picker dialog.
@@ -76,7 +79,7 @@ pub async fn open_images(title: &str, starting_dir: Option<PathBuf>) -> Vec<Path
     open_files(title, starting_dir, &filters).await
 }
 
-/// Convenience helper: Save-As dialog pre-configured for raster image exports.
+/// Convenience helper: Save-As dialog pre-configured for raster & layered image exports.
 pub async fn save_image_as(
     title: &str,
     starting_dir: Option<PathBuf>,
@@ -84,7 +87,10 @@ pub async fn save_image_as(
 ) -> Option<PathBuf> {
     let filters = [FileFilter {
         name: "Images",
-        extensions: &["png", "jpg", "jpeg", "webp", "bmp", "tiff"],
+        extensions: &[
+            "png", "jpg", "jpeg", "webp", "ora", "avif", "tiff", "tif", "gif", "bmp", "tga", "qoi",
+            "exr", "hdr", "ico", "pnm", "ff",
+        ],
     }];
     save_file(title, starting_dir, default_name, &filters).await
 }
@@ -117,6 +123,10 @@ mod tests {
         assert!(IMAGE_EXTENSIONS.contains(&"png"));
         assert!(IMAGE_EXTENSIONS.contains(&"jpg"));
         assert!(IMAGE_EXTENSIONS.contains(&"webp"));
+        assert!(IMAGE_EXTENSIONS.contains(&"ora"));
+        assert!(IMAGE_EXTENSIONS.contains(&"psd"));
+        assert!(IMAGE_EXTENSIONS.contains(&"jxl"));
+        assert!(IMAGE_EXTENSIONS.contains(&"svg"));
     }
 
     #[test]

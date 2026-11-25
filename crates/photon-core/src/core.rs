@@ -1,19 +1,25 @@
 //! Synchronous Core state owner and command execution handlers.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
+use std::io::{Cursor, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, UNIX_EPOCH};
 
-use photon_image::{EditOp, EditorDocument, ImageError, LayerOperation};
+use image::{GrayImage, ImageEncoder, Rgba, RgbaImage};
+use photon_image::{EditOp, EditorDocument, ImageError, LayerOperation, SelectionMask};
+use photon_plugins::{
+    PluginError, PluginOutputMode, PluginRegistry, resolve_plugins_dir, run_browser_plugin,
+    run_editor_plugin,
+};
 use photon_protocol::{
     ApplyTarget, BatchSource, BatchState, ColorAdjustments, ColorBalanceAdjustment, Command,
     CommandResponse, CommandStatus, Crumb, CurvesAdjustment, EditorSelectionSummary, EditorState,
-    Entry, HsvAdjustment, IMAGE_EXTENSIONS, LayoutState, ProtocolError, Query, RuntimeStatus,
-    SelectionInfo, TaskRunStatus, TaskSnapshot, UiStateMeta, UiStateSnapshot, UiText,
-    UiTreeSnapshot, Workspace, protocol_schemas,
+    Entry, HsvAdjustment, IMAGE_EXTENSIONS, LayoutState, PluginCapability, PluginParamValue,
+    ProtocolError, Query, RuntimeStatus, SelectionInfo, TaskRunStatus, TaskSnapshot, UiStateMeta,
+    UiStateSnapshot, UiText, UiTreeSnapshot, Workspace, protocol_schemas,
 };
 use photon_storage::journal::now_ms;
 use photon_storage::logging::current_boot_id;
@@ -21,6 +27,17 @@ use photon_storage::{AppIdentity, AppPaths, Config, Journal};
 
 use crate::batch::BatchPlan;
 use crate::file_ops;
+
+/// In-memory Editor pixel clipboard backing Cut/Copy/Paste and `Query::EditorClipboardPng`.
+#[derive(Debug, Clone)]
+pub struct EditorPixelClipboard {
+    pub width: u32,
+    pub height: u32,
+    pub offset_x: i32,
+    pub offset_y: i32,
+    pub rgba: Arc<Vec<u8>>,
+    pub png: Arc<Vec<u8>>,
+}
 
 pub struct Core {
     pub identity: AppIdentity,
@@ -43,6 +60,8 @@ pub struct Core {
     viewer_index: Option<usize>,
     editor: Option<EditorDocument>,
     next_original_revision: u64,
+    pixel_clipboard: Option<EditorPixelClipboard>,
+    plugin_registry: PluginRegistry,
     batch: Option<BatchState>,
     batch_cancel: Option<Arc<AtomicBool>>,
     pending_batch: Option<(BatchPlan, Arc<AtomicBool>)>,
@@ -88,6 +107,24 @@ impl Core {
             cfg
         };
         let journal = Journal::new(&paths.journal_dir, current_boot_id());
+        let plugins_dir = resolve_plugins_dir(paths.data_dir.join("plugins"));
+        let plugin_registry = match PluginRegistry::discover(&plugins_dir) {
+            Ok(reg) => {
+                for err in reg.errors() {
+                    tracing::warn!(
+                        target: "photon::plugins",
+                        dir = %err.dir.display(),
+                        error = %err.message,
+                        "skipped invalid plugin"
+                    );
+                }
+                reg
+            }
+            Err(err) => {
+                tracing::warn!(target: "photon::plugins", %err, "failed to scan plugins dir");
+                PluginRegistry::default()
+            }
+        };
         let status = if safe_mode {
             UiText::new("safe_mode_active")
         } else {
@@ -115,6 +152,8 @@ impl Core {
             viewer_index: None,
             editor: None,
             next_original_revision: 1,
+            pixel_clipboard: None,
+            plugin_registry,
             batch: None,
             batch_cancel: None,
             pending_batch: None,
@@ -334,6 +373,10 @@ impl Core {
             batch: self.batch.clone(),
             translation: None,
             translate_settings: self.config.translate.clone(),
+            plugins: self
+                .plugin_registry
+                .plugin_infos(&self.config.disabled_plugins),
+            has_pixel_clipboard: self.pixel_clipboard.is_some(),
         }
     }
 
@@ -396,6 +439,20 @@ impl Core {
             Query::Tasks => Ok(serde_json::json!({ "tasks": self.tasks })),
             Query::UiTree => Ok(serde_json::to_value(&self.ui_tree).unwrap_or_default()),
             Query::Schema => Ok(protocol_schemas()),
+            Query::EditorClipboardPng => match &self.pixel_clipboard {
+                Some(cb) => Ok(serde_json::json!({
+                    "hasClipboard": true,
+                    "width": cb.width,
+                    "height": cb.height,
+                    "offsetX": cb.offset_x,
+                    "offsetY": cb.offset_y,
+                    "pngBytes": cb.png.as_ref(),
+                })),
+                None => Ok(serde_json::json!({
+                    "hasClipboard": false,
+                    "pngBytes": serde_json::Value::Null,
+                })),
+            },
         }
     }
 
@@ -978,6 +1035,9 @@ impl Core {
                 nodes,
                 fill_mode,
                 closed,
+                color,
+                radius,
+                opacity,
             } => self.apply_editor_op(
                 EditOp::DrawShape {
                     kind: *kind,
@@ -985,9 +1045,9 @@ impl Core {
                     nodes: nodes.clone(),
                     fill_mode: *fill_mode,
                     closed: *closed,
-                    color: [0, 0, 0],
-                    radius: 3.0,
-                    opacity: 1.0,
+                    color: color.unwrap_or([0, 0, 0]),
+                    radius: radius.unwrap_or(3.0),
+                    opacity: opacity.unwrap_or(1.0),
                     brush: photon_protocol::BrushSettings::default(),
                 },
                 ApplyTarget::ActiveLayer,
@@ -997,34 +1057,90 @@ impl Core {
                 y,
                 tolerance,
                 contiguous,
-            } => self.apply_editor_op(
-                EditOp::FloodFill {
-                    x: *x,
-                    y: *y,
-                    tolerance: *tolerance,
-                    contiguous: *contiguous,
-                    color: [0, 0, 0],
-                    opacity: 1.0,
-                },
-                ApplyTarget::ActiveLayer,
+                color,
+                opacity,
+                sample_all_layers,
+            } => self.exec_flood_fill(
+                *x,
+                *y,
+                *tolerance,
+                *contiguous,
+                color.unwrap_or([0, 0, 0]),
+                opacity.unwrap_or(1.0),
+                *sample_all_layers,
             ),
             Command::EditorDrawGradient {
                 start,
                 end,
                 kind,
                 color_mode,
+                fg_color,
+                bg_color,
+                opacity,
+                reverse,
+                dither,
             } => self.apply_editor_op(
                 EditOp::DrawGradient {
                     start: *start,
                     end: *end,
                     kind: *kind,
                     color_mode: *color_mode,
-                    fg_color: [0, 0, 0],
-                    bg_color: [255, 255, 255],
-                    opacity: 1.0,
+                    fg_color: fg_color.unwrap_or([0, 0, 0]),
+                    bg_color: bg_color.unwrap_or([255, 255, 255]),
+                    opacity: opacity.unwrap_or(1.0),
+                    reverse: *reverse,
+                    dither: *dither,
                 },
                 ApplyTarget::ActiveLayer,
             ),
+            Command::EditorHealingStroke {
+                points,
+                mode,
+                radius,
+                hardness,
+                strength,
+                source,
+            } => self.apply_editor_op(
+                EditOp::Healing {
+                    points: points.clone(),
+                    mode: *mode,
+                    radius: *radius,
+                    strength: *strength,
+                    source: *source,
+                    brush: photon_protocol::BrushSettings {
+                        hardness: *hardness,
+                        ..photon_protocol::BrushSettings::default()
+                    },
+                },
+                ApplyTarget::ActiveLayer,
+            ),
+            Command::EditorDenoise {
+                strength,
+                detail_preserve,
+                target,
+            } => self.apply_editor_op(
+                EditOp::Denoise {
+                    strength: *strength,
+                    detail_preserve: *detail_preserve,
+                },
+                *target,
+            ),
+            Command::EditorTransformLayer {
+                layer_id,
+                transform,
+            } => self.apply_editor_op(
+                EditOp::TransformLayer {
+                    layer_id: *layer_id,
+                    transform: *transform,
+                },
+                ApplyTarget::ActiveLayer,
+            ),
+            Command::EditorCopyPixels { merged } => self.copy_editor_pixels(*merged),
+            Command::EditorCutPixels => self.cut_editor_pixels(),
+            Command::EditorPastePixels {
+                png_bytes,
+                into_selection,
+            } => self.paste_editor_pixels(png_bytes.as_deref(), *into_selection),
             Command::EditorLayerAdd { name } => {
                 self.apply_layer_op(LayerOperation::AddEmpty { name: name.clone() })
             }
@@ -1390,6 +1506,16 @@ impl Core {
                     None,
                 ))
             }
+            Command::PasteImageBytes {
+                folder,
+                filename_hint,
+                png_bytes,
+            } => self.paste_image_bytes(Path::new(folder), filename_hint, png_bytes),
+            Command::PluginRefresh => self.plugin_refresh(),
+            Command::PluginSetEnabled { id, enabled } => self.plugin_set_enabled(id, *enabled),
+            Command::PluginInstall { source_dir } => self.plugin_install(Path::new(source_dir)),
+            Command::PluginUninstall { id } => self.plugin_uninstall(id),
+            Command::PluginRun { id, params, target } => self.plugin_run(id, params, *target),
             Command::ViewerTranslate { .. }
             | Command::ViewerSaveTranslation { .. }
             | Command::ViewerDeleteTranslation { .. }
@@ -1706,6 +1832,796 @@ impl Core {
                 ("total", total.to_string()),
             ],
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_flood_fill(
+        &mut self,
+        x: u32,
+        y: u32,
+        tolerance: u8,
+        contiguous: bool,
+        color: [u8; 3],
+        opacity: f32,
+        sample_all_layers: bool,
+    ) -> Result<(Option<UiText>, Option<serde_json::Value>), ProtocolError> {
+        let should_sample_all = {
+            let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+            let stack = doc.stack();
+            let active = stack.active_layer();
+            sample_all_layers
+                && !stack.selection.quick_mask_active
+                && !(active.editing_mask && active.mask.is_some())
+                && (stack.layers.len() > 1
+                    || stack.background.is_some()
+                    || active.offset_x != 0
+                    || active.offset_y != 0
+                    || active.dimensions() != (stack.canvas_width, stack.canvas_height))
+        };
+        if !should_sample_all {
+            return self.apply_editor_op(
+                EditOp::FloodFill {
+                    x,
+                    y,
+                    tolerance,
+                    contiguous,
+                    color,
+                    opacity,
+                },
+                ApplyTarget::ActiveLayer,
+            );
+        }
+
+        let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+        let (cw, ch) = doc.dimensions();
+        let active = doc.stack().active_layer();
+        if active.locked {
+            return Err(ProtocolError::line(
+                "layer_locked",
+                UiText::new("layer_locked"),
+            ));
+        }
+        if !active.visible {
+            return Err(ProtocolError::line(
+                "layer_hidden",
+                UiText::new("layer_hidden"),
+            ));
+        }
+        if x >= cw || y >= ch || !opacity.is_finite() || opacity <= 0.0 {
+            return Err(ProtocolError::line("edit_noop", UiText::new("editor_noop")));
+        }
+        let sel_opt = doc
+            .selection()
+            .has_selection()
+            .then(|| doc.selection().clone());
+        if let Some(ref sel) = sel_opt
+            && sel.alpha_at(x as i32, y as i32) == 0
+        {
+            return Err(ProtocolError::line("edit_noop", UiText::new("editor_noop")));
+        }
+
+        let filled = flood_fill_mask_from_composite(
+            &doc.current,
+            x,
+            y,
+            tolerance,
+            contiguous,
+            sel_opt.as_ref(),
+        );
+        let (lw, lh) = active.dimensions();
+        let ox = active.offset_x;
+        let oy = active.offset_y;
+        let mut next = (*active.pixels).clone();
+        let base_alpha = opacity.clamp(0.0, 1.0);
+        let mut changed = false;
+
+        for ly in 0..lh {
+            let cy = oy + ly as i32;
+            if cy < 0 || cy >= ch as i32 {
+                continue;
+            }
+            for lx in 0..lw {
+                let cx = ox + lx as i32;
+                if cx < 0 || cx >= cw as i32 {
+                    continue;
+                }
+                if !filled[(cy as usize) * (cw as usize) + (cx as usize)] {
+                    continue;
+                }
+                let sel_factor = sel_opt
+                    .as_ref()
+                    .map_or(1.0, |s| f32::from(s.alpha_at(cx, cy)) / 255.0);
+                let sa = base_alpha * sel_factor;
+                if sa <= 0.0 {
+                    continue;
+                }
+                let px = next.get_pixel_mut(lx, ly);
+                blend_source_over_rgba(px, color, sa);
+                changed = true;
+            }
+        }
+        if !changed {
+            return Err(ProtocolError::line("edit_noop", UiText::new("editor_noop")));
+        }
+        commit_active_layer_pixels(doc, next)?;
+        Ok((Some(UiText::new("op_flood_fill")), None))
+    }
+
+    fn copy_editor_pixels(
+        &mut self,
+        merged: bool,
+    ) -> Result<(Option<UiText>, Option<serde_json::Value>), ProtocolError> {
+        let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+        let clip = extract_editor_clipboard(doc, merged)?;
+        let (w, h) = (clip.width, clip.height);
+        self.pixel_clipboard = Some(clip);
+        Ok((
+            Some(UiText::new("toast_copied")),
+            Some(serde_json::json!({ "width": w, "height": h })),
+        ))
+    }
+
+    fn cut_editor_pixels(
+        &mut self,
+    ) -> Result<(Option<UiText>, Option<serde_json::Value>), ProtocolError> {
+        let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+        {
+            let active = doc.stack().active_layer();
+            if active.locked {
+                return Err(ProtocolError::line(
+                    "layer_locked",
+                    UiText::new("layer_locked"),
+                ));
+            }
+            if !active.visible {
+                return Err(ProtocolError::line(
+                    "layer_hidden",
+                    UiText::new("layer_hidden"),
+                ));
+            }
+        }
+        let clip = extract_editor_clipboard(doc, false)?;
+        let (w, h) = (clip.width, clip.height);
+        if doc.selection().has_selection() {
+            doc.clear_selected_pixels().map_err(map_image_err)?;
+        } else {
+            let (lw, lh) = doc.stack().active_layer().dimensions();
+            let cleared = RgbaImage::from_pixel(lw, lh, Rgba([0, 0, 0, 0]));
+            commit_active_layer_pixels(doc, cleared)?;
+        }
+        self.pixel_clipboard = Some(clip);
+        Ok((
+            Some(UiText::new("toast_cut")),
+            Some(serde_json::json!({ "width": w, "height": h })),
+        ))
+    }
+
+    fn paste_editor_pixels(
+        &mut self,
+        png_bytes: Option<&[u8]>,
+        into_selection: bool,
+    ) -> Result<(Option<UiText>, Option<serde_json::Value>), ProtocolError> {
+        let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+        let (cw, ch) = doc.dimensions();
+        let (mut img, ox, oy) = if let Some(bytes) = png_bytes {
+            let matched_internal = self
+                .pixel_clipboard
+                .as_ref()
+                .filter(|cb| cb.png.as_slice() == bytes);
+            let dyn_img = image::load_from_memory(bytes)
+                .map_err(|e| ProtocolError::new("decode_error", e.to_string()))?;
+            let rgba = dyn_img.to_rgba8();
+            photon_image::validate_dimensions(rgba.width(), rgba.height())
+                .map_err(map_image_err)?;
+            let (ox, oy) = if let Some(cb) = matched_internal {
+                (cb.offset_x, cb.offset_y)
+            } else {
+                (
+                    (cw as i32 - rgba.width() as i32) / 2,
+                    (ch as i32 - rgba.height() as i32) / 2,
+                )
+            };
+            (rgba, ox, oy)
+        } else {
+            let cb = self.pixel_clipboard.as_ref().ok_or_else(|| {
+                ProtocolError::line("clipboard_empty", UiText::new("toast_clipboard_empty"))
+            })?;
+            let rgba =
+                RgbaImage::from_raw(cb.width, cb.height, (*cb.rgba).clone()).ok_or_else(|| {
+                    ProtocolError::new("invalid_clipboard", "corrupt pixel clipboard buffer")
+                })?;
+            (rgba, cb.offset_x, cb.offset_y)
+        };
+
+        if into_selection && doc.selection().has_selection() {
+            let sel = doc.selection();
+            let (iw, ih) = img.dimensions();
+            for py in 0..ih {
+                let cy = oy + py as i32;
+                for px in 0..iw {
+                    let cx = ox + px as i32;
+                    let s = sel.alpha_at(cx, cy);
+                    if s == 255 {
+                        continue;
+                    }
+                    let p = img.get_pixel_mut(px, py);
+                    if s == 0 {
+                        p.0 = [0, 0, 0, 0];
+                    } else {
+                        p.0[3] = ((u16::from(p.0[3]) * u16::from(s) + 127) / 255) as u8;
+                        if p.0[3] == 0 {
+                            p.0 = [0, 0, 0, 0];
+                        }
+                    }
+                }
+            }
+        }
+
+        doc.apply_layer_op(LayerOperation::AddImage {
+            name: "Pasted".to_owned(),
+            offset_x: ox,
+            offset_y: oy,
+            pixels: Arc::new(img),
+        })
+        .map_err(map_image_err)?;
+
+        Ok((Some(UiText::new("toast_pasted")), None))
+    }
+
+    fn paste_image_bytes(
+        &mut self,
+        folder: &Path,
+        filename_hint: &str,
+        png_bytes: &[u8],
+    ) -> Result<(Option<UiText>, Option<serde_json::Value>), ProtocolError> {
+        if !folder.is_dir() {
+            return Err(ProtocolError::new(
+                "not_found",
+                format!("{} is not a directory", folder.display()),
+            ));
+        }
+        if png_bytes.is_empty() {
+            return Err(ProtocolError::new(
+                "invalid_argument",
+                "paste_image_bytes requires non-empty image bytes",
+            ));
+        }
+        let is_png = matches!(image::guess_format(png_bytes), Ok(image::ImageFormat::Png));
+        let out_bytes: Vec<u8> = if is_png {
+            let reader = image::ImageReader::new(Cursor::new(png_bytes))
+                .with_guessed_format()
+                .map_err(|e| ProtocolError::new("decode_error", e.to_string()))?;
+            let (w, h) = reader
+                .into_dimensions()
+                .map_err(|e| ProtocolError::new("decode_error", e.to_string()))?;
+            photon_image::validate_dimensions(w, h).map_err(map_image_err)?;
+            png_bytes.to_vec()
+        } else {
+            let dyn_img = image::load_from_memory(png_bytes)
+                .map_err(|e| ProtocolError::new("decode_error", e.to_string()))?;
+            let rgba = dyn_img.to_rgba8();
+            photon_image::validate_dimensions(rgba.width(), rgba.height())
+                .map_err(map_image_err)?;
+            encode_rgba_to_png(&rgba)?
+        };
+
+        let target = file_ops::unique_png_path(folder, filename_hint);
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .map_err(|e| ProtocolError::new("io_error", e.to_string()))?;
+        file.write_all(&out_bytes)
+            .map_err(|e| ProtocolError::new("io_error", e.to_string()))?;
+        file.sync_all()
+            .map_err(|e| ProtocolError::new("io_error", e.to_string()))?;
+
+        self.refresh_after_file_op();
+        Ok((
+            Some(UiText::new("toast_pasted")),
+            Some(serde_json::json!({ "path": target })),
+        ))
+    }
+
+    fn plugin_refresh(
+        &mut self,
+    ) -> Result<(Option<UiText>, Option<serde_json::Value>), ProtocolError> {
+        let plugins_dir = resolve_plugins_dir(self.paths.data_dir.join("plugins"));
+        if self.plugin_registry.plugins_dir() != plugins_dir {
+            self.plugin_registry =
+                PluginRegistry::discover(&plugins_dir).map_err(map_plugin_err)?;
+        } else {
+            self.plugin_registry.refresh().map_err(map_plugin_err)?;
+        }
+        let count = self.plugin_registry.plugins().count();
+        Ok((
+            Some(UiText::with(
+                "plugins_refreshed",
+                [("count", count.to_string())],
+            )),
+            Some(serde_json::json!({ "count": count })),
+        ))
+    }
+
+    fn plugin_set_enabled(
+        &mut self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<(Option<UiText>, Option<serde_json::Value>), ProtocolError> {
+        let plugin = self.plugin_registry.get(id).ok_or_else(|| {
+            ProtocolError::with_line(
+                "plugin_not_found",
+                format!("plugin '{id}' not found"),
+                UiText::with("plugin_not_found", [("id", id)]),
+            )
+        })?;
+        let name = plugin.manifest.name.clone();
+        if enabled {
+            self.config.disabled_plugins.retain(|x| x != id);
+        } else if !self.config.disabled_plugins.iter().any(|x| x == id) {
+            self.config.disabled_plugins.push(id.to_owned());
+        }
+        self.persist_config();
+        let code = if enabled {
+            "plugin_enabled"
+        } else {
+            "plugin_disabled"
+        };
+        Ok((Some(UiText::with(code, [("name", name)])), None))
+    }
+
+    fn plugin_install(
+        &mut self,
+        source_dir: &Path,
+    ) -> Result<(Option<UiText>, Option<serde_json::Value>), ProtocolError> {
+        let plugins_dir = resolve_plugins_dir(self.paths.data_dir.join("plugins"));
+        if self.plugin_registry.plugins_dir() != plugins_dir {
+            self.plugin_registry =
+                PluginRegistry::discover(&plugins_dir).map_err(map_plugin_err)?;
+        }
+        let installed = self
+            .plugin_registry
+            .install(source_dir)
+            .map_err(map_plugin_err)?;
+        let id = installed.manifest.id.clone();
+        let name = installed.manifest.name.clone();
+        Ok((
+            Some(UiText::with("plugin_installed", [("name", name)])),
+            Some(serde_json::json!({ "id": id })),
+        ))
+    }
+
+    fn plugin_uninstall(
+        &mut self,
+        id: &str,
+    ) -> Result<(Option<UiText>, Option<serde_json::Value>), ProtocolError> {
+        let plugins_dir = resolve_plugins_dir(self.paths.data_dir.join("plugins"));
+        if self.plugin_registry.plugins_dir() != plugins_dir {
+            self.plugin_registry =
+                PluginRegistry::discover(&plugins_dir).map_err(map_plugin_err)?;
+        }
+        let name = self
+            .plugin_registry
+            .get(id)
+            .map(|p| p.manifest.name.clone())
+            .unwrap_or_else(|| id.to_owned());
+        self.plugin_registry.uninstall(id).map_err(map_plugin_err)?;
+        let prev_len = self.config.disabled_plugins.len();
+        self.config.disabled_plugins.retain(|x| x != id);
+        if self.config.disabled_plugins.len() != prev_len {
+            self.persist_config();
+        }
+        Ok((
+            Some(UiText::with("plugin_uninstalled", [("name", name)])),
+            None,
+        ))
+    }
+
+    fn plugin_run(
+        &mut self,
+        id: &str,
+        params: &BTreeMap<String, PluginParamValue>,
+        target: ApplyTarget,
+    ) -> Result<(Option<UiText>, Option<serde_json::Value>), ProtocolError> {
+        let plugin = self.plugin_registry.get(id).cloned().ok_or_else(|| {
+            ProtocolError::with_line(
+                "plugin_not_found",
+                format!("plugin '{id}' not found"),
+                UiText::with("plugin_not_found", [("id", id)]),
+            )
+        })?;
+        let plugin_name = plugin.manifest.name.clone();
+        if self.config.disabled_plugins.iter().any(|d| d == id) {
+            return Err(ProtocolError::with_line(
+                "plugin_disabled",
+                format!("plugin '{id}' is disabled"),
+                UiText::with("plugin_disabled", [("name", plugin_name)]),
+            ));
+        }
+
+        let caps = &plugin.manifest.capabilities;
+        let run_editor = if self.workspace == Workspace::Editor {
+            caps.contains(&PluginCapability::EditorFilter)
+        } else if caps.contains(&PluginCapability::BrowserAction) {
+            false
+        } else {
+            caps.contains(&PluginCapability::EditorFilter)
+        };
+
+        if run_editor {
+            let (input, mask_img, offset_x, offset_y, single_full_layer) = {
+                let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                let (cw, ch) = doc.dimensions();
+                if target == ApplyTarget::ActiveLayer {
+                    let active = doc.stack().active_layer();
+                    if active.locked {
+                        return Err(ProtocolError::line(
+                            "layer_locked",
+                            UiText::new("layer_locked"),
+                        ));
+                    }
+                    if !active.visible {
+                        return Err(ProtocolError::line(
+                            "layer_hidden",
+                            UiText::new("layer_hidden"),
+                        ));
+                    }
+                    let (lw, lh) = active.dimensions();
+                    let mask = doc.selection().has_selection().then(|| {
+                        let mut g = GrayImage::new(lw, lh);
+                        for py in 0..lh {
+                            for px in 0..lw {
+                                g.put_pixel(
+                                    px,
+                                    py,
+                                    image::Luma([doc.selection().alpha_at(
+                                        active.offset_x + px as i32,
+                                        active.offset_y + py as i32,
+                                    )]),
+                                );
+                            }
+                        }
+                        g
+                    });
+                    (
+                        (*active.pixels).clone(),
+                        mask,
+                        active.offset_x,
+                        active.offset_y,
+                        true,
+                    )
+                } else {
+                    let stack = doc.stack();
+                    let single_full = stack.layers.len() == 1
+                        && stack.background.is_none()
+                        && stack.layers[0].offset_x == 0
+                        && stack.layers[0].offset_y == 0
+                        && stack.layers[0].dimensions() == (cw, ch);
+                    if single_full && target == ApplyTarget::WholeImage {
+                        let active = stack.active_layer();
+                        if active.locked {
+                            return Err(ProtocolError::line(
+                                "layer_locked",
+                                UiText::new("layer_locked"),
+                            ));
+                        }
+                        if !active.visible {
+                            return Err(ProtocolError::line(
+                                "layer_hidden",
+                                UiText::new("layer_hidden"),
+                            ));
+                        }
+                    }
+                    let mask = doc.selection().has_selection().then(|| {
+                        GrayImage::from_raw(cw, ch, (*doc.selection().alpha).clone())
+                            .unwrap_or_else(|| GrayImage::new(cw, ch))
+                    });
+                    ((*doc.current).clone(), mask, 0, 0, single_full)
+                }
+            };
+
+            let result = run_editor_plugin(&plugin, &input, mask_img.as_ref(), params)
+                .map_err(|err| plugin_exec_err(&plugin_name, err))?;
+
+            let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+            let replace_active = target != ApplyTarget::NewLayer
+                && result.mode == PluginOutputMode::ReplaceLayer
+                && (target == ApplyTarget::ActiveLayer || single_full_layer);
+
+            if replace_active {
+                commit_active_layer_pixels(doc, result.image)?;
+            } else {
+                let layer_name = result
+                    .layer_name
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| plugin_name.clone());
+                doc.apply_layer_op(LayerOperation::AddImage {
+                    name: layer_name,
+                    offset_x,
+                    offset_y,
+                    pixels: Arc::new(result.image),
+                })
+                .map_err(map_image_err)?;
+            }
+
+            let data = result.message.map(|m| serde_json::json!({ "message": m }));
+            return Ok((
+                Some(UiText::with("plugin_executed", [("name", plugin_name)])),
+                data,
+            ));
+        }
+
+        if caps.contains(&PluginCapability::BrowserAction) {
+            let folder_str = self
+                .current_folder
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned());
+            let result =
+                run_browser_plugin(&plugin, &self.selection, folder_str.as_deref(), params)
+                    .map_err(|err| plugin_exec_err(&plugin_name, err))?;
+            self.refresh_after_file_op();
+            let data = result.message.map(|m| serde_json::json!({ "message": m }));
+            return Ok((
+                Some(UiText::with("plugin_executed", [("name", plugin_name)])),
+                data,
+            ));
+        }
+
+        Err(ProtocolError::with_line(
+            "plugin_failed",
+            format!("plugin '{id}' declares no runnable capability"),
+            UiText::with(
+                "plugin_failed",
+                [
+                    ("name", plugin_name),
+                    ("error", "no supported capability".to_owned()),
+                ],
+            ),
+        ))
+    }
+}
+
+fn encode_rgba_to_png(img: &RgbaImage) -> Result<Vec<u8>, ProtocolError> {
+    let mut buf = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut buf);
+    encoder
+        .write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| ProtocolError::new("encode_error", e.to_string()))?;
+    Ok(buf)
+}
+
+fn extract_editor_clipboard(
+    doc: &EditorDocument,
+    merged: bool,
+) -> Result<EditorPixelClipboard, ProtocolError> {
+    let sel = doc.selection();
+    let (img, offset_x, offset_y) = if sel.has_selection() {
+        let [bx, by, bw, bh] = sel
+            .bounds
+            .ok_or_else(|| ProtocolError::new("invalid_selection", "missing selection bounds"))?;
+        let mut out = RgbaImage::from_pixel(bw, bh, Rgba([0, 0, 0, 0]));
+        if merged {
+            let (cw, ch) = doc.current.dimensions();
+            for sy in 0..bh {
+                let cy = by + sy;
+                if cy >= ch {
+                    continue;
+                }
+                for sx in 0..bw {
+                    let cx = bx + sx;
+                    if cx >= cw {
+                        continue;
+                    }
+                    let s = sel.alpha_at(cx as i32, cy as i32);
+                    if s == 0 {
+                        continue;
+                    }
+                    let mut p = doc.current.get_pixel(cx, cy).0;
+                    p[3] = ((u16::from(p[3]) * u16::from(s) + 127) / 255) as u8;
+                    if p[3] == 0 {
+                        p = [0, 0, 0, 0];
+                    }
+                    out.put_pixel(sx, sy, Rgba(p));
+                }
+            }
+        } else {
+            let active = doc.stack().active_layer();
+            let (lw, lh) = active.dimensions();
+            for sy in 0..bh {
+                let cy = by as i32 + sy as i32;
+                let ly = cy - active.offset_y;
+                if ly < 0 || ly >= lh as i32 {
+                    continue;
+                }
+                for sx in 0..bw {
+                    let cx = bx as i32 + sx as i32;
+                    let lx = cx - active.offset_x;
+                    if lx < 0 || lx >= lw as i32 {
+                        continue;
+                    }
+                    let s = sel.alpha_at(cx, cy);
+                    if s == 0 {
+                        continue;
+                    }
+                    let mut p = active.pixels.get_pixel(lx as u32, ly as u32).0;
+                    p[3] = ((u16::from(p[3]) * u16::from(s) + 127) / 255) as u8;
+                    if p[3] == 0 {
+                        p = [0, 0, 0, 0];
+                    }
+                    out.put_pixel(sx, sy, Rgba(p));
+                }
+            }
+        }
+        (out, bx as i32, by as i32)
+    } else if merged {
+        ((*doc.current).clone(), 0, 0)
+    } else {
+        let active = doc.stack().active_layer();
+        ((*active.pixels).clone(), active.offset_x, active.offset_y)
+    };
+
+    let (width, height) = img.dimensions();
+    let png = encode_rgba_to_png(&img)?;
+    Ok(EditorPixelClipboard {
+        width,
+        height,
+        offset_x,
+        offset_y,
+        rgba: Arc::new(img.into_raw()),
+        png: Arc::new(png),
+    })
+}
+
+fn commit_active_layer_pixels(
+    doc: &mut EditorDocument,
+    next: RgbaImage,
+) -> Result<(), ProtocolError> {
+    // Use Liquify live stroke so `editing_mask` is never touched while capturing `before_stack`.
+    doc.live_stroke_begin(
+        photon_protocol::LiveStrokeKind::Liquify {
+            mode: photon_protocol::LiquifyMode::Reconstruct,
+            radius: 4.0,
+            strength: 0.05,
+        },
+        0.0,
+        0.0,
+    )
+    .map_err(map_image_err)?;
+    doc.stack.active_layer_mut().pixels = Arc::new(next);
+    doc.live_stroke_end(true).map_err(map_image_err)?;
+    Ok(())
+}
+
+fn flood_fill_mask_from_composite(
+    src: &RgbaImage,
+    x: u32,
+    y: u32,
+    tolerance: u8,
+    contiguous: bool,
+    selection: Option<&SelectionMask>,
+) -> Vec<bool> {
+    let (w, h) = src.dimensions();
+    let total = (w as usize).saturating_mul(h as usize);
+    let mut visited = vec![false; total];
+    if w == 0 || h == 0 || x >= w || y >= h {
+        return visited;
+    }
+    let tol = i32::from(tolerance);
+    let seed = src.get_pixel(x, y).0;
+    let matches = |px: [u8; 4]| -> bool {
+        (i32::from(px[0]) - i32::from(seed[0]))
+            .abs()
+            .max((i32::from(px[1]) - i32::from(seed[1])).abs())
+            .max((i32::from(px[2]) - i32::from(seed[2])).abs())
+            .max((i32::from(px[3]) - i32::from(seed[3])).abs())
+            <= tol
+    };
+
+    if !contiguous {
+        for py in 0..h {
+            for px in 0..w {
+                if let Some(sel) = selection
+                    && sel.alpha_at(px as i32, py as i32) == 0
+                {
+                    continue;
+                }
+                if matches(src.get_pixel(px, py).0) {
+                    visited[(py as usize) * (w as usize) + (px as usize)] = true;
+                }
+            }
+        }
+        return visited;
+    }
+
+    let mut queue = VecDeque::with_capacity(256);
+    visited[(y as usize) * (w as usize) + (x as usize)] = true;
+    queue.push_back((x, y));
+    while let Some((cx, cy)) = queue.pop_front() {
+        let neighbors = [
+            cx.checked_sub(1).map(|nx| (nx, cy)),
+            (cx + 1 < w).then_some((cx + 1, cy)),
+            cy.checked_sub(1).map(|ny| (cx, ny)),
+            (cy + 1 < h).then_some((cx, cy + 1)),
+        ];
+        for (nx, ny) in neighbors.into_iter().flatten() {
+            let nidx = (ny as usize) * (w as usize) + (nx as usize);
+            if visited[nidx] {
+                continue;
+            }
+            if let Some(sel) = selection
+                && sel.alpha_at(nx as i32, ny as i32) == 0
+            {
+                continue;
+            }
+            if matches(src.get_pixel(nx, ny).0) {
+                visited[nidx] = true;
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+    visited
+}
+
+fn blend_source_over_rgba(dst: &mut Rgba<u8>, color: [u8; 3], sa: f32) {
+    let sa = sa.clamp(0.0, 1.0);
+    if sa <= 0.0 {
+        return;
+    }
+    let da = f32::from(dst.0[3]) / 255.0;
+    let out_a = sa + da * (1.0 - sa);
+    if out_a <= 1e-6 {
+        dst.0 = [0, 0, 0, 0];
+        return;
+    }
+    let inv_sa = 1.0 - sa;
+    let mix = |sc: u8, dc: u8| -> u8 {
+        ((f32::from(sc) * sa + f32::from(dc) * da * inv_sa) / out_a)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    dst.0 = [
+        mix(color[0], dst.0[0]),
+        mix(color[1], dst.0[1]),
+        mix(color[2], dst.0[2]),
+        (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
+    ];
+}
+
+fn plugin_exec_err(plugin_name: &str, err: PluginError) -> ProtocolError {
+    ProtocolError::with_line(
+        "plugin_failed",
+        err.to_string(),
+        UiText::with(
+            "plugin_failed",
+            [("name", plugin_name), ("error", &err.to_string())],
+        ),
+    )
+}
+
+fn map_plugin_err(err: PluginError) -> ProtocolError {
+    match err {
+        PluginError::NotFound { id } => ProtocolError::with_line(
+            "plugin_not_found",
+            format!("plugin '{id}' not found"),
+            UiText::with("plugin_not_found", [("id", id)]),
+        ),
+        PluginError::InvalidManifest { .. }
+        | PluginError::InvalidPluginId { .. }
+        | PluginError::PathTraversal { .. }
+        | PluginError::EntryNotFound { .. } => {
+            let msg = err.to_string();
+            ProtocolError::with_line(
+                "plugin_invalid_manifest",
+                msg.clone(),
+                UiText::with("plugin_invalid_manifest", [("error", msg)]),
+            )
+        }
+        other => ProtocolError::new("plugin_error", other.to_string()),
     }
 }
 

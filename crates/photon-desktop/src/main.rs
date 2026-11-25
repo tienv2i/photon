@@ -118,6 +118,8 @@ fn main() {
     }
 
     let socket_path = paths.socket_path.clone();
+    let hw_accel = core.config.hardware_acceleration;
+    let use_software_renderer = cli.safe_mode || !hw_accel;
     let (handle, gpu_backend) = {
         let _guard = rt.enter();
         let handle = CoreRuntime::spawn(core);
@@ -130,7 +132,9 @@ fn main() {
         });
         let gpu_backend = if cli.headless {
             "headless"
-        } else if cli.safe_mode {
+        } else if use_software_renderer
+            || std::env::var("ICED_BACKEND").ok().as_deref() == Some("tiny-skia")
+        {
             "tiny-skia"
         } else {
             "wgpu"
@@ -153,9 +157,12 @@ fn main() {
         rt.block_on(std::future::pending::<()>());
     });
 
-    if cli.safe_mode {
+    if use_software_renderer {
         // Safety: invoked on main thread before `iced::daemon` initializes the renderer.
         unsafe { std::env::set_var("ICED_BACKEND", "tiny-skia") };
+    } else if std::env::var_os("ICED_BACKEND").is_none() {
+        // Safety: invoked on main thread before `iced::daemon` initializes the renderer.
+        unsafe { std::env::set_var("ICED_BACKEND", "wgpu") };
     }
 
     app::init_globals(handle, gpu_backend, opened_with_files);

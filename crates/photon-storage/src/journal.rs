@@ -156,7 +156,10 @@ fn sanitized_paths(command: &Command) -> Vec<String> {
         | Command::RemoveFavorite { path }
         | Command::RenamePath { path, .. }
         | Command::ViewerTranslate { path, .. } => vec![sanitize_path(path)],
-        Command::NewFolder { parent, .. } => vec![sanitize_path(parent)],
+        Command::NewFolder { parent, .. } | Command::PasteImageBytes { folder: parent, .. } => {
+            vec![sanitize_path(parent)]
+        }
+        Command::PluginInstall { source_dir } => vec![sanitize_path(source_dir)],
         Command::DebugScreenshot {
             output_path: Some(path),
         } => vec![sanitize_path(path)],

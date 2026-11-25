@@ -4,34 +4,67 @@ Photon is an automation-first, headless-capable image browser, viewer, and non-d
 
 ## Workspaces
 
-All three workspaces run in one process sharing `CoreRuntime` and GPU/CPU image caches:
+All three workspaces run in one process sharing `CoreRuntime`, `PluginRegistry`, and GPU/CPU image caches:
 
-- **Browser** (`photon-browser`): Resizable `Quick Access` + `Explorer` sidebar (`photon-panels`), manual `Detail` inspector, `Grid` / `List` / `Details` views, `XS`–`XL` thumbnails, sorting/filtering, file operations, and separate **Batch Resize**, **Batch Crop**, and **Batch Convert** dialogs (`px` / `cm` / `in` / `%` + DPI).
-- **Viewer** (`photon-viewer`): Hardware-accelerated `Single`, `Double` spread (LTR/RTL, separate cover, page gap), and continuous `Webtoon` strip modes, unified right dock (`View Adjustments` + `Info`), and optional bottom `Filmstrip`.
-- **Editor** (`photon-editor`): Non-destructive layered document (`photon-image`), layer masks, Before/After `Compare` modes, atomic backup saves (`file~`), and real-time GPU adjustments via 4 live-preview `Cutout` dialogs (`Color & Light`, `HSV`, `Color Balance`, `Curves`), plus:
-  - **Selection Suite**: Rectangular / Elliptical / Single Row / Single Column Marquee (`M`), Freehand Lasso, Krita-style Polygon Lasso, Sobel + Dijkstra Magnetic Lasso, Bézier Select, Magic Wand (`W`), Quick Select, Color Range, Quick Mask (`Q`), animated GPU marching ants, `Select` menu with numeric `SelectionModify` dialog (`Feather...`, `Expand...`, `Contract...`, `Border...`, `Smooth...`, `Grow...`, `Similar...`), and automatic `SelectionMask` clipping across all paint/draw/adjustment ops.
-  - **Krita-style Drawing & Curve Tools**: `Brush` / `Eraser` with `BrushSmoothingMode` (`None`, `Basic`, `Weighted`, `Stabilizer`), `Shape` flyout (`Line`, `Rect`, `Ellipse`, `Polygon`, `Polyline` — `U`), interactive `Bézier Pen` (`P`) with anchor/tangent handles on the GPU vector overlay (`Enter` stroke/fill, `Ctrl+Enter` Path → Selection), `Paint Bucket` (`F`), and `Gradient` (`G` — Linear, Radial, Conical, Reflected).
-  - **Canvas Navigation**: Scroll-to-zoom at cursor, viewport-clamped panning restricted to `Hand` (`H`) or global spring-loaded `Space + Drag` (preserving in-progress Polygon/Bézier nodes), and global `Alt + Click` color sampling for paint/draw tools (`Alt` = Subtract for Selection tools).
+- **Browser** (`photon-browser`):
+  - Resizable `Quick Access` + `Explorer` sidebar (`photon-panels`), manual `Detail` inspector, `Grid` / `List` / `Details` views, `XS`–`XL` thumbnails, sorting/filtering, file operations, and separate **Batch Resize**, **Batch Crop**, and **Batch Convert** dialogs (`px` / `cm` / `in` / `%` + DPI).
+  - **Window & Startup Modes**: Opens maximized on first launch and remembers window size/maximized state (`AppLaunchWindowMode::{Maximized, Remembered}`), clearly separated in Settings from **Opening Image Files** (`SystemOpenWindowMode`: `Fit Image`, `Fullscreen`, `Remembered`).
+  - **Clipboard & Plugins**: `Ctrl+C` / `Ctrl+V` image & file copy/paste (`Command::PasteImageBytes` with safe `stem (copy).ext` collision naming) and `Plugins` menu (`BrowserAction` plugins, `Manage Plugins…`, `Reload Plugins`).
+- **Viewer** (`photon-viewer`):
+  - Hardware-accelerated `Single`, `Double` spread (LTR/RTL, separate cover, page gap), and continuous `Webtoon` strip modes, unified right dock (`View Adjustments` + `Info`), and optional bottom `Filmstrip`.
+  - Configurable **Canvas Anti-Aliasing** (`Crisp`, `Smooth`, `HighQuality`) and **Viewport Denoise** (`Off`, `Light`, `Medium`, `Strong`) in Reader/View options.
+- **Editor** (`photon-editor`):
+  - Non-destructive layered document (`photon-image`), layer masks, Before/After `Compare` modes, atomic backup saves (`file~`), and real-time GPU adjustments via `Cutout` dialogs (`Color & Light`, `HSV`, `Color Balance`, `Curves`), plus **Filter → Denoise…** (`LayerEffect::Denoise`):
+    - **Interactive Curves + Live GPU LUT**: `CurveGraphProgram` (`256×256` tonal curve editor with luminance histogram backdrop, monotone cubic Hermite spline, `Linear`/`S-Curve`/`Fade`/`High Contrast`/`Negative` presets, channel reset, and live 60fps `256×1` RGBA8 GPU 1D-LUT preview).
+  - **Selection Suite**: Rectangular / Elliptical / Single Row / Single Column Marquee (`M`), Freehand Lasso, Krita-style Polygon Lasso, Sobel + Dijkstra Magnetic Lasso, Bézier Select, Magic Wand (`W`), Quick Select, Color Range, Quick Mask (`Q`), animated GPU marching ants on a dedicated `Nearest` `sel_sampler` (isolated from image AA/Denoise), `Select` menu with `SelectionModify` dialog, and `SelectionMask` clipping across paint/draw/adjustment/denoise/healing ops.
+  - **Fill, Gradient, Healing & Krita-style Drawing**: `Brush` / `Eraser` with `BrushSmoothingMode` (`None`, `Basic`, `Weighted`, `Stabilizer`), `Shape` flyout (`Line`, `Rect`, `Ellipse`, `Polygon`, `Polyline` — `U`), interactive `Bézier Pen` (`P`), and **3 dedicated 1-click tools** on the left rail: **Paint Bucket** (`F`, color/opacity + `sample_all_layers`), **Gradient** (`G`, `Linear`/`Radial`/`Conical`/`Reflected` + `reverse` + 4×4 Bayer `dither`), and **Healing Brush** (`J`, `Spot` and `Alt+Click` `Sampled` frequency-separated texture transfer).
+  - **Live 60fps Free Transform (`Ctrl+T`)**: Direct canvas OBB handles (Move, 8-way Scale with `Shift` aspect-lock & `Alt` center-scale, external Rotate, Pivot crosshair), numeric X/Y/W%/H%/Angle°/Flip controls, live GPU inverse affine preview (`TransformPreview`), and `Enter` commit / `Esc` cancel as a single undoable step.
+  - **Free Canvas Navigation & Oversized (`>4096px`) GPU Support**: Free pan on `Pointer`/`Hand` and tool-safe Middle-mouse or `Space + Drag` pan across all tools (with `Unfocused` transient flag reset), `Shift + Wheel` / touchpad horizontal pan, draggable Canvas Scrollbars, Zoom `-` / `%` / `+` / `Fit` (`0`) / `1:1` (`1`) controls, dynamic zoom ceiling (`min_zoom = 0.02`, `max_zoom = (32.0 / fit_scale).max(32.0)`), and GPU texture cap raised to `device.limits().max_texture_dimension_2d.min(16384)` with exact `doc_size` coordinate alignment.
+  - **Pixel Clipboard & Renderer Controls**: Selection/layer-aware `Cut` (`Ctrl+X`), `Copy` (`Ctrl+C`), `Copy Merged` (`Ctrl+Shift+C`), `Paste` (`Ctrl+V`), and `Paste Into Selection` (`arboard` + `wl-copy`/`wl-paste`/`xclip`), plus Hardware Acceleration toggle (`GPU (wgpu)` vs `Software (tiny-skia)`).
 
-## Workspace Crates (15)
+## Supported Image Formats
+
+- **Multi-layer**: OpenRaster (`.ora` full read/write preserving layers, offsets, opacity, visibility, blend modes, thumbnail, and `.bak` backups), Photoshop (`.psd` multi-layer import).
+- **Vector, HDR, Next-Gen & Camera RAW**: `.svg` / `.svgz` (`usvg`/`resvg`), `.jxl` (`jxl-oxide`), Camera RAW (`.dng`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.raf`, `.orf`, `.rw2` via `rawler`), `.avif`, `.exr`, `.hdr`, `.ico`, `.cur`, `.pam`, `.dds`, `.ff` (Farbfeld), `.apng`, `.pnm`/`.ppm`/`.pgm`/`.pbm`, `.qoi`, `.tga`, `.webp`, `.tiff`, `.gif`, `.bmp`, `.png`, `.jpg`/`.jpeg`, plus optional external CLI fallback (`heif-convert` / `avifdec` / `ffmpeg` / `magick`) for `.heic` / `.heif`.
+- **Save / Export Formats**: `.png`, `.jpg`, `.webp`, `.tiff`, `.gif`, `.bmp`, `.tga`, `.qoi`, `.ora`, `.avif`, `.exr`, `.hdr`, `.ico`, `.pnm`, `.ff`.
+
+## Plugin System (`photon-plugins`)
+
+Photon runs external plugins out-of-process over `stdin`/`stdout` (supporting both native `plugin.json` `PhotonNdjsonV1` and KogaView `manifest.json` `JsonlStdioV1`), accessible via the **Plugins** menu in Browser & Editor, **Plugins → Manage Plugins…** (`640×480`), and `--headless` / `photonctl`.
+
+Nine standalone MIT-licensed plugin crates are included under `plugins/`:
+- `photon-plugin-ai-inpaint` (`photon.ai_inpaint.onnx`)
+- `photon-plugin-ai-ocr` (`photon.ocr.ai`)
+- `photon-plugin-caption` (`photon.caption.onnx`)
+- `photon-plugin-dewatermark` (`photon.dewatermark`)
+- `photon-plugin-ocr` (`photon.ocr.tesseract`)
+- `photon-plugin-rembg` (`photon.rmbg.onnx`)
+- `photon-plugin-translate` (`photon.translate`)
+- `photon-plugin-upscale` (`photon.upscale.onnx`)
+- `photon-plugin-utils` (`photon.utils`)
+
+See [docs/PLUGINS.md](docs/PLUGINS.md) for wire protocols, model lookup paths, and plugin packaging details.
+
+## Workspace Crates (16)
 
 | Crate | Responsibility | GUI/GPU Free? |
 |---|---|---|
-| `photon-protocol` | `Envelope`, `Command`, `Query`, `Event`, `CommandResponse`, `UiText`, `LayoutState`, `BrushSmoothingMode`, `VectorPathNode`, JSON Schema (`schemars`) | Yes |
+| `photon-protocol` | `Envelope`, `Command`, `Query`, `Event`, `CommandResponse`, `UiText`, `LayoutState`, `PluginManifest`, `LayerTransformSpec`, JSON Schema (`schemars`) | Yes |
 | `photon-storage` | `AppIdentity` (`Dev`/`Prod`/`Sandbox`), `AppPaths` (XDG), atomic `Config`, `Journal` (`commands.jsonl`), daily JSONL logs | Yes |
 | `photon-i18n` | Embedded Fluent `.ftl` (`en-US`, `vi-VN`), `UiText` translator, key & placeholder parity tests | Yes |
-| `photon-image` | Image probing, RGBA decode, thumbnails, non-destructive `EditorDocument`, layers, masks, `SelectionMask`, `drawing` (Bézier, shapes, flood fill, gradients), liquify, atomic `file~` backup save | Yes |
-| `photon-core` | Authoritative `Core` state machine, `CoreRuntime` (Tokio `mpsc` + `watch` + `broadcast`), batch runner, sandbox `replay` | Yes |
+| `photon-image` | Image probing, RGBA decode, thumbnails, `.ora`/`.psd`/RAW/SVG/JXL codecs, `EditorDocument`, layers, masks, `SelectionMask`, `healing`, `drawing`, `denoise_rgba`, affine transforms, atomic `file~` backup save | Yes |
+| `photon-core` | Authoritative `Core` state machine, `CoreRuntime` (Tokio `mpsc` + `watch` + `broadcast`), pixel clipboard, plugin dispatch, batch runner, sandbox `replay` | Yes |
+| `photon-plugins` | Process-isolated NDJSON & `jsonl-stdio` plugin discovery, path-traversal-safe validation, and execution bridge | Yes |
 | `photon-ipc` | Secure local IPC (`$XDG_RUNTIME_DIR/photon[-dev]/control.sock`, `0600` on Unix) with NDJSON request/response & event stream | Yes |
 | `photon-dialogs` | Native OS pickers (`rfd`) + movable, 8-way resizable `DialogManager` frames and `DimmedFrosted` / `Cutout` / `Floating` overlays | `iced` UI |
-| `photon-ui` | Pure-`iced` design system (`PaletteTokens`, typography, SVG `icons`, `button`, `menu`, `toolbar`, `grid`, `table`, `editor`, `splitter`) | `iced` UI |
+| `photon-ui` | Pure-`iced` design system (`PaletteTokens`, typography, SVG `icons`, `curve_editor`, `button`, `menu`, `toolbar`, `grid`, `table`, `editor`, `splitter`) | `iced` UI |
 | `photon-panels` | Unified dockable, collapsible, closable, drag-reorderable sidebar panels (`SidebarOrderState`, `DraggablePanelHeaderSpec`, `PanelSplitter`) | `iced` UI |
-| `photon-canvas` | `wgpu 27` `ImageCanvasProgram`, WGSL marching-ants/Quick-Mask shader, GPU vector overlay sub-pipeline, Sobel+Dijkstra `magnetic_snap`, `Space + Drag` & `Alt + Click` | `iced` + `wgpu` |
-| `photon-browser` | Browser workspace UI, file grid/list/details views, and batch resize/crop/convert dialogs | `iced` UI |
-| `photon-viewer` | Viewer workspace UI, spread/webtoon layout, filmstrip, and view adjustments dock | `iced` UI |
-| `photon-editor` | Editor workspace UI, tool rail & flyouts, tool options card, layers/adjustments docks, and splitters | `iced` UI |
+| `photon-canvas` | `wgpu 27` `ImageCanvasProgram`, Stage 1/Stage 2 WGSL pipeline (1D Curve LUT, AA, Denoise, live Transform, `Nearest` `sel_sampler`), vector overlay, `Space+Drag` & `Alt+Click` | `iced` + `wgpu` |
+| `photon-browser` | Browser workspace UI, file grid/list/details views, clipboard/plugins menus, and batch resize/crop/convert dialogs | `iced` UI |
+| `photon-viewer` | Viewer workspace UI, spread/webtoon layout, filmstrip, quality options, and view adjustments dock | `iced` UI |
+| `photon-editor` | Editor workspace UI, tool rail, tool options card, canvas scrollbars & zoom controls, layers/adjustments docks, and splitters | `iced` UI |
 | `photon-cli` | `photonctl` binary: IPC command dispatch, queries, `debug` suite (`logs`, `journal`, `trace`, `ui-tree`, `screenshot`, `replay`), `mcp` stdio server | Yes |
-| `photon-desktop` | `photon` binary: `iced 0.14` `daemon` multi-window shell, menus, dialogs, semantic inspector, and `--headless` mode | GUI binary |
+| `photon-desktop` | `photon` binary: `iced 0.14` `daemon` multi-window shell, menus, dialogs (`ManagePlugins`, `PluginParams`, `AdjustDenoise`), semantic inspector, and `--headless` mode | GUI binary |
 
 ## Quick Start (`just`)
 
@@ -43,6 +76,11 @@ just fmt-check
 just clippy
 just test
 just test-core
+
+# Build & install the 9 standalone plugins
+just build-plugins
+just install-plugins       # installs into ~/.local/share/photon/plugins
+just install-plugins dev   # installs into ~/.local/share/photon-dev/plugins
 
 # Run desktop app or headless Core + IPC
 just run
@@ -72,6 +110,7 @@ photon --safe-mode
 
 photonctl open-folder ~/Pictures
 photonctl dispatch '{"type":"editor_rotate","degrees":90,"target":"whole_image"}'
+photonctl query clipboard
 photonctl debug ui-tree
 photonctl debug screenshot --output /tmp/shot.png
 photonctl debug replay --journal ~/.local/state/photon-dev/journal/commands.jsonl
@@ -83,7 +122,12 @@ photonctl mcp
 - [AGENTS.md](AGENTS.md) — Non-negotiable architectural invariants and debugging order
 - [docs/SPEC.md](docs/SPEC.md) — Functional and UI specification for dialogs, panels, and all 3 workspaces
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — Crate boundaries, command gateway, multi-window, and GPU pipeline
+- [docs/PLUGINS.md](docs/PLUGINS.md) — Plugin bridge protocols, manifest formats, model paths, and bundled plugins
 - [docs/CLI.md](docs/CLI.md) — `photon` and `photonctl` CLI reference
 - [docs/WORKFLOW.md](docs/WORKFLOW.md) — Verification tiers and bug triage workflow
-- [docs/STATE.md](docs/STATE.md) — Current verified build/test status and roadmap notes
+- [docs/STATE.md](docs/STATE.md) — Current verified build/test status and implemented milestones
 - [docs/MEMORY.md](docs/MEMORY.md) — Engineering lessons learned and `iced 0.14` gotchas
+
+## License
+
+Photon and its bundled standalone plugins are licensed under the [MIT License](LICENSE). See [docs/PLUGINS.md](docs/PLUGINS.md#third-party-runtime--model-notes) for third-party ONNX runtime, Tesseract, and external model/decoder notes.

@@ -95,6 +95,25 @@ pub enum Icon {
     Grip,
     Wrench,
     Plug,
+    MarqueeRect,
+    MarqueeEllipse,
+    SingleRow,
+    SingleCol,
+    Lasso,
+    PolygonLasso,
+    MagneticLasso,
+    BezierSelect,
+    MagicWand,
+    QuickSelect,
+    QuickMask,
+    DrawLine,
+    DrawRect,
+    DrawEllipse,
+    DrawPolygon,
+    DrawPolyline,
+    BezierPen,
+    PaintBucket,
+    Gradient,
 }
 
 impl Icon {
@@ -369,6 +388,63 @@ impl Icon {
             }
             Self::Plug => {
                 r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg>"##
+            }
+            Self::MarqueeRect => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="1.5" stroke-dasharray="3.5 2.5"/></svg>"##
+            }
+            Self::MarqueeEllipse => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5" stroke-dasharray="3.5 2.5"/></svg>"##
+            }
+            Self::SingleRow => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="9.5" width="18" height="5" rx="1" stroke-dasharray="3 2"/></svg>"##
+            }
+            Self::SingleCol => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9.5" y="3" width="5" height="18" rx="1" stroke-dasharray="3 2"/></svg>"##
+            }
+            Self::Lasso => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 14c-2.5-1.5-4-4-3.5-6.5C4.2 4.3 8.5 3 13 3.5c4.5.5 7.5 3 7 6.2-.5 3-4.2 5-8.5 4.8-2-.1-3.5-.5-4.5-1.2"/><circle cx="7.5" cy="16.5" r="2"/><path d="M8.5 18.2c.8 1.5 2 2.3 3.5 2.3"/></svg>"##
+            }
+            Self::PolygonLasso => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="5,5 19,4 17,15 8,17 4,11"/><circle cx="8" cy="17" r="2"/><path d="M9.5 18.5 12 21"/></svg>"##
+            }
+            Self::MagneticLasso => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12c0-4.4 3.1-8 7-8s7 3.6 7 8v3"/><path d="M5 12v3"/><circle cx="5" cy="17" r="2"/><circle cx="19" cy="17" r="2"/><path d="M9 12c0-1.7 1.3-3 3-3s3 1.3 3 3"/></svg>"##
+            }
+            Self::BezierSelect => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18C4 10 10 6 20 6"/><rect x="3" y="16" width="4" height="4" rx="0.8"/><rect x="17" y="4" width="4" height="4" rx="0.8"/><circle cx="10" cy="7" r="1.5"/></svg>"##
+            }
+            Self::MagicWand => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m4 20 11-11"/><path d="m14 6 4 4"/><path d="M18 3v2"/><path d="M21 6h-2"/><path d="M12 4v1.5"/><path d="M9 6.5h1.5"/></svg>"##
+            }
+            Self::QuickSelect => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="14" r="5" stroke-dasharray="3 2"/><path d="m14 10 5.5-5.5a1.5 1.5 0 0 1 2.1 2.1L16 12"/></svg>"##
+            }
+            Self::QuickMask => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><circle cx="12" cy="12" r="4.5" stroke-dasharray="2.5 2"/></svg>"##
+            }
+            Self::DrawLine => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 18.5 18.5 5.5"/><circle cx="4.5" cy="19.5" r="1.5"/><circle cx="19.5" cy="4.5" r="1.5"/></svg>"##
+            }
+            Self::DrawRect => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="1.5"/></svg>"##
+            }
+            Self::DrawEllipse => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="12" rx="8.5" ry="6"/></svg>"##
+            }
+            Self::DrawPolygon => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12,3 20.5,9.2 17.2,19.5 6.8,19.5 3.5,9.2"/></svg>"##
+            }
+            Self::DrawPolyline => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4,17 9,7 15,15 20,5"/><circle cx="4" cy="17" r="1.5"/><circle cx="9" cy="7" r="1.5"/><circle cx="15" cy="15" r="1.5"/><circle cx="20" cy="5" r="1.5"/></svg>"##
+            }
+            Self::BezierPen => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19 7-7 3 3-7 7-3-3Z"/><path d="m18 13-1.5-7.5L2 2l3.5 14.5L13 18l5-5Z"/><path d="m2 2 7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>"##
+            }
+            Self::PaintBucket => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m19 11-8-8-8.6 8.6a2 2 0 0 0 0 2.8l5.2 5.2c.8.8 2 .8 2.8 0L19 11Z"/><path d="m5 2 5 5"/><path d="M2 13h15"/><path d="M22 20a2 2 0 1 1-4 0c0-1.6 1.7-2.4 2-4 .3 1.6 2 2.4 2 4Z"/></svg>"##
+            }
+            Self::Gradient => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16"/><path d="M11 4v16" stroke-dasharray="3 2"/><path d="M15 4v16" stroke-dasharray="1.5 2.5"/></svg>"##
             }
         }
     }

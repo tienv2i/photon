@@ -6,6 +6,7 @@ use image::{Rgba, RgbaImage};
 use photon_protocol::{BlendMode, LayerEffect, LayerSummary, UiText};
 
 use crate::ImageError;
+use crate::selection::SelectionMask;
 
 /// One raster layer in a document stack.
 #[derive(Debug, Clone)]
@@ -99,6 +100,8 @@ pub struct LayerStack {
     pub next_id: u64,
     /// Optional solid RGB backdrop composited underneath all layers (`None` = transparent).
     pub background: Option<[u8; 3]>,
+    /// Non-destructive 8-bit pixel selection mask matching `canvas_width × canvas_height`.
+    pub selection: SelectionMask,
 }
 
 /// Structural or property mutation applied to a [`LayerStack`].
@@ -224,6 +227,7 @@ impl LayerStack {
             active_layer_id: 1,
             next_id: 2,
             background: None,
+            selection: SelectionMask::empty(canvas_width, canvas_height),
         }
     }
 

@@ -7,7 +7,7 @@ use iced::Element;
 use photon_protocol::LayoutState;
 use photon_ui::splitter::{PanelSplitterEdge, panel_splitter, vertical_panel_splitter};
 
-use crate::app::Message;
+use crate::EditorMessage;
 
 pub(crate) const EDITOR_RIGHT_MIN: f32 = 220.0;
 pub(crate) const EDITOR_RIGHT_MAX: f32 = 560.0;
@@ -86,10 +86,10 @@ impl DockDragState {
     }
 }
 
-pub(crate) fn dock_splitter_handle<'a>(
+pub fn dock_splitter_handle<'a>(
     kind: DockSplitterKind,
     current_px: f32,
-) -> Element<'a, Message> {
+) -> Element<'a, EditorMessage> {
     let _ = kind;
     panel_splitter(
         current_px,
@@ -97,15 +97,15 @@ pub(crate) fn dock_splitter_handle<'a>(
         EDITOR_RIGHT_MIN,
         EDITOR_RIGHT_MAX,
         EDITOR_RIGHT_DEFAULT,
-        move |v| Message::DockSplitterDrag(DockSplitterKind::EditorRight, v),
-        move |v| Message::DockSplitterRelease(DockSplitterKind::EditorRight, v),
+        move |v| EditorMessage::DockSplitterDrag(DockSplitterKind::EditorRight, v),
+        move |v| EditorMessage::DockSplitterRelease(DockSplitterKind::EditorRight, v),
     )
 }
 
-pub(crate) fn editor_vertical_splitter<'a>(
+pub fn editor_vertical_splitter<'a>(
     ratio_pct: f32,
     window_height: f32,
-) -> Element<'a, Message> {
+) -> Element<'a, EditorMessage> {
     let height_hint = (window_height - 120.0).max(260.0);
     vertical_panel_splitter(
         ratio_pct,
@@ -113,7 +113,7 @@ pub(crate) fn editor_vertical_splitter<'a>(
         EDITOR_SPLIT_MIN_PCT,
         EDITOR_SPLIT_MAX_PCT,
         EDITOR_SPLIT_DEFAULT_PCT,
-        move |v| Message::DockSplitterDrag(DockSplitterKind::EditorRightSplit, v),
-        move |v| Message::DockSplitterRelease(DockSplitterKind::EditorRightSplit, v),
+        move |v| EditorMessage::DockSplitterDrag(DockSplitterKind::EditorRightSplit, v),
+        move |v| EditorMessage::DockSplitterRelease(DockSplitterKind::EditorRightSplit, v),
     )
 }

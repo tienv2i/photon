@@ -3083,6 +3083,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "photon-browser"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "photon-dialogs",
+ "photon-i18n",
+ "photon-panels",
+ "photon-protocol",
+ "photon-ui",
+ "regex-automata",
+]
+
+[[package]]
+name = "photon-canvas"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "image",
+ "photon-protocol",
+]
+
+[[package]]
 name = "photon-cli"
 version = "0.1.0"
 dependencies = [
@@ -3120,8 +3142,11 @@ dependencies = [
  "clap",
  "iced",
  "image",
+ "photon-browser",
+ "photon-canvas",
  "photon-core",
  "photon-dialogs",
+ "photon-editor",
  "photon-i18n",
  "photon-image",
  "photon-ipc",
@@ -3129,6 +3154,7 @@ dependencies = [
  "photon-protocol",
  "photon-storage",
  "photon-ui",
+ "photon-viewer",
  "regex-automata",
  "serde",
  "serde_json",
@@ -3142,6 +3168,19 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "rfd",
+]
+
+[[package]]
+name = "photon-editor"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "photon-canvas",
+ "photon-dialogs",
+ "photon-i18n",
+ "photon-panels",
+ "photon-protocol",
+ "photon-ui",
 ]
 
 [[package]]
@@ -3210,6 +3249,18 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "photon-dialogs",
+]
+
+[[package]]
+name = "photon-viewer"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "photon-canvas",
+ "photon-i18n",
+ "photon-panels",
+ "photon-protocol",
+ "photon-ui",
 ]
 
 [[package]]

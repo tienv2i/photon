@@ -8,14 +8,15 @@ use std::sync::Arc;
 use image::{Rgba, RgbaImage};
 use photon_protocol::{
     ApplyTarget, BrushSettings, CanvasAnchor, ColorAdjustments, ColorBalanceAdjustment,
-    CurvesAdjustment, FlipAxis, HsvAdjustment, LiquifyMode, LiveStrokeKind, ResizeFilter,
-    ResizeMode, UiText,
+    CurvesAdjustment, DrawShapeKind, FlipAxis, GradientColorMode, GradientKind, HsvAdjustment,
+    LiquifyMode, LiveStrokeKind, ResizeFilter, ResizeMode, SelectionBooleanOp, SelectionModifyOp,
+    SelectionShape, ShapeFillMode, UiText, VectorPathNode,
 };
 
 use crate::{
     ImageError, Layer, LayerOperation, LayerStack, MAX_DOCUMENT_PIXELS, MAX_HISTORY_STEPS,
-    MAX_IMAGE_DIMENSION, MAX_SNAPSHOT_BYTES, blend_layer_onto, codec, composite_stack, decode_rgba,
-    liquify, pixels,
+    MAX_IMAGE_DIMENSION, MAX_SNAPSHOT_BYTES, SelectionMask, blend_layer_onto, codec,
+    composite_stack, decode_rgba, drawing, liquify, pixels, rasterize_shape,
 };
 
 #[derive(Debug, Clone)]
@@ -77,6 +78,34 @@ pub enum EditOp {
         pixels: Arc<RgbaImage>,
         mask: Option<Arc<Vec<u8>>>,
     },
+    DrawShape {
+        kind: DrawShapeKind,
+        points: Vec<[f32; 2]>,
+        nodes: Vec<VectorPathNode>,
+        fill_mode: ShapeFillMode,
+        closed: bool,
+        color: [u8; 3],
+        radius: f32,
+        opacity: f32,
+        brush: BrushSettings,
+    },
+    FloodFill {
+        x: u32,
+        y: u32,
+        tolerance: u8,
+        contiguous: bool,
+        color: [u8; 3],
+        opacity: f32,
+    },
+    DrawGradient {
+        start: [f32; 2],
+        end: [f32; 2],
+        kind: GradientKind,
+        color_mode: GradientColorMode,
+        fg_color: [u8; 3],
+        bg_color: [u8; 3],
+        opacity: f32,
+    },
     Layer(LayerOperation),
 }
 
@@ -121,6 +150,9 @@ impl EditOp {
             }
             Self::Liquify { .. } => UiText::new("op_liquify"),
             Self::LiveStrokeCommit { label, .. } => label.clone(),
+            Self::DrawShape { .. } => UiText::new("op_draw_shape"),
+            Self::FloodFill { .. } => UiText::new("op_flood_fill"),
+            Self::DrawGradient { .. } => UiText::new("op_gradient"),
             Self::Layer(op) => op.ui_label(),
         }
     }
@@ -155,6 +187,7 @@ pub struct EditorDocument {
     saved_at_depth: Option<usize>,
     pub pixel_revision: u64,
     pub original_revision: u64,
+    pub selection_revision: u64,
     pub history_trimmed: bool,
     live_stroke: Option<LiveStrokeSession>,
 }
@@ -180,6 +213,7 @@ impl EditorDocument {
             saved_at_depth: Some(0),
             pixel_revision: 1,
             original_revision: 1,
+            selection_revision: 1,
             history_trimmed: false,
             live_stroke: None,
         }
@@ -781,6 +815,40 @@ impl EditorDocument {
                 Ok(false)
             }
             EditOp::LiveStrokeCommit { .. } | EditOp::Layer(_) => Ok(false),
+            EditOp::DrawShape { points, nodes, .. } => {
+                if points
+                    .iter()
+                    .any(|p| !p[0].is_finite() || !p[1].is_finite())
+                    || nodes.iter().any(|n| {
+                        !n.anchor[0].is_finite()
+                            || !n.anchor[1].is_finite()
+                            || n.handle_in
+                                .is_some_and(|h| !h[0].is_finite() || !h[1].is_finite())
+                            || n.handle_out
+                                .is_some_and(|h| !h[0].is_finite() || !h[1].is_finite())
+                    })
+                {
+                    return Err(ImageError::InvalidEdit(
+                        "shape coordinates must be finite".into(),
+                    ));
+                }
+                Ok(points.is_empty() && nodes.is_empty())
+            }
+            EditOp::FloodFill { x, y, .. } => Ok(*x >= w || *y >= h),
+            EditOp::DrawGradient { start, end, .. } => {
+                if !start[0].is_finite()
+                    || !start[1].is_finite()
+                    || !end[0].is_finite()
+                    || !end[1].is_finite()
+                {
+                    return Err(ImageError::InvalidEdit(
+                        "gradient coordinates must be finite".into(),
+                    ));
+                }
+                let dx = end[0] - start[0];
+                let dy = end[1] - start[1];
+                Ok(dx * dx + dy * dy < 1e-6)
+            }
         }
     }
 
@@ -1013,6 +1081,61 @@ impl EditorDocument {
             return Ok(());
         }
 
+        if matches!(
+            op,
+            EditOp::DrawShape { .. } | EditOp::FloodFill { .. } | EditOp::DrawGradient { .. }
+        ) {
+            if self.stack.selection.quick_mask_active {
+                let (cw, ch) = (self.stack.canvas_width, self.stack.canvas_height);
+                let mask_img = drawing::mask_to_rgba(&self.stack.selection.alpha, cw, ch);
+                let next_img = render_drawing_op(&mask_img, op, 0, 0, None, true);
+                self.stack.selection.alpha = Arc::new(drawing::rgba_to_mask(&next_img));
+                self.stack.selection.recompute_bounds();
+                self.selection_revision += 1;
+                return Ok(());
+            }
+
+            let active = self.stack.active_layer();
+            if active.locked {
+                return Err(ImageError::coded("layer_locked"));
+            }
+            if !active.visible {
+                return Err(ImageError::coded("layer_hidden"));
+            }
+            let sel_snapshot = self
+                .stack
+                .selection
+                .has_selection()
+                .then(|| self.stack.selection.clone());
+
+            if active.editing_mask
+                && let Some(mask_arc) = active.mask.as_ref()
+            {
+                let mx_i = active.offset_x + active.mask_offset_x;
+                let my_i = active.offset_y + active.mask_offset_y;
+                let (lw, lh) = active.dimensions();
+                let mask_img = drawing::mask_to_rgba(mask_arc, lw, lh);
+                let next_img =
+                    render_drawing_op(&mask_img, op, mx_i, my_i, sel_snapshot.as_ref(), true);
+                let mut next_mask = drawing::rgba_to_mask(&next_img);
+                if let Some(ref sel) = sel_snapshot {
+                    clip_mask_by_selection(mask_arc, &mut next_mask, lw, lh, mx_i, my_i, sel);
+                }
+                self.stack.active_layer_mut().mask = Some(Arc::new(next_mask));
+                return Ok(());
+            }
+
+            let ox_i = active.offset_x;
+            let oy_i = active.offset_y;
+            let mut next =
+                render_drawing_op(&active.pixels, op, ox_i, oy_i, sel_snapshot.as_ref(), false);
+            if let Some(ref sel) = sel_snapshot {
+                clip_rgba_by_selection(&active.pixels, &mut next, ox_i, oy_i, sel);
+            }
+            self.stack.active_layer_mut().pixels = Arc::new(next);
+            return Ok(());
+        }
+
         if target == ApplyTarget::ActiveLayer {
             let active = self.stack.active_layer();
             if active.locked {
@@ -1108,6 +1231,381 @@ impl EditorDocument {
             }
         }
         Ok(())
+    }
+
+    pub fn selection(&self) -> &SelectionMask {
+        &self.stack.selection
+    }
+
+    pub fn select_all(&mut self) {
+        self.stack.selection.select_all();
+        self.selection_revision += 1;
+    }
+
+    pub fn deselect(&mut self) {
+        self.stack.selection.deselect();
+        self.selection_revision += 1;
+    }
+
+    pub fn reselect(&mut self) -> bool {
+        let ok = self.stack.selection.reselect();
+        if ok {
+            self.selection_revision += 1;
+        }
+        ok
+    }
+
+    pub fn invert_selection(&mut self) {
+        self.stack.selection.invert();
+        self.selection_revision += 1;
+    }
+
+    pub fn select_shape(&mut self, shape: &SelectionShape, op: SelectionBooleanOp) {
+        let (w, h) = (self.stack.canvas_width, self.stack.canvas_height);
+        let active = self.stack.active_layer();
+        let incoming = rasterize_shape(
+            w,
+            h,
+            shape,
+            &self.current,
+            Some((&active.pixels, active.offset_x, active.offset_y)),
+        );
+        self.stack.selection.combine(&incoming, op);
+        self.selection_revision += 1;
+    }
+
+    pub fn modify_selection(&mut self, op: SelectionModifyOp) {
+        self.stack.selection.modify(op, &self.current);
+        self.selection_revision += 1;
+    }
+
+    pub fn toggle_quick_mask(&mut self) -> bool {
+        self.stack.selection.quick_mask_active = !self.stack.selection.quick_mask_active;
+        self.selection_revision += 1;
+        self.stack.selection.quick_mask_active
+    }
+
+    pub fn select_from_layer_alpha(&mut self, op: SelectionBooleanOp) {
+        let (cw, ch) = (self.stack.canvas_width, self.stack.canvas_height);
+        let active = self.stack.active_layer();
+        let (lw, lh) = active.dimensions();
+        let mut incoming = vec![0u8; (cw as usize) * (ch as usize)];
+        for cy in 0..ch {
+            let ly = cy as i32 - active.offset_y;
+            if ly < 0 || ly >= lh as i32 {
+                continue;
+            }
+            for cx in 0..cw {
+                let lx = cx as i32 - active.offset_x;
+                if lx < 0 || lx >= lw as i32 {
+                    continue;
+                }
+                incoming[(cy * cw + cx) as usize] =
+                    active.pixels.get_pixel(lx as u32, ly as u32).0[3];
+            }
+        }
+        self.stack.selection.combine(&incoming, op);
+        self.selection_revision += 1;
+    }
+
+    pub fn selection_to_mask(&mut self) -> Result<(), ImageError> {
+        let active = self.stack.active_layer();
+        if active.locked {
+            return Err(ImageError::coded("layer_locked"));
+        }
+        let (lw, lh) = active.dimensions();
+        let ox = active.offset_x;
+        let oy = active.offset_y;
+        let mut mask = vec![0u8; (lw as usize) * (lh as usize)];
+        for y in 0..lh {
+            for x in 0..lw {
+                mask[(y * lw + x) as usize] =
+                    self.stack.selection.alpha_at(ox + x as i32, oy + y as i32);
+            }
+        }
+        let before = self.stack.clone();
+        let id = active.id;
+        let active_mut = self.stack.active_layer_mut();
+        active_mut.mask = Some(Arc::new(mask));
+        active_mut.mask_enabled = true;
+        self.push_step(
+            EditOp::Layer(LayerOperation::AddMask {
+                id,
+                reveal_all: true,
+            }),
+            ApplyTarget::ActiveLayer,
+            before,
+        );
+        self.current = composite_stack(&self.stack);
+        self.pixel_revision += 1;
+        Ok(())
+    }
+
+    pub fn clear_selected_pixels(&mut self) -> Result<(), ImageError> {
+        if !self.stack.selection.has_selection() {
+            return Ok(());
+        }
+        let active = self.stack.active_layer();
+        if active.locked {
+            return Err(ImageError::coded("layer_locked"));
+        }
+        let before = self.stack.clone();
+        let (lw, lh) = active.dimensions();
+        let ox = active.offset_x;
+        let oy = active.offset_y;
+        let mut next = (*active.pixels).clone();
+        for y in 0..lh {
+            for x in 0..lw {
+                let s = self.stack.selection.alpha_at(ox + x as i32, oy + y as i32);
+                if s > 0 {
+                    let p = next.get_pixel_mut(x, y);
+                    let keep = 255 - u16::from(s);
+                    p.0[3] = ((u16::from(p.0[3]) * keep + 127) / 255) as u8;
+                    if p.0[3] == 0 {
+                        p.0 = [0, 0, 0, 0];
+                    }
+                }
+            }
+        }
+        let label = UiText::new("op_selection_clear");
+        let pixels_arc = Arc::new(next);
+        self.stack.active_layer_mut().pixels = Arc::clone(&pixels_arc);
+        self.push_step(
+            EditOp::LiveStrokeCommit {
+                label,
+                pixels: pixels_arc,
+                mask: None,
+            },
+            ApplyTarget::ActiveLayer,
+            before,
+        );
+        self.current = composite_stack(&self.stack);
+        self.pixel_revision += 1;
+        Ok(())
+    }
+
+    pub fn duplicate_selection_to_layer(&mut self) -> Result<(), ImageError> {
+        if !self.stack.selection.has_selection() {
+            return Ok(());
+        }
+        let active = self.stack.active_layer();
+        let (lw, lh) = active.dimensions();
+        let ox = active.offset_x;
+        let oy = active.offset_y;
+        let mut next = (*active.pixels).clone();
+        for y in 0..lh {
+            for x in 0..lw {
+                let s = self.stack.selection.alpha_at(ox + x as i32, oy + y as i32);
+                let p = next.get_pixel_mut(x, y);
+                p.0[3] = ((u16::from(p.0[3]) * u16::from(s) + 127) / 255) as u8;
+                if p.0[3] == 0 {
+                    p.0 = [0, 0, 0, 0];
+                }
+            }
+        }
+        let op = LayerOperation::AddImage {
+            name: "Selection".to_owned(),
+            offset_x: ox,
+            offset_y: oy,
+            pixels: Arc::new(next),
+        };
+        self.apply_with_target(EditOp::Layer(op), ApplyTarget::ActiveLayer)?;
+        Ok(())
+    }
+
+    pub fn crop_to_selection(&mut self) -> Result<bool, ImageError> {
+        let Some([bx, by, bw, bh]) = self.stack.selection.bounds else {
+            return Ok(false);
+        };
+        self.apply_with_target(
+            EditOp::Crop {
+                x: bx as i32,
+                y: by as i32,
+                width: bw,
+                height: bh,
+                fill: None,
+                fill_alpha: 255,
+            },
+            ApplyTarget::WholeImage,
+        )
+    }
+}
+
+fn render_drawing_op(
+    src: &RgbaImage,
+    op: &EditOp,
+    offset_x: i32,
+    offset_y: i32,
+    selection: Option<&SelectionMask>,
+    is_mask: bool,
+) -> RgbaImage {
+    let to_gray = |rgb: [u8; 3]| -> [u8; 3] {
+        let g = drawing::rgb_luminance(rgb);
+        [g, g, g]
+    };
+    let ox = offset_x as f32;
+    let oy = offset_y as f32;
+    match op {
+        EditOp::DrawShape {
+            kind,
+            points,
+            nodes,
+            fill_mode,
+            closed,
+            color,
+            radius,
+            opacity,
+            brush,
+        } => {
+            let local_pts: Vec<[f32; 2]> = points.iter().map(|p| [p[0] - ox, p[1] - oy]).collect();
+            let local_nodes: Vec<VectorPathNode> = nodes
+                .iter()
+                .map(|n| VectorPathNode {
+                    anchor: [n.anchor[0] - ox, n.anchor[1] - oy],
+                    handle_in: n.handle_in.map(|h| [h[0] - ox, h[1] - oy]),
+                    handle_out: n.handle_out.map(|h| [h[0] - ox, h[1] - oy]),
+                })
+                .collect();
+            let c = if is_mask { to_gray(*color) } else { *color };
+            drawing::draw_shape(
+                src,
+                *kind,
+                &local_pts,
+                &local_nodes,
+                *fill_mode,
+                *closed,
+                c,
+                *radius,
+                *opacity,
+                *brush,
+            )
+        }
+        EditOp::FloodFill {
+            x,
+            y,
+            tolerance,
+            contiguous,
+            color,
+            opacity,
+        } => {
+            let lx = (*x as i64) - i64::from(offset_x);
+            let ly = (*y as i64) - i64::from(offset_y);
+            let (w, h) = src.dimensions();
+            if lx < 0 || ly < 0 || lx >= i64::from(w) || ly >= i64::from(h) {
+                return src.clone();
+            }
+            let c = if is_mask { to_gray(*color) } else { *color };
+            drawing::flood_fill(
+                src,
+                lx as u32,
+                ly as u32,
+                c,
+                *opacity,
+                *tolerance,
+                *contiguous,
+                selection.map(|s| (s, offset_x, offset_y)),
+            )
+        }
+        EditOp::DrawGradient {
+            start,
+            end,
+            kind,
+            color_mode,
+            fg_color,
+            bg_color,
+            opacity,
+        } => {
+            let fg = if is_mask {
+                to_gray(*fg_color)
+            } else {
+                *fg_color
+            };
+            let bg = if is_mask {
+                to_gray(*bg_color)
+            } else {
+                *bg_color
+            };
+            drawing::draw_gradient(
+                src,
+                [start[0] - ox, start[1] - oy],
+                [end[0] - ox, end[1] - oy],
+                *kind,
+                *color_mode,
+                fg,
+                bg,
+                *opacity,
+            )
+        }
+        _ => src.clone(),
+    }
+}
+
+fn clip_rgba_by_selection(
+    before: &RgbaImage,
+    after: &mut RgbaImage,
+    offset_x: i32,
+    offset_y: i32,
+    sel: &SelectionMask,
+) {
+    let (w, h) = before.dimensions();
+    if after.dimensions() != (w, h) {
+        return;
+    }
+    for y in 0..h {
+        let cy = offset_y + y as i32;
+        for x in 0..w {
+            let s = sel.alpha_at(offset_x + x as i32, cy);
+            if s == 255 {
+                continue;
+            }
+            let b = before.get_pixel(x, y).0;
+            if s == 0 {
+                after.put_pixel(x, y, Rgba(b));
+            } else {
+                let a = after.get_pixel(x, y).0;
+                let t = s as u16;
+                let inv = 255 - t;
+                let blended = [
+                    ((b[0] as u16 * inv + a[0] as u16 * t + 127) / 255) as u8,
+                    ((b[1] as u16 * inv + a[1] as u16 * t + 127) / 255) as u8,
+                    ((b[2] as u16 * inv + a[2] as u16 * t + 127) / 255) as u8,
+                    ((b[3] as u16 * inv + a[3] as u16 * t + 127) / 255) as u8,
+                ];
+                after.put_pixel(x, y, Rgba(blended));
+            }
+        }
+    }
+}
+
+fn clip_mask_by_selection(
+    before: &[u8],
+    after: &mut [u8],
+    lw: u32,
+    lh: u32,
+    offset_x: i32,
+    offset_y: i32,
+    sel: &SelectionMask,
+) {
+    let len = (lw as usize).saturating_mul(lh as usize);
+    if before.len() < len || after.len() < len {
+        return;
+    }
+    for y in 0..lh {
+        let cy = offset_y + y as i32;
+        for x in 0..lw {
+            let s = sel.alpha_at(offset_x + x as i32, cy);
+            if s == 255 {
+                continue;
+            }
+            let idx = (y * lw + x) as usize;
+            if s == 0 {
+                after[idx] = before[idx];
+            } else {
+                let t = s as u16;
+                let inv = 255 - t;
+                after[idx] = ((before[idx] as u16 * inv + after[idx] as u16 * t + 127) / 255) as u8;
+            }
+        }
     }
 }
 
@@ -1431,6 +1929,9 @@ pub fn render_single_op(
             strength,
         } => liquify::liquify_stroke(src, baseline, points, *mode, *radius, *strength),
         EditOp::LiveStrokeCommit { pixels, .. } => (**pixels).clone(),
+        EditOp::DrawShape { .. } | EditOp::FloodFill { .. } | EditOp::DrawGradient { .. } => {
+            render_drawing_op(src, op, 0, 0, None, false)
+        }
         EditOp::Layer(_) => src.clone(),
     };
     Ok(out)
@@ -1919,5 +2420,65 @@ mod tests {
         assert_eq!(crate::probe_dimensions(&export_path), Some((20, 10)));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn drawing_ops_clip_to_selection_support_masks_and_undo_redo() {
+        let base = RgbaImage::from_pixel(24, 24, Rgba([10, 10, 10, 255]));
+        let mut doc = EditorDocument::from_rgba(PathBuf::from("test.png"), base);
+
+        doc.select_shape(
+            &SelectionShape::Rect {
+                x: 8.0,
+                y: 8.0,
+                width: 8.0,
+                height: 8.0,
+                feather: 0.0,
+                anti_alias: false,
+            },
+            SelectionBooleanOp::Replace,
+        );
+        let changed = doc
+            .apply_with_target(
+                EditOp::DrawShape {
+                    kind: DrawShapeKind::Rect,
+                    points: vec![[0.0, 0.0], [24.0, 24.0]],
+                    nodes: Vec::new(),
+                    fill_mode: ShapeFillMode::Fill,
+                    closed: true,
+                    color: [220, 40, 40],
+                    radius: 2.0,
+                    opacity: 1.0,
+                    brush: BrushSettings::default(),
+                },
+                ApplyTarget::ActiveLayer,
+            )
+            .unwrap();
+        assert!(changed);
+        assert_eq!(doc.working_pixels().get_pixel(12, 12).0, [220, 40, 40, 255]);
+        assert_eq!(doc.working_pixels().get_pixel(2, 2).0, [10, 10, 10, 255]);
+
+        assert!(doc.undo().unwrap());
+        assert_eq!(doc.working_pixels().get_pixel(12, 12).0, [10, 10, 10, 255]);
+        assert!(doc.redo().unwrap());
+        assert_eq!(doc.working_pixels().get_pixel(12, 12).0, [220, 40, 40, 255]);
+
+        doc.deselect();
+        assert!(doc.toggle_quick_mask());
+        doc.apply_with_target(
+            EditOp::FloodFill {
+                x: 0,
+                y: 0,
+                tolerance: 0,
+                contiguous: true,
+                color: [255, 255, 255],
+                opacity: 1.0,
+            },
+            ApplyTarget::ActiveLayer,
+        )
+        .unwrap();
+        assert!(doc.selection().has_selection());
+        assert!(doc.undo().unwrap());
+        assert!(!doc.selection().has_selection());
     }
 }

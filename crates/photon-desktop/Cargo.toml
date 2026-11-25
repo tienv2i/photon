@@ -20,6 +20,10 @@ photon-image = { workspace = true }
 photon-ipc = { workspace = true }
 photon-panels = { workspace = true }
 photon-protocol = { workspace = true }
+photon-canvas = { workspace = true }
+photon-browser = { workspace = true }
+photon-viewer = { workspace = true }
+photon-editor = { workspace = true }
 photon-storage = { workspace = true }
 photon-ui = { workspace = true }
 regex-automata = "0.4"

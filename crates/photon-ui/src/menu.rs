@@ -18,6 +18,16 @@ pub enum MenuEntry<'a, M> {
     Separator,
 }
 
+impl<'a, M> MenuEntry<'a, M> {
+    pub fn map<N>(self, f: impl FnOnce(M) -> N) -> MenuEntry<'a, N> {
+        match self {
+            Self::Header(h) => MenuEntry::Header(h),
+            Self::Item(item) => MenuEntry::Item(item.map(f)),
+            Self::Separator => MenuEntry::Separator,
+        }
+    }
+}
+
 pub struct MenuItem<'a, M> {
     pub icon: Option<Icon>,
     pub label: String,
@@ -59,6 +69,18 @@ impl<'a, M> MenuItem<'a, M> {
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
+    }
+
+    pub fn map<N>(self, f: impl FnOnce(M) -> N) -> MenuItem<'a, N> {
+        MenuItem {
+            icon: self.icon,
+            label: self.label,
+            shortcut: self.shortcut,
+            checked: self.checked,
+            enabled: self.enabled,
+            on_press: f(self.on_press),
+            _marker: std::marker::PhantomData,
+        }
     }
 }
 

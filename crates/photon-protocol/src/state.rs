@@ -100,6 +100,20 @@ pub struct EditorState {
     #[serde(default)]
     pub original_revision: u64,
     pub adjustments: ColorAdjustments,
+    #[serde(default)]
+    pub selection: EditorSelectionSummary,
+}
+
+/// Summary of the Editor's active pixel selection mask.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorSelectionSummary {
+    pub has_selection: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<[u32; 4]>,
+    pub quick_mask_active: bool,
+    pub can_reselect: bool,
+    pub selection_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

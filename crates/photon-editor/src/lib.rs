@@ -6,8 +6,7 @@
 
 use iced::widget::overlay::menu as iced_menu;
 use iced::widget::{
-    Shader, Space, checkbox, column, container, pick_list, row, rule, scrollable, slider, text,
-    text_input,
+    Shader, checkbox, column, container, pick_list, row, rule, scrollable, slider, text, text_input,
 };
 use iced::{Alignment, Border, Color, Element, Fill, Length, Shadow};
 use photon_i18n::{tr, tr_ui_text};
@@ -16,9 +15,10 @@ use photon_panels::{
     section_card, sidebar_dock, sidebar_panel, stacked_panel_heights,
 };
 use photon_protocol::{
-    ApplyTarget, BlendMode, BrushSettings, BrushTip, CanvasAnchor, ColorAdjustments,
-    ColorBalanceAdjustment, Command, CurvesAdjustment, EditorRightPanel, EditorState,
-    EditorToolTab, FlipAxis, HsvAdjustment, Language, LayerEffect, LiquifyMode, Theme,
+    ApplyTarget, BlendMode, BrushSettings, BrushSmoothingMode, BrushTip, CanvasAnchor,
+    ColorAdjustments, ColorBalanceAdjustment, Command, CurvesAdjustment, EditorRightPanel,
+    EditorState, EditorToolTab, FlipAxis, GradientColorMode, GradientKind, HsvAdjustment, Language,
+    LayerEffect, LiquifyMode, ShapeFillMode, Theme,
 };
 use photon_ui::button::{self, ButtonVariant};
 use photon_ui::dialog::DialogSpec;
@@ -35,14 +35,150 @@ use photon_ui::theme::{
     PaletteTokens, RADIUS_SM, TEXT_SIZE_CAPTION, TEXT_SIZE_CONTROL, canvas_backdrop_style,
     hairline_rule_style, input_style, slider_style,
 };
-use photon_ui::toolbar::{WorkspaceTab, toolbar, workspace_switcher_compact};
+use photon_ui::toolbar::{WorkspaceTab, toolbar, workspace_switcher_responsive};
 use photon_ui::{TooltipPosition, with_tooltip, with_tooltip_pos};
 
-use crate::app::{
-    ActiveMenu, Message, PhotonGui, WindowRole, toolbar_divider, toolbar_right_utilities,
-};
-use crate::panel_splitter::{DockSplitterKind, dock_splitter_handle, editor_vertical_splitter};
-use crate::shader_canvas::{CanvasTool, ImageCanvasProgram, default_viewport_bg_rgb};
+pub mod panel_splitter;
+
+use iced::widget::container as iced_container;
+use iced::widget::image as iced_image;
+use photon_panels::SidebarOrderState;
+use photon_protocol::UiStateSnapshot;
+use photon_ui::toolbar::workspace_switcher_mode;
+use std::collections::HashMap;
+
+use panel_splitter::{DockSplitterKind, dock_splitter_handle, editor_vertical_splitter};
+
+fn toolbar_divider<'a, M: 'a>() -> Element<'a, M> {
+    iced_container(iced::widget::rule::vertical(1).style(photon_ui::theme::hairline_rule_style))
+        .height(Length::Fixed(18.0))
+        .into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorMenuKind {
+    File,
+    Edit,
+    Image,
+    Select,
+    Filter,
+    View,
+    Window,
+    Help,
+    AddLayer,
+    WorkspaceSwitcher,
+}
+
+#[derive(Clone, Copy)]
+pub struct EditorViewState<'a> {
+    pub snapshot: &'a UiStateSnapshot,
+    pub editor_frame: Option<&'a photon_canvas::CpuImageFrame>,
+    pub editor_original_frame: Option<&'a photon_canvas::CpuImageFrame>,
+    pub selection_mask: Option<&'a photon_canvas::CpuMaskFrame>,
+    pub marching_ants_phase: f32,
+    pub editor_layer_thumbs: &'a HashMap<u64, iced_image::Handle>,
+    pub editor_mask_thumbs: &'a HashMap<u64, iced_image::Handle>,
+    pub editor_ui: &'a EditorUiState,
+    pub pending_adj: &'a ColorAdjustments,
+    pub crop_uv: Option<[f32; 4]>,
+    pub viewport_background: Option<[u8; 3]>,
+    pub editor_tool_tab: EditorToolTab,
+    pub editor_history_open: bool,
+    pub editor_layers_open: bool,
+    pub editor_history_collapsed: bool,
+    pub editor_layers_collapsed: bool,
+    pub editor_panels: &'a SidebarOrderState<EditorRightPanel>,
+    pub dock_drag: &'a panel_splitter::DockDragState,
+    pub zoom: f32,
+    pub pan_x: f32,
+    pub pan_y: f32,
+    pub window_size: iced::Size,
+    pub active_menu: Option<EditorMenuKind>,
+}
+
+#[derive(Debug, Clone)]
+pub enum EditorMessage {
+    Noop,
+    Dispatch(Command),
+    ContextMenuDispatch(Command),
+    ToggleMenu(EditorMenuKind),
+    HoverMenu(EditorMenuKind),
+    ToggleWorkspacePanels,
+    RequestEditorLeaveToBrowser,
+    RequestEditorLeave { close_editor: bool },
+    Canvas(photon_canvas::CanvasEvent),
+    CloseDialog,
+    OpenExportDialog,
+    PickExportDialog,
+    ConfirmExport,
+    ExportPathChanged(String),
+    ExportQualityChanged(u8),
+    ExportMaxEdgeChanged(String),
+    ExportMetadataToggled(bool),
+    OpenResizeDialog,
+    OpenColorPicker(ColorPickerTarget),
+    ColorPickerSetRgb(u8, u8, u8),
+    ColorPickerHexChanged(String),
+    ColorPickerToggleTransparent(bool),
+    ConfirmColorPicker,
+    ResetViewportBackground,
+    CopyImageToClipboard(Option<String>),
+    EditorSelectTool(EditorTool),
+    SelectEditorToolTab(EditorToolTab),
+    EditorSwapColors,
+    EditorResetColors,
+    EditorCycleCompareMode,
+    EditorSetCompareMode(CompareMode),
+    EditorOpenAdjustPopup(AdjustmentPopupTab),
+    EditorSetBrushRadius(f32),
+    EditorSetBrushOpacity(f32),
+    EditorSetBrushHardness(f32),
+    EditorSetBrushFlow(f32),
+    EditorSetBrushSpacing(f32),
+    EditorSetBrushTip(BrushTip),
+    EditorSetLiquifyMode(LiquifyMode),
+    EditorSetLiquifyRadius(f32),
+    EditorSetLiquifyStrength(f32),
+    EditorSetRotateAngle(f64),
+    EditorApplyRotateAngle,
+    EditorSetCanvasAnchor(photon_protocol::CanvasAnchor),
+    EditorCanvasDimAction(DimGridAction),
+    EditorApplyCanvasSize,
+    ToggleCropMode,
+    SetCropPreset(Option<f32>),
+    ApplyCrop,
+    CancelCrop,
+    BeginDragEditorPanel(EditorRightPanel),
+    HoverEditorPanelDrop(EditorRightPanel),
+    DropEditorPanel(EditorRightPanel),
+    SwapEditorPanelOrder,
+    ToggleEditorPanelCollapse(EditorRightPanel),
+    CloseEditorPanel(EditorRightPanel),
+    CloseEditorToolsPanel,
+    DockSplitterDrag(DockSplitterKind, f32),
+    DockSplitterRelease(DockSplitterKind, f32),
+    OpenLayerContextMenu { layer_id: u64 },
+    EditorStartLayerRename(u64, String),
+    EditorLayerRenameChanged(String),
+    EditorCommitLayerRename,
+    EditorCancelLayerRename,
+    EditorSetSelectOp(photon_protocol::SelectionBooleanOp),
+    EditorSetSelectFeather(f32),
+    EditorToggleSelectAntiAlias,
+    EditorSetWandTolerance(u8),
+    EditorToggleWandContiguous,
+    EditorToggleSelectSampleAll,
+    EditorSetQuickSelectRadius(f32),
+    EditorSetBrushSmoothingMode(BrushSmoothingMode),
+    EditorSetStabilizerDistance(f32),
+    EditorSetShapeFillMode(ShapeFillMode),
+    EditorSetShapeStrokeWidth(f32),
+    EditorSetFloodFillTolerance(u8),
+    EditorToggleFloodFillContiguous,
+    EditorSetGradientKind(GradientKind),
+    EditorSetGradientColorMode(GradientColorMode),
+}
+use photon_canvas::{CanvasTool, ImageCanvasProgram, default_viewport_bg_rgb};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum EditorTool {
@@ -57,9 +193,121 @@ pub enum EditorTool {
     Crop,
     CanvasSize,
     RotateAngle,
+    MarqueeRect,
+    MarqueeEllipse,
+    SingleRow,
+    SingleCol,
+    Lasso,
+    PolygonLasso,
+    MagneticLasso,
+    BezierSelect,
+    QuickSelect,
+    MagicWand,
+    DrawLine,
+    DrawRect,
+    DrawEllipse,
+    DrawPolygon,
+    DrawPolyline,
+    BezierPen,
+    PaintBucket,
+    Gradient,
 }
 
 impl EditorTool {
+    pub fn is_selection(self) -> bool {
+        self.as_canvas_tool().is_selection()
+    }
+
+    pub fn is_marquee_group(self) -> bool {
+        matches!(
+            self,
+            Self::MarqueeRect | Self::MarqueeEllipse | Self::SingleRow | Self::SingleCol
+        )
+    }
+
+    pub fn is_lasso_group(self) -> bool {
+        matches!(
+            self,
+            Self::Lasso | Self::PolygonLasso | Self::MagneticLasso | Self::BezierSelect
+        )
+    }
+
+    pub fn is_smart_group(self) -> bool {
+        matches!(self, Self::QuickSelect | Self::MagicWand)
+    }
+
+    pub fn is_shape_group(self) -> bool {
+        matches!(
+            self,
+            Self::DrawLine
+                | Self::DrawRect
+                | Self::DrawEllipse
+                | Self::DrawPolygon
+                | Self::DrawPolyline
+        )
+    }
+
+    pub fn is_fill_group(self) -> bool {
+        matches!(self, Self::PaintBucket | Self::Gradient)
+    }
+
+    pub fn icon(self) -> Icon {
+        match self {
+            Self::Pointer => Icon::Pointer,
+            Self::Hand => Icon::Hand,
+            Self::Zoom => Icon::ZoomIn,
+            Self::Brush => Icon::Brush,
+            Self::Eraser => Icon::Eraser,
+            Self::Liquify => Icon::Liquify,
+            Self::Eyedropper => Icon::Eyedropper,
+            Self::Crop => Icon::Crop,
+            Self::CanvasSize => Icon::CanvasSize,
+            Self::RotateAngle => Icon::RotateAngle,
+            Self::MarqueeRect => Icon::MarqueeRect,
+            Self::MarqueeEllipse => Icon::MarqueeEllipse,
+            Self::SingleRow => Icon::SingleRow,
+            Self::SingleCol => Icon::SingleCol,
+            Self::Lasso => Icon::Lasso,
+            Self::PolygonLasso => Icon::PolygonLasso,
+            Self::MagneticLasso => Icon::MagneticLasso,
+            Self::BezierSelect => Icon::BezierSelect,
+            Self::QuickSelect => Icon::QuickSelect,
+            Self::MagicWand => Icon::MagicWand,
+            Self::DrawLine => Icon::DrawLine,
+            Self::DrawRect => Icon::DrawRect,
+            Self::DrawEllipse => Icon::DrawEllipse,
+            Self::DrawPolygon => Icon::DrawPolygon,
+            Self::DrawPolyline => Icon::DrawPolyline,
+            Self::BezierPen => Icon::BezierPen,
+            Self::PaintBucket => Icon::PaintBucket,
+            Self::Gradient => Icon::Gradient,
+        }
+    }
+
+    pub fn label_key(self) -> &'static str {
+        match self {
+            Self::MarqueeRect => "tool-marquee-rect",
+            Self::MarqueeEllipse => "tool-marquee-ellipse",
+            Self::SingleRow => "tool-single-row",
+            Self::SingleCol => "tool-single-col",
+            Self::Lasso => "tool-lasso",
+            Self::PolygonLasso => "tool-polygon-lasso",
+            Self::MagneticLasso => "tool-magnetic-lasso",
+            Self::BezierSelect => "tool-bezier-select",
+            Self::QuickSelect => "tool-quick-select",
+            Self::MagicWand => "tool-magic-wand",
+            Self::DrawLine => "tool-draw-line",
+            Self::DrawRect => "tool-draw-rect",
+            Self::DrawEllipse => "tool-draw-ellipse",
+            Self::DrawPolygon => "tool-draw-polygon",
+            Self::DrawPolyline => "tool-draw-polyline",
+            Self::BezierPen => "tool-bezier-pen",
+            Self::PaintBucket => "tool-paint-bucket",
+            Self::Gradient => "tool-gradient",
+            _ => "tool-pointer",
+        }
+    }
+
     pub fn as_canvas_tool(self) -> CanvasTool {
         match self {
             Self::Pointer | Self::CanvasSize => CanvasTool::Pointer,
@@ -71,6 +319,24 @@ impl EditorTool {
             Self::Eyedropper => CanvasTool::Eyedropper,
             Self::Crop => CanvasTool::Crop,
             Self::RotateAngle => CanvasTool::RotateAngle,
+            Self::MarqueeRect => CanvasTool::MarqueeRect,
+            Self::MarqueeEllipse => CanvasTool::MarqueeEllipse,
+            Self::SingleRow => CanvasTool::SingleRow,
+            Self::SingleCol => CanvasTool::SingleCol,
+            Self::Lasso => CanvasTool::Lasso,
+            Self::PolygonLasso => CanvasTool::PolygonLasso,
+            Self::MagneticLasso => CanvasTool::MagneticLasso,
+            Self::BezierSelect => CanvasTool::BezierSelect,
+            Self::QuickSelect => CanvasTool::QuickSelect,
+            Self::MagicWand => CanvasTool::MagicWand,
+            Self::DrawLine => CanvasTool::DrawLine,
+            Self::DrawRect => CanvasTool::DrawRect,
+            Self::DrawEllipse => CanvasTool::DrawEllipse,
+            Self::DrawPolygon => CanvasTool::DrawPolygon,
+            Self::DrawPolyline => CanvasTool::DrawPolyline,
+            Self::BezierPen => CanvasTool::BezierPen,
+            Self::PaintBucket => CanvasTool::PaintBucket,
+            Self::Gradient => CanvasTool::Gradient,
         }
     }
 }
@@ -315,9 +581,9 @@ impl DimensionInputState {
         }
     }
 
-    pub fn view<'a, F>(&'a self, lang: Language, map_action: F) -> Element<'a, Message>
+    pub fn view<'a, M: Clone + 'a, F>(&'a self, lang: Language, map_action: F) -> Element<'a, M>
     where
-        F: Fn(DimGridAction) -> Message + Clone + 'a,
+        F: Fn(DimGridAction) -> M + Clone + 'a,
     {
         let f_w = map_action.clone();
         let f_h = map_action.clone();
@@ -433,6 +699,24 @@ pub struct EditorUiState {
     pub compare_split_x: f32,
     pub renaming_layer_id: Option<u64>,
     pub layer_rename_input: String,
+    pub marquee_subtool: EditorTool,
+    pub lasso_subtool: EditorTool,
+    pub smart_subtool: EditorTool,
+    pub select_op: photon_protocol::SelectionBooleanOp,
+    pub select_feather: f32,
+    pub select_anti_alias: bool,
+    pub wand_tolerance: u8,
+    pub wand_contiguous: bool,
+    pub select_sample_all: bool,
+    pub quick_select_radius: f32,
+    pub shape_subtool: EditorTool,
+    pub fill_subtool: EditorTool,
+    pub shape_fill_mode: ShapeFillMode,
+    pub shape_stroke_width: f32,
+    pub flood_fill_tolerance: u8,
+    pub flood_fill_contiguous: bool,
+    pub gradient_kind: GradientKind,
+    pub gradient_color_mode: GradientColorMode,
 }
 
 impl Default for EditorUiState {
@@ -467,6 +751,24 @@ impl Default for EditorUiState {
             compare_split_x: 0.5,
             renaming_layer_id: None,
             layer_rename_input: String::new(),
+            marquee_subtool: EditorTool::MarqueeRect,
+            lasso_subtool: EditorTool::Lasso,
+            smart_subtool: EditorTool::QuickSelect,
+            select_op: photon_protocol::SelectionBooleanOp::Replace,
+            select_feather: 0.0,
+            select_anti_alias: true,
+            wand_tolerance: 24,
+            wand_contiguous: true,
+            select_sample_all: true,
+            quick_select_radius: 18.0,
+            shape_subtool: EditorTool::DrawRect,
+            fill_subtool: EditorTool::PaintBucket,
+            shape_fill_mode: ShapeFillMode::Stroke,
+            shape_stroke_width: 3.0,
+            flood_fill_tolerance: 24,
+            flood_fill_contiguous: true,
+            gradient_kind: GradientKind::Linear,
+            gradient_color_mode: GradientColorMode::FgToBg,
         }
     }
 }
@@ -512,21 +814,24 @@ pub fn parse_hex_rgb(input: &str) -> Option<[u8; 3]> {
     Some([r, g, b])
 }
 
-pub fn build_editor_toolbar(state: &PhotonGui, _role: WindowRole) -> Element<'_, Message> {
+pub fn build_editor_toolbar<'a>(
+    state: EditorViewState<'a>,
+    right_utilities: Element<'a, EditorMessage>,
+) -> Element<'a, EditorMessage> {
     let lang = state.snapshot.meta.language;
     let meta = &state.snapshot.meta;
     let ed = meta.editor.as_ref();
     let cmp_mode = state.editor_ui.compare_mode;
 
     let menu_open = state.active_menu.is_some();
-    let trigger = |label: String, m: ActiveMenu| {
+    let trigger = |label: String, m: EditorMenuKind| {
         (
             MenubarTrigger {
                 label,
                 active: state.active_menu == Some(m),
-                on_press: Message::ToggleMenu(m),
+                on_press: EditorMessage::ToggleMenu(m),
             },
-            menu_open.then_some(Message::HoverMenu(m)),
+            menu_open.then_some(EditorMessage::HoverMenu(m)),
         )
     };
 
@@ -534,13 +839,13 @@ pub fn build_editor_toolbar(state: &PhotonGui, _role: WindowRole) -> Element<'_,
         button::toolbar_icon(
             Icon::Save,
             ed.is_some_and(|d| d.modified),
-            ed.map(|_| Message::Dispatch(Command::EditorSave)),
+            ed.map(|_| EditorMessage::Dispatch(Command::EditorSave)),
             Some(tr(lang, "tooltip-editor-save")),
         ),
         button::toolbar_icon(
             Icon::Export,
             false,
-            ed.map(|_| Message::OpenExportDialog),
+            ed.map(|_| EditorMessage::OpenExportDialog),
             Some(tr(lang, "tooltip-editor-export")),
         ),
         toolbar_divider(),
@@ -548,28 +853,28 @@ pub fn build_editor_toolbar(state: &PhotonGui, _role: WindowRole) -> Element<'_,
             Icon::Undo,
             false,
             ed.filter(|d| d.can_undo)
-                .map(|_| Message::Dispatch(Command::EditorUndo)),
+                .map(|_| EditorMessage::Dispatch(Command::EditorUndo)),
             Some(tr(lang, "tooltip-editor-undo")),
         ),
         button::toolbar_icon(
             Icon::Redo,
             false,
             ed.filter(|d| d.can_redo)
-                .map(|_| Message::Dispatch(Command::EditorRedo)),
+                .map(|_| EditorMessage::Dispatch(Command::EditorRedo)),
             Some(tr(lang, "tooltip-editor-redo")),
         ),
         button::toolbar_icon(
             Icon::Reset,
             false,
             ed.filter(|d| d.modified)
-                .map(|_| Message::Dispatch(Command::EditorReset)),
+                .map(|_| EditorMessage::Dispatch(Command::EditorReset)),
             Some(tr(lang, "tooltip-history-reset")),
         ),
         toolbar_divider(),
         button::toolbar_icon(
             Icon::Compare,
             ed.is_some() && cmp_mode != CompareMode::Off,
-            ed.map(|_| Message::EditorCycleCompareMode),
+            ed.map(|_| EditorMessage::EditorCycleCompareMode),
             Some(match cmp_mode {
                 CompareMode::Off => tr(lang, "tooltip-editor-compare"),
                 CompareMode::Split => format!(
@@ -595,13 +900,14 @@ pub fn build_editor_toolbar(state: &PhotonGui, _role: WindowRole) -> Element<'_,
 
     let left = row![
         menubar_row_hoverable(vec![
-            trigger(tr(lang, "menu-file"), ActiveMenu::EditorFile),
-            trigger(tr(lang, "menu-edit"), ActiveMenu::EditorEdit),
-            trigger(tr(lang, "menu-image"), ActiveMenu::EditorImage),
-            trigger(tr(lang, "menu-filter"), ActiveMenu::EditorFilter),
-            trigger(tr(lang, "menu-view"), ActiveMenu::EditorView),
-            trigger(tr(lang, "menu-window"), ActiveMenu::EditorWindow),
-            trigger(tr(lang, "menu-help"), ActiveMenu::EditorHelp),
+            trigger(tr(lang, "menu-file"), EditorMenuKind::File),
+            trigger(tr(lang, "menu-edit"), EditorMenuKind::Edit),
+            trigger(tr(lang, "menu-image"), EditorMenuKind::Image),
+            trigger(tr(lang, "menu-select"), EditorMenuKind::Select),
+            trigger(tr(lang, "menu-filter"), EditorMenuKind::Filter),
+            trigger(tr(lang, "menu-view"), EditorMenuKind::View),
+            trigger(tr(lang, "menu-window"), EditorMenuKind::Window),
+            trigger(tr(lang, "menu-help"), EditorMenuKind::Help),
         ]),
         toolbar_divider(),
         quick_actions,
@@ -609,20 +915,20 @@ pub fn build_editor_toolbar(state: &PhotonGui, _role: WindowRole) -> Element<'_,
     .spacing(8)
     .align_y(Alignment::Center);
 
-    let switcher = workspace_switcher_compact(
+    let switcher = workspace_switcher_responsive(
         vec![
             WorkspaceTab::new(
                 tr(lang, "workspace-browser"),
                 Icon::Browser,
                 false,
-                Message::RequestEditorLeaveToBrowser,
+                EditorMessage::RequestEditorLeaveToBrowser,
             )
             .tooltip(tr(lang, "tooltip-workspace-browser")),
             WorkspaceTab::new(
                 tr(lang, "workspace-viewer"),
                 Icon::Viewer,
                 false,
-                Message::RequestEditorLeave {
+                EditorMessage::RequestEditorLeave {
                     close_editor: false,
                 },
             )
@@ -631,21 +937,23 @@ pub fn build_editor_toolbar(state: &PhotonGui, _role: WindowRole) -> Element<'_,
                 tr(lang, "workspace-editor"),
                 Icon::Editor,
                 true,
-                Message::Noop,
+                EditorMessage::Noop,
             )
             .tooltip(tr(lang, "tooltip-workspace-editor")),
         ],
-        state.window_size.width < 1120.0,
+        workspace_switcher_mode(state.window_size.width),
+        state.active_menu == Some(EditorMenuKind::WorkspaceSwitcher),
+        Some(EditorMessage::ToggleMenu(EditorMenuKind::WorkspaceSwitcher)),
     );
 
-    let right = row![switcher, toolbar_divider(), toolbar_right_utilities(state)]
+    let right = row![switcher, toolbar_divider(), right_utilities]
         .spacing(8)
         .align_y(Alignment::Center);
 
     toolbar(left, right)
 }
 
-pub fn build_editor_view(state: &PhotonGui) -> Element<'_, Message> {
+pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMessage> {
     let lang = state.snapshot.meta.language;
     let dark = state.snapshot.meta.theme == Theme::Dark;
     let Some(ed) = &state.snapshot.meta.editor else {
@@ -690,6 +998,7 @@ pub fn build_editor_view(state: &PhotonGui) -> Element<'_, Message> {
         match state.editor_ui.tool {
             EditorTool::Brush | EditorTool::Eraser => state.editor_ui.brush_radius,
             EditorTool::Liquify => state.editor_ui.liquify_radius,
+            EditorTool::QuickSelect => state.editor_ui.quick_select_radius,
             _ => 0.0,
         }
     };
@@ -701,16 +1010,20 @@ pub fn build_editor_view(state: &PhotonGui) -> Element<'_, Message> {
         state.editor_ui.tool.as_canvas_tool()
     };
 
-    let canvas: Element<'_, Message> = Element::from(
+    let canvas: Element<'_, EditorMessage> = Element::from(
         Shader::new(ImageCanvasProgram {
-            frame: state.editor_frame.clone(),
+            frame: state.editor_frame.cloned(),
             pair_frame: None,
             dual_gap_px: 0.0,
-            compare_frame: state.editor_original_frame.clone(),
+            compare_frame: state.editor_original_frame.cloned(),
+            selection_mask: state.selection_mask.cloned(),
+            has_selection: ed.selection.has_selection,
+            quick_mask_active: ed.selection.quick_mask_active,
+            marching_ants_phase: state.marching_ants_phase,
             zoom: state.zoom,
             pan_x: state.pan_x,
             pan_y: state.pan_y,
-            adjustments: state.pending_adj,
+            adjustments: *state.pending_adj,
             dark_theme: dark,
             crop_rect: state.crop_uv,
             crop_aspect: state.editor_ui.crop_aspect,
@@ -723,13 +1036,24 @@ pub fn build_editor_view(state: &PhotonGui) -> Element<'_, Message> {
             compare_mode: state.editor_ui.compare_mode.as_u8(),
             compare_split_x: state.editor_ui.compare_split_x,
             brush_radius_px,
+            stabilizer_radius: if matches!(
+                state.editor_ui.tool,
+                EditorTool::Brush | EditorTool::Eraser
+            ) && state.editor_ui.brush_settings.smoothing_mode
+                == BrushSmoothingMode::Stabilizer
+            {
+                state.editor_ui.brush_settings.stabilizer_distance
+            } else {
+                0.0
+            },
+            restrict_pan_to_hand: true,
         })
         .width(Fill)
         .height(Fill),
     )
-    .map(Message::Canvas);
+    .map(EditorMessage::Canvas);
 
-    let canvas_area: Element<'_, Message> = container(canvas)
+    let canvas_area: Element<'_, EditorMessage> = container(canvas)
         .width(Fill)
         .height(Fill)
         .style(canvas_backdrop_style)
@@ -757,7 +1081,7 @@ pub fn build_editor_view(state: &PhotonGui) -> Element<'_, Message> {
     editor_row.into()
 }
 
-fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
+fn build_tool_rail(state: EditorViewState<'_>, lang: Language) -> Element<'_, EditorMessage> {
     let ui = &state.editor_ui;
     let active_tool = ui.tool;
 
@@ -767,14 +1091,14 @@ fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
                 Icon::Pointer,
                 active_tool == EditorTool::Pointer,
                 true,
-                Some(Message::EditorSelectTool(EditorTool::Pointer)),
+                Some(EditorMessage::EditorSelectTool(EditorTool::Pointer)),
                 tr(lang, "tooltip-tool-pointer"),
             ),
             tool_rail_button_tipped(
                 Icon::Hand,
                 active_tool == EditorTool::Hand,
                 true,
-                Some(Message::EditorSelectTool(EditorTool::Hand)),
+                Some(EditorMessage::EditorSelectTool(EditorTool::Hand)),
                 tr(lang, "tooltip-tool-hand"),
             ),
         ]
@@ -784,14 +1108,14 @@ fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
                 Icon::ZoomIn,
                 active_tool == EditorTool::Zoom,
                 true,
-                Some(Message::EditorSelectTool(EditorTool::Zoom)),
+                Some(EditorMessage::EditorSelectTool(EditorTool::Zoom)),
                 tr(lang, "tooltip-tool-zoom"),
             ),
             tool_rail_button_tipped(
                 Icon::Eyedropper,
                 active_tool == EditorTool::Eyedropper,
                 true,
-                Some(Message::EditorSelectTool(EditorTool::Eyedropper)),
+                Some(EditorMessage::EditorSelectTool(EditorTool::Eyedropper)),
                 tr(lang, "tooltip-tool-eyedropper"),
             ),
         ]
@@ -801,14 +1125,14 @@ fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
                 Icon::Brush,
                 active_tool == EditorTool::Brush,
                 true,
-                Some(Message::EditorSelectTool(EditorTool::Brush)),
+                Some(EditorMessage::EditorSelectTool(EditorTool::Brush)),
                 tr(lang, "tooltip-tool-brush"),
             ),
             tool_rail_button_tipped(
                 Icon::Eraser,
                 active_tool == EditorTool::Eraser,
                 true,
-                Some(Message::EditorSelectTool(EditorTool::Eraser)),
+                Some(EditorMessage::EditorSelectTool(EditorTool::Eraser)),
                 tr(lang, "tooltip-tool-eraser"),
             ),
         ]
@@ -818,14 +1142,14 @@ fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
                 Icon::Liquify,
                 active_tool == EditorTool::Liquify,
                 true,
-                Some(Message::EditorSelectTool(EditorTool::Liquify)),
+                Some(EditorMessage::EditorSelectTool(EditorTool::Liquify)),
                 tr(lang, "tooltip-tool-liquify"),
             ),
             tool_rail_button_tipped(
                 Icon::Crop,
                 active_tool == EditorTool::Crop || state.crop_uv.is_some(),
                 true,
-                Some(Message::EditorSelectTool(EditorTool::Crop)),
+                Some(EditorMessage::EditorSelectTool(EditorTool::Crop)),
                 tr(lang, "tooltip-tool-crop"),
             ),
         ]
@@ -835,14 +1159,14 @@ fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
                 Icon::Resize,
                 false,
                 true,
-                Some(Message::OpenResizeDialog),
+                Some(EditorMessage::OpenResizeDialog),
                 tr(lang, "tooltip-tool-resize"),
             ),
             tool_rail_button_tipped(
                 Icon::CanvasSize,
                 active_tool == EditorTool::CanvasSize,
                 true,
-                Some(Message::EditorSelectTool(EditorTool::CanvasSize)),
+                Some(EditorMessage::EditorSelectTool(EditorTool::CanvasSize)),
                 tr(lang, "tooltip-tool-canvas-size"),
             ),
         ]
@@ -852,10 +1176,74 @@ fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
                 Icon::RotateAngle,
                 active_tool == EditorTool::RotateAngle,
                 true,
-                Some(Message::EditorSelectTool(EditorTool::RotateAngle)),
+                Some(EditorMessage::EditorSelectTool(EditorTool::RotateAngle)),
                 tr(lang, "tooltip-tool-rotate-angle"),
             ),
-            Space::new().width(Length::Fixed(34.0)),
+            tool_rail_button_tipped(
+                ui.marquee_subtool.icon(),
+                active_tool.is_marquee_group(),
+                true,
+                Some(EditorMessage::EditorSelectTool(ui.marquee_subtool)),
+                tr(lang, "tooltip-tool-marquee-group"),
+            ),
+        ]
+        .spacing(4),
+        row![
+            tool_rail_button_tipped(
+                ui.lasso_subtool.icon(),
+                active_tool.is_lasso_group(),
+                true,
+                Some(EditorMessage::EditorSelectTool(ui.lasso_subtool)),
+                tr(lang, "tooltip-tool-lasso-group"),
+            ),
+            tool_rail_button_tipped(
+                ui.smart_subtool.icon(),
+                active_tool.is_smart_group(),
+                true,
+                Some(EditorMessage::EditorSelectTool(ui.smart_subtool)),
+                tr(lang, "tooltip-tool-smart-select-group"),
+            ),
+        ]
+        .spacing(4),
+        row![
+            tool_rail_button_tipped(
+                Icon::QuickMask,
+                state
+                    .snapshot
+                    .meta
+                    .editor
+                    .as_ref()
+                    .is_some_and(|e| e.selection.quick_mask_active),
+                true,
+                Some(EditorMessage::Dispatch(
+                    Command::EditorSelectToggleQuickMask
+                )),
+                tr(lang, "tooltip-tool-quick-mask"),
+            ),
+            tool_rail_button_tipped(
+                ui.shape_subtool.icon(),
+                active_tool.is_shape_group(),
+                true,
+                Some(EditorMessage::EditorSelectTool(ui.shape_subtool)),
+                tr(lang, "tooltip-tool-shape-group"),
+            ),
+        ]
+        .spacing(4),
+        row![
+            tool_rail_button_tipped(
+                Icon::BezierPen,
+                active_tool == EditorTool::BezierPen,
+                true,
+                Some(EditorMessage::EditorSelectTool(EditorTool::BezierPen)),
+                tr(lang, "tooltip-tool-bezier-pen"),
+            ),
+            tool_rail_button_tipped(
+                ui.fill_subtool.icon(),
+                active_tool.is_fill_group(),
+                true,
+                Some(EditorMessage::EditorSelectTool(ui.fill_subtool)),
+                tr(lang, "tooltip-tool-fill-group"),
+            ),
         ]
         .spacing(4),
     ]
@@ -868,7 +1256,7 @@ fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
                 Icon::RotateLeft,
                 false,
                 true,
-                Some(Message::Dispatch(Command::EditorRotate {
+                Some(EditorMessage::Dispatch(Command::EditorRotate {
                     degrees: -90,
                     target: ui.apply_target,
                 })),
@@ -878,7 +1266,7 @@ fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
                 Icon::RotateRight,
                 false,
                 true,
-                Some(Message::Dispatch(Command::EditorRotate {
+                Some(EditorMessage::Dispatch(Command::EditorRotate {
                     degrees: 90,
                     target: ui.apply_target,
                 })),
@@ -891,7 +1279,7 @@ fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
                 Icon::FlipH,
                 false,
                 true,
-                Some(Message::Dispatch(Command::EditorFlip {
+                Some(EditorMessage::Dispatch(Command::EditorFlip {
                     axis: FlipAxis::Horizontal,
                     target: ui.apply_target,
                 })),
@@ -901,7 +1289,7 @@ fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
                 Icon::FlipV,
                 false,
                 true,
-                Some(Message::Dispatch(Command::EditorFlip {
+                Some(EditorMessage::Dispatch(Command::EditorFlip {
                     axis: FlipAxis::Vertical,
                     target: ui.apply_target,
                 })),
@@ -916,10 +1304,10 @@ fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
     let color_pair = color_pair_widget(
         rgb_to_color(ui.fg_color),
         ui.bg_color.map(rgb_to_color),
-        Message::OpenColorPicker(ColorPickerTarget::Foreground),
-        Message::OpenColorPicker(ColorPickerTarget::Background),
-        Message::EditorSwapColors,
-        Message::EditorResetColors,
+        EditorMessage::OpenColorPicker(ColorPickerTarget::Foreground),
+        EditorMessage::OpenColorPicker(ColorPickerTarget::Background),
+        EditorMessage::EditorSwapColors,
+        EditorMessage::EditorResetColors,
     );
 
     let effective_viewport_rgb = state
@@ -931,7 +1319,7 @@ fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
             Some(rgb_to_color(effective_viewport_rgb)),
             70.0,
             20.0,
-            Some(Message::OpenColorPicker(
+            Some(EditorMessage::OpenColorPicker(
                 ColorPickerTarget::ViewportBackground,
             )),
         ),
@@ -944,7 +1332,7 @@ fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
         Some(Icon::Sliders),
         96.0,
         Some(tr(lang, "tooltip-panel-close")),
-        Message::CloseEditorToolsPanel,
+        EditorMessage::CloseEditorToolsPanel,
         column![
             tool_grid,
             rule::horizontal(1).style(hairline_rule_style),
@@ -959,11 +1347,11 @@ fn build_tool_rail(state: &PhotonGui, lang: Language) -> Element<'_, Message> {
 }
 
 fn build_editor_inspector<'a>(
-    state: &'a PhotonGui,
+    state: EditorViewState<'a>,
     ed: &'a EditorState,
     lang: Language,
     width: f32,
-) -> Element<'a, Message> {
+) -> Element<'a, EditorMessage> {
     let split_pct = state
         .dock_drag
         .effective_editor_split_pct(&state.snapshot.meta.layout);
@@ -1020,14 +1408,14 @@ fn build_editor_inspector<'a>(
 }
 
 fn build_right_panel_section<'a>(
-    state: &'a PhotonGui,
+    state: EditorViewState<'a>,
     ed: &'a EditorState,
     lang: Language,
     sidebar_width: f32,
     panel_kind: EditorRightPanel,
     collapsed: bool,
     can_reorder: bool,
-) -> Element<'a, Message> {
+) -> Element<'a, EditorMessage> {
     let dragging_any = state.editor_panels.is_dragging();
     let is_dragging_self = state.editor_panels.is_dragging_panel(panel_kind);
     let drop_ind = state.editor_panels.drop_indicator(panel_kind);
@@ -1038,7 +1426,7 @@ fn build_right_panel_section<'a>(
                 "options",
                 tr(lang, "tab-tool-options"),
                 state.editor_tool_tab == EditorToolTab::Options,
-                Message::SelectEditorToolTab(EditorToolTab::Options),
+                EditorMessage::SelectEditorToolTab(EditorToolTab::Options),
             )
             .icon(Icon::Sliders)
             .tooltip(tr(lang, "tab-tool-options")),
@@ -1046,7 +1434,7 @@ fn build_right_panel_section<'a>(
                 "history",
                 tr(lang, "tab-history"),
                 state.editor_tool_tab == EditorToolTab::History,
-                Message::SelectEditorToolTab(EditorToolTab::History),
+                EditorMessage::SelectEditorToolTab(EditorToolTab::History),
             )
             .icon(Icon::History)
             .tooltip(tr(lang, "tab-history")),
@@ -1062,17 +1450,17 @@ fn build_right_panel_section<'a>(
         .dragging(is_dragging_self)
         .collapse_tooltip(tr(lang, "tooltip-panel-collapse"))
         .close_tooltip(tr(lang, "tooltip-panel-close"))
-        .on_toggle_collapse(Message::ToggleEditorPanelCollapse(panel_kind))
-        .on_close(Some(Message::CloseEditorPanel(panel_kind)));
+        .on_toggle_collapse(EditorMessage::ToggleEditorPanelCollapse(panel_kind))
+        .on_close(Some(EditorMessage::CloseEditorPanel(panel_kind)));
 
     if can_reorder {
         header = header
             .drag_tooltip(tr(lang, "tooltip-sidebar-panel-drag"))
             .swap_tooltip(tr(lang, "tooltip-panel-drag-reorder"))
-            .on_drag_start(Message::BeginDragEditorPanel(panel_kind))
-            .on_drag_hover(dragging_any.then_some(Message::HoverEditorPanelDrop(panel_kind)))
-            .on_drag_end(dragging_any.then_some(Message::DropEditorPanel(panel_kind)))
-            .on_swap(Some(Message::SwapEditorPanelOrder));
+            .on_drag_start(EditorMessage::BeginDragEditorPanel(panel_kind))
+            .on_drag_hover(dragging_any.then_some(EditorMessage::HoverEditorPanelDrop(panel_kind)))
+            .on_drag_end(dragging_any.then_some(EditorMessage::DropEditorPanel(panel_kind)))
+            .on_swap(Some(EditorMessage::SwapEditorPanelOrder));
     }
 
     let body = (!collapsed).then(|| match panel_kind {
@@ -1085,17 +1473,17 @@ fn build_right_panel_section<'a>(
             .maybe_body(body)
             .fill_height(!collapsed)
             .drop_indicator(drop_ind)
-            .on_drop_hover(dragging_any.then_some(Message::HoverEditorPanelDrop(panel_kind)))
-            .on_drop_release(dragging_any.then_some(Message::DropEditorPanel(panel_kind))),
+            .on_drop_hover(dragging_any.then_some(EditorMessage::HoverEditorPanelDrop(panel_kind)))
+            .on_drop_release(dragging_any.then_some(EditorMessage::DropEditorPanel(panel_kind))),
     )
 }
 
 fn build_tool_options_history_panel<'a>(
-    state: &'a PhotonGui,
+    state: EditorViewState<'a>,
     ed: &'a EditorState,
     lang: Language,
-) -> Element<'a, Message> {
-    let tab_body: Element<'a, Message> = match state.editor_tool_tab {
+) -> Element<'a, EditorMessage> {
+    let tab_body: Element<'a, EditorMessage> = match state.editor_tool_tab {
         EditorToolTab::Options => {
             if let Some(tool_card) = build_tool_options_card(state, ed, lang) {
                 tool_card
@@ -1125,10 +1513,10 @@ fn build_tool_options_history_panel<'a>(
 }
 
 fn build_tool_options_card<'a>(
-    state: &'a PhotonGui,
+    state: EditorViewState<'a>,
     ed: &'a EditorState,
     lang: Language,
-) -> Option<Element<'a, Message>> {
+) -> Option<Element<'a, EditorMessage>> {
     let ui = &state.editor_ui;
 
     if let Some(uv) = state.crop_uv {
@@ -1147,7 +1535,7 @@ fn build_tool_options_card<'a>(
                         ButtonVariant::Tab {
                             active: ui.crop_aspect.is_none(),
                         },
-                        Some(Message::SetCropPreset(None)),
+                        Some(EditorMessage::SetCropPreset(None)),
                     ),
                     button::labeled(
                         "1:1",
@@ -1155,7 +1543,7 @@ fn build_tool_options_card<'a>(
                         ButtonVariant::Tab {
                             active: ui.crop_aspect == Some(1.0),
                         },
-                        Some(Message::SetCropPreset(Some(1.0))),
+                        Some(EditorMessage::SetCropPreset(Some(1.0))),
                     ),
                     button::labeled(
                         "4:3",
@@ -1163,7 +1551,7 @@ fn build_tool_options_card<'a>(
                         ButtonVariant::Tab {
                             active: ui.crop_aspect.is_some_and(|a| (a - 4.0 / 3.0).abs() < 0.01),
                         },
-                        Some(Message::SetCropPreset(Some(4.0 / 3.0))),
+                        Some(EditorMessage::SetCropPreset(Some(4.0 / 3.0))),
                     ),
                     button::labeled(
                         "16:9",
@@ -1173,7 +1561,7 @@ fn build_tool_options_card<'a>(
                                 .crop_aspect
                                 .is_some_and(|a| (a - 16.0 / 9.0).abs() < 0.01),
                         },
-                        Some(Message::SetCropPreset(Some(16.0 / 9.0))),
+                        Some(EditorMessage::SetCropPreset(Some(16.0 / 9.0))),
                     ),
                 ]
                 .spacing(4),
@@ -1183,7 +1571,7 @@ fn build_tool_options_card<'a>(
                         ui.crop_fill.map(rgb_to_color),
                         24.0,
                         18.0,
-                        Some(Message::OpenColorPicker(ColorPickerTarget::CropFill)),
+                        Some(EditorMessage::OpenColorPicker(ColorPickerTarget::CropFill)),
                     ),
                 ]
                 .align_y(Alignment::Center),
@@ -1192,14 +1580,14 @@ fn build_tool_options_card<'a>(
                         tr(lang, "dialog-cancel"),
                         None,
                         ButtonVariant::Ghost,
-                        Some(Message::CancelCrop),
+                        Some(EditorMessage::CancelCrop),
                     ),
                     with_tooltip_pos(
                         button::labeled(
                             tr(lang, "action-apply-crop"),
                             Some(Icon::Check),
                             ButtonVariant::Primary,
-                            Some(Message::ApplyCrop),
+                            Some(EditorMessage::ApplyCrop),
                         )
                         .width(Fill),
                         tr(lang, "action-apply-crop"),
@@ -1210,6 +1598,160 @@ fn build_tool_options_card<'a>(
             ]
             .spacing(8),
         ));
+    }
+
+    if ui.tool.is_selection() {
+        let group_tools: Vec<EditorTool> = if ui.tool.is_marquee_group() {
+            vec![
+                EditorTool::MarqueeRect,
+                EditorTool::MarqueeEllipse,
+                EditorTool::SingleRow,
+                EditorTool::SingleCol,
+            ]
+        } else if ui.tool.is_lasso_group() {
+            vec![
+                EditorTool::Lasso,
+                EditorTool::PolygonLasso,
+                EditorTool::MagneticLasso,
+                EditorTool::BezierSelect,
+            ]
+        } else {
+            vec![EditorTool::QuickSelect, EditorTool::MagicWand]
+        };
+
+        let mut sub_row = row![].spacing(4);
+        for sub in group_tools {
+            sub_row = sub_row.push(with_tooltip_pos(
+                button::icon_only(
+                    sub.icon(),
+                    ButtonVariant::Tab {
+                        active: ui.tool == sub,
+                    },
+                    Some(EditorMessage::EditorSelectTool(sub)),
+                ),
+                tr(lang, sub.label_key()),
+                TooltipPosition::Top,
+            ));
+        }
+
+        let op_tabs = row![
+            button::labeled(
+                tr(lang, "label-select-replace"),
+                None,
+                ButtonVariant::Tab {
+                    active: ui.select_op == photon_protocol::SelectionBooleanOp::Replace,
+                },
+                Some(EditorMessage::EditorSetSelectOp(
+                    photon_protocol::SelectionBooleanOp::Replace
+                )),
+            )
+            .width(Fill),
+            button::labeled(
+                tr(lang, "label-select-add"),
+                None,
+                ButtonVariant::Tab {
+                    active: ui.select_op == photon_protocol::SelectionBooleanOp::Add,
+                },
+                Some(EditorMessage::EditorSetSelectOp(
+                    photon_protocol::SelectionBooleanOp::Add
+                )),
+            )
+            .width(Fill),
+            button::labeled(
+                tr(lang, "label-select-subtract"),
+                None,
+                ButtonVariant::Tab {
+                    active: ui.select_op == photon_protocol::SelectionBooleanOp::Subtract,
+                },
+                Some(EditorMessage::EditorSetSelectOp(
+                    photon_protocol::SelectionBooleanOp::Subtract
+                )),
+            )
+            .width(Fill),
+            button::labeled(
+                tr(lang, "label-select-intersect"),
+                None,
+                ButtonVariant::Tab {
+                    active: ui.select_op == photon_protocol::SelectionBooleanOp::Intersect,
+                },
+                Some(EditorMessage::EditorSetSelectOp(
+                    photon_protocol::SelectionBooleanOp::Intersect
+                )),
+            )
+            .width(Fill),
+        ]
+        .spacing(4);
+
+        let mut body = column![
+            sub_row,
+            kv_row(tr(lang, "label-select-mode"), String::new()),
+            op_tabs,
+        ]
+        .spacing(8);
+
+        if ui.tool.is_smart_group() {
+            if ui.tool == EditorTool::QuickSelect {
+                body = body
+                    .push(kv_row(
+                        tr(lang, "label-brush-size"),
+                        format!("{:.0} px", ui.quick_select_radius),
+                    ))
+                    .push(
+                        slider(
+                            4.0..=80.0,
+                            ui.quick_select_radius,
+                            EditorMessage::EditorSetQuickSelectRadius,
+                        )
+                        .step(1.0_f32)
+                        .style(slider_style),
+                    );
+            } else {
+                body = body
+                    .push(kv_row(
+                        tr(lang, "label-tolerance"),
+                        format!("{}", ui.wand_tolerance),
+                    ))
+                    .push(
+                        slider(0.0..=100.0, f32::from(ui.wand_tolerance), |v| {
+                            EditorMessage::EditorSetWandTolerance(v.round() as u8)
+                        })
+                        .step(1.0_f32)
+                        .style(slider_style),
+                    )
+                    .push(
+                        checkbox(ui.wand_contiguous)
+                            .label(tr(lang, "label-contiguous"))
+                            .on_toggle(|_| EditorMessage::EditorToggleWandContiguous),
+                    );
+            }
+            body = body.push(
+                checkbox(ui.select_sample_all)
+                    .label(tr(lang, "label-sample-all-layers"))
+                    .on_toggle(|_| EditorMessage::EditorToggleSelectSampleAll),
+            );
+        } else if !matches!(ui.tool, EditorTool::SingleRow | EditorTool::SingleCol) {
+            body = body
+                .push(kv_row(
+                    tr(lang, "label-feather"),
+                    format!("{:.0} px", ui.select_feather),
+                ))
+                .push(
+                    slider(
+                        0.0..=25.0,
+                        ui.select_feather,
+                        EditorMessage::EditorSetSelectFeather,
+                    )
+                    .step(1.0_f32)
+                    .style(slider_style),
+                )
+                .push(
+                    checkbox(ui.select_anti_alias)
+                        .label(tr(lang, "label-anti-alias"))
+                        .on_toggle(|_| EditorMessage::EditorToggleSelectAntiAlias),
+                );
+        }
+
+        return Some(section_card(tr(lang, ui.tool.label_key()), body));
     }
 
     match ui.tool {
@@ -1226,7 +1768,7 @@ fn build_tool_options_card<'a>(
                 BrushTip::Spray => tr(lang, "tip-spray"),
                 BrushTip::Pixel => tr(lang, "tip-pixel"),
             };
-            let mut tip_buttons: Vec<Element<'_, Message>> = BrushTip::ALL
+            let mut tip_buttons: Vec<Element<'_, EditorMessage>> = BrushTip::ALL
                 .into_iter()
                 .map(|tip| {
                     button::labeled(
@@ -1235,7 +1777,7 @@ fn build_tool_options_card<'a>(
                         ButtonVariant::Tab {
                             active: ui.brush_settings.tip == tip,
                         },
-                        Some(Message::EditorSetBrushTip(tip)),
+                        Some(EditorMessage::EditorSetBrushTip(tip)),
                     )
                     .width(Fill)
                     .into()
@@ -1244,61 +1786,286 @@ fn build_tool_options_card<'a>(
             let second_tips = tip_buttons.split_off(3);
             let tips_grid =
                 column![row(tip_buttons).spacing(4), row(second_tips).spacing(4),].spacing(4);
-            Some(section_card(
-                title,
-                column![
-                    kv_row(
-                        tr(lang, "label-brush-size"),
-                        format!("{:.0} px", ui.brush_radius)
-                    ),
-                    slider(1.0..=120.0, ui.brush_radius, Message::EditorSetBrushRadius)
+            let smoothing_label = |m: BrushSmoothingMode| match m {
+                BrushSmoothingMode::None => tr(lang, "smoothing-none"),
+                BrushSmoothingMode::Basic => tr(lang, "smoothing-basic"),
+                BrushSmoothingMode::Weighted => tr(lang, "smoothing-weighted"),
+                BrushSmoothingMode::Stabilizer => tr(lang, "smoothing-stabilizer"),
+            };
+            let mut smoothing_btns: Vec<Element<'_, EditorMessage>> = [
+                BrushSmoothingMode::None,
+                BrushSmoothingMode::Basic,
+                BrushSmoothingMode::Weighted,
+                BrushSmoothingMode::Stabilizer,
+            ]
+            .into_iter()
+            .map(|mode| {
+                button::labeled(
+                    smoothing_label(mode),
+                    None,
+                    ButtonVariant::Tab {
+                        active: ui.brush_settings.smoothing_mode == mode,
+                    },
+                    Some(EditorMessage::EditorSetBrushSmoothingMode(mode)),
+                )
+                .width(Fill)
+                .into()
+            })
+            .collect();
+            let smoothing_row2 = smoothing_btns.split_off(2);
+            let smoothing_grid = column![
+                row(smoothing_btns).spacing(4),
+                row(smoothing_row2).spacing(4)
+            ]
+            .spacing(4);
+            let mut col = column![
+                kv_row(
+                    tr(lang, "label-brush-size"),
+                    format!("{:.0} px", ui.brush_radius)
+                ),
+                slider(
+                    1.0..=120.0,
+                    ui.brush_radius,
+                    EditorMessage::EditorSetBrushRadius
+                )
+                .step(1.0_f32)
+                .style(slider_style),
+                kv_row(
+                    tr(lang, "label-brush-opacity"),
+                    format!("{:.0}%", ui.brush_opacity * 100.0)
+                ),
+                slider(
+                    0.05..=1.0,
+                    ui.brush_opacity,
+                    EditorMessage::EditorSetBrushOpacity
+                )
+                .step(0.05_f32)
+                .style(slider_style),
+                kv_row(
+                    tr(lang, "label-brush-hardness"),
+                    format!("{:.0}%", ui.brush_settings.hardness * 100.0)
+                ),
+                slider(
+                    0.0..=1.0,
+                    ui.brush_settings.hardness,
+                    EditorMessage::EditorSetBrushHardness
+                )
+                .step(0.05_f32)
+                .style(slider_style),
+                kv_row(
+                    tr(lang, "label-brush-flow"),
+                    format!("{:.0}%", ui.brush_settings.flow * 100.0)
+                ),
+                slider(
+                    0.05..=1.0,
+                    ui.brush_settings.flow,
+                    EditorMessage::EditorSetBrushFlow
+                )
+                .step(0.05_f32)
+                .style(slider_style),
+                kv_row(
+                    tr(lang, "label-brush-spacing"),
+                    format!("{:.0}%", ui.brush_settings.spacing * 100.0)
+                ),
+                slider(
+                    0.05..=1.0,
+                    ui.brush_settings.spacing,
+                    EditorMessage::EditorSetBrushSpacing
+                )
+                .step(0.05_f32)
+                .style(slider_style),
+                text(tr(lang, "label-brush-tip")).size(11),
+                tips_grid,
+                text(tr(lang, "label-brush-smoothing")).size(11),
+                smoothing_grid,
+            ]
+            .spacing(6);
+            if ui.brush_settings.smoothing_mode == BrushSmoothingMode::Stabilizer {
+                col = col
+                    .push(kv_row(
+                        tr(lang, "label-stabilizer-distance"),
+                        format!("{:.0} px", ui.brush_settings.stabilizer_distance),
+                    ))
+                    .push(
+                        slider(
+                            4.0..=100.0,
+                            ui.brush_settings.stabilizer_distance,
+                            EditorMessage::EditorSetStabilizerDistance,
+                        )
                         .step(1.0_f32)
                         .style(slider_style),
-                    kv_row(
-                        tr(lang, "label-brush-opacity"),
-                        format!("{:.0}%", ui.brush_opacity * 100.0)
-                    ),
-                    slider(0.05..=1.0, ui.brush_opacity, Message::EditorSetBrushOpacity)
-                        .step(0.05_f32)
+                    );
+            }
+            Some(section_card(title, col))
+        }
+        EditorTool::DrawLine
+        | EditorTool::DrawRect
+        | EditorTool::DrawEllipse
+        | EditorTool::DrawPolygon
+        | EditorTool::DrawPolyline
+        | EditorTool::BezierPen => {
+            let mut body = column![].spacing(8);
+            if ui.tool.is_shape_group() {
+                let mut sub_row = row![].spacing(4);
+                for sub in [
+                    EditorTool::DrawLine,
+                    EditorTool::DrawRect,
+                    EditorTool::DrawEllipse,
+                    EditorTool::DrawPolygon,
+                    EditorTool::DrawPolyline,
+                ] {
+                    sub_row = sub_row.push(with_tooltip_pos(
+                        button::icon_only(
+                            sub.icon(),
+                            ButtonVariant::Tab {
+                                active: ui.tool == sub,
+                            },
+                            Some(EditorMessage::EditorSelectTool(sub)),
+                        ),
+                        tr(lang, sub.label_key()),
+                        TooltipPosition::Top,
+                    ));
+                }
+                body = body.push(sub_row);
+            }
+            let fill_label = |m: ShapeFillMode| match m {
+                ShapeFillMode::Stroke => tr(lang, "shape-fill-stroke"),
+                ShapeFillMode::Fill => tr(lang, "shape-fill-fill"),
+                ShapeFillMode::StrokeAndFill => tr(lang, "shape-fill-stroke-and-fill"),
+            };
+            let fill_row = row([
+                ShapeFillMode::Stroke,
+                ShapeFillMode::Fill,
+                ShapeFillMode::StrokeAndFill,
+            ]
+            .into_iter()
+            .map(|m| {
+                button::labeled(
+                    fill_label(m),
+                    None,
+                    ButtonVariant::Tab {
+                        active: ui.shape_fill_mode == m,
+                    },
+                    Some(EditorMessage::EditorSetShapeFillMode(m)),
+                )
+                .width(Fill)
+                .into()
+            }))
+            .spacing(4);
+            body = body
+                .push(text(tr(lang, "label-shape-fill-mode")).size(11))
+                .push(fill_row)
+                .push(kv_row(
+                    tr(lang, "label-stroke-width"),
+                    format!("{:.0} px", ui.shape_stroke_width),
+                ))
+                .push(
+                    slider(
+                        1.0..=64.0,
+                        ui.shape_stroke_width,
+                        EditorMessage::EditorSetShapeStrokeWidth,
+                    )
+                    .step(1.0_f32)
+                    .style(slider_style),
+                );
+            Some(section_card(tr(lang, ui.tool.label_key()), body))
+        }
+        EditorTool::PaintBucket | EditorTool::Gradient => {
+            let sub_row = row([EditorTool::PaintBucket, EditorTool::Gradient]
+                .into_iter()
+                .map(|sub| {
+                    with_tooltip_pos(
+                        button::icon_only(
+                            sub.icon(),
+                            ButtonVariant::Tab {
+                                active: ui.tool == sub,
+                            },
+                            Some(EditorMessage::EditorSelectTool(sub)),
+                        ),
+                        tr(lang, sub.label_key()),
+                        TooltipPosition::Top,
+                    )
+                    .into()
+                }))
+            .spacing(4);
+            let mut body = column![sub_row].spacing(8);
+            if ui.tool == EditorTool::PaintBucket {
+                body = body
+                    .push(kv_row(
+                        tr(lang, "label-flood-fill-tolerance"),
+                        format!("{}", ui.flood_fill_tolerance),
+                    ))
+                    .push(
+                        slider(0.0..=255.0, f32::from(ui.flood_fill_tolerance), |v| {
+                            EditorMessage::EditorSetFloodFillTolerance(v.round() as u8)
+                        })
+                        .step(1.0_f32)
                         .style(slider_style),
-                    kv_row(
-                        tr(lang, "label-brush-hardness"),
-                        format!("{:.0}%", ui.brush_settings.hardness * 100.0)
-                    ),
-                    slider(
-                        0.0..=1.0,
-                        ui.brush_settings.hardness,
-                        Message::EditorSetBrushHardness
                     )
-                    .step(0.05_f32)
-                    .style(slider_style),
-                    kv_row(
-                        tr(lang, "label-brush-flow"),
-                        format!("{:.0}%", ui.brush_settings.flow * 100.0)
-                    ),
-                    slider(
-                        0.05..=1.0,
-                        ui.brush_settings.flow,
-                        Message::EditorSetBrushFlow
-                    )
-                    .step(0.05_f32)
-                    .style(slider_style),
-                    kv_row(
-                        tr(lang, "label-brush-spacing"),
-                        format!("{:.0}%", ui.brush_settings.spacing * 100.0)
-                    ),
-                    slider(
-                        0.05..=1.0,
-                        ui.brush_settings.spacing,
-                        Message::EditorSetBrushSpacing
-                    )
-                    .step(0.05_f32)
-                    .style(slider_style),
-                    text(tr(lang, "label-brush-tip")).size(11),
-                    tips_grid,
+                    .push(
+                        checkbox(ui.flood_fill_contiguous)
+                            .label(tr(lang, "label-flood-fill-contiguous"))
+                            .on_toggle(|_| EditorMessage::EditorToggleFloodFillContiguous),
+                    );
+            } else {
+                let kind_label = |k: GradientKind| match k {
+                    GradientKind::Linear => tr(lang, "gradient-linear"),
+                    GradientKind::Radial => tr(lang, "gradient-radial"),
+                    GradientKind::Conical => tr(lang, "gradient-conical"),
+                    GradientKind::Reflected => tr(lang, "gradient-reflected"),
+                };
+                let mut kind_btns: Vec<Element<'_, EditorMessage>> = [
+                    GradientKind::Linear,
+                    GradientKind::Radial,
+                    GradientKind::Conical,
+                    GradientKind::Reflected,
                 ]
-                .spacing(6),
-            ))
+                .into_iter()
+                .map(|k| {
+                    button::labeled(
+                        kind_label(k),
+                        None,
+                        ButtonVariant::Tab {
+                            active: ui.gradient_kind == k,
+                        },
+                        Some(EditorMessage::EditorSetGradientKind(k)),
+                    )
+                    .width(Fill)
+                    .into()
+                })
+                .collect();
+                let kind_row2 = kind_btns.split_off(2);
+                let kind_grid =
+                    column![row(kind_btns).spacing(4), row(kind_row2).spacing(4)].spacing(4);
+                let color_mode_row = row([
+                    GradientColorMode::FgToBg,
+                    GradientColorMode::FgToTransparent,
+                ]
+                .into_iter()
+                .map(|cm| {
+                    let key = match cm {
+                        GradientColorMode::FgToBg => "gradient-fg-bg",
+                        GradientColorMode::FgToTransparent => "gradient-fg-transparent",
+                    };
+                    button::labeled(
+                        tr(lang, key),
+                        None,
+                        ButtonVariant::Tab {
+                            active: ui.gradient_color_mode == cm,
+                        },
+                        Some(EditorMessage::EditorSetGradientColorMode(cm)),
+                    )
+                    .width(Fill)
+                    .into()
+                }))
+                .spacing(4);
+                body = body
+                    .push(text(tr(lang, "label-gradient-kind")).size(11))
+                    .push(kind_grid)
+                    .push(text(tr(lang, "label-gradient-color-mode")).size(11))
+                    .push(color_mode_row);
+            }
+            Some(section_card(tr(lang, ui.tool.label_key()), body))
         }
         EditorTool::Liquify => {
             let mode_label = |m: LiquifyMode| match m {
@@ -1309,7 +2076,7 @@ fn build_tool_options_card<'a>(
                 LiquifyMode::TwirlCcw => tr(lang, "liquify-twirl-ccw"),
                 LiquifyMode::Reconstruct => tr(lang, "liquify-reconstruct"),
             };
-            let mut mode_btns: Vec<Element<'_, Message>> = LiquifyMode::ALL
+            let mut mode_btns: Vec<Element<'_, EditorMessage>> = LiquifyMode::ALL
                 .into_iter()
                 .map(|m| {
                     button::labeled(
@@ -1318,7 +2085,7 @@ fn build_tool_options_card<'a>(
                         ButtonVariant::Tab {
                             active: ui.liquify_mode == m,
                         },
-                        Some(Message::EditorSetLiquifyMode(m)),
+                        Some(EditorMessage::EditorSetLiquifyMode(m)),
                     )
                     .width(Fill)
                     .into()
@@ -1343,7 +2110,7 @@ fn build_tool_options_card<'a>(
                     slider(
                         5.0..=150.0,
                         ui.liquify_radius,
-                        Message::EditorSetLiquifyRadius
+                        EditorMessage::EditorSetLiquifyRadius
                     )
                     .step(1.0_f32)
                     .style(slider_style),
@@ -1354,7 +2121,7 @@ fn build_tool_options_card<'a>(
                     slider(
                         0.05..=1.0,
                         ui.liquify_strength,
-                        Message::EditorSetLiquifyStrength
+                        EditorMessage::EditorSetLiquifyStrength
                     )
                     .step(0.05_f32)
                     .style(slider_style),
@@ -1387,7 +2154,7 @@ fn build_tool_options_card<'a>(
             column![
                 kv_row(tr(lang, "label-angle"), format!("{:.1}°", ui.rotate_angle)),
                 slider(-180.0..=180.0, ui.rotate_angle as f32, |v| {
-                    Message::EditorSetRotateAngle(f64::from(v))
+                    EditorMessage::EditorSetRotateAngle(f64::from(v))
                 })
                 .step(0.5_f32)
                 .style(slider_style),
@@ -1396,31 +2163,31 @@ fn build_tool_options_card<'a>(
                         "-45°",
                         None,
                         ButtonVariant::Ghost,
-                        Some(Message::EditorSetRotateAngle(-45.0)),
+                        Some(EditorMessage::EditorSetRotateAngle(-45.0)),
                     ),
                     button::labeled(
                         "-15°",
                         None,
                         ButtonVariant::Ghost,
-                        Some(Message::EditorSetRotateAngle(-15.0)),
+                        Some(EditorMessage::EditorSetRotateAngle(-15.0)),
                     ),
                     button::labeled(
                         "0°",
                         None,
                         ButtonVariant::Ghost,
-                        Some(Message::EditorSetRotateAngle(0.0)),
+                        Some(EditorMessage::EditorSetRotateAngle(0.0)),
                     ),
                     button::labeled(
                         "+15°",
                         None,
                         ButtonVariant::Ghost,
-                        Some(Message::EditorSetRotateAngle(15.0)),
+                        Some(EditorMessage::EditorSetRotateAngle(15.0)),
                     ),
                     button::labeled(
                         "+45°",
                         None,
                         ButtonVariant::Ghost,
-                        Some(Message::EditorSetRotateAngle(45.0)),
+                        Some(EditorMessage::EditorSetRotateAngle(45.0)),
                     ),
                 ]
                 .spacing(3),
@@ -1430,7 +2197,9 @@ fn build_tool_options_card<'a>(
                         ui.rotate_fill.map(rgb_to_color),
                         24.0,
                         18.0,
-                        Some(Message::OpenColorPicker(ColorPickerTarget::RotateFill)),
+                        Some(EditorMessage::OpenColorPicker(
+                            ColorPickerTarget::RotateFill
+                        )),
                     ),
                 ]
                 .align_y(Alignment::Center),
@@ -1439,7 +2208,8 @@ fn build_tool_options_card<'a>(
                         tr(lang, "action-apply-rotate"),
                         Some(Icon::Check),
                         ButtonVariant::Primary,
-                        (ui.rotate_angle.abs() > 0.01).then_some(Message::EditorApplyRotateAngle),
+                        (ui.rotate_angle.abs() > 0.01)
+                            .then_some(EditorMessage::EditorApplyRotateAngle),
                     )
                     .width(Fill),
                     tr(lang, "action-apply-rotate"),
@@ -1460,13 +2230,14 @@ fn build_tool_options_card<'a>(
             Some(section_card(
                 tr(lang, "tool-canvas-size"),
                 column![
-                    ui.canvas_dims.view(lang, Message::EditorCanvasDimAction),
+                    ui.canvas_dims
+                        .view(lang, EditorMessage::EditorCanvasDimAction),
                     kv_row(tr(lang, "label-delta"), delta_str),
                     row![
                         column![
                             text(tr(lang, "label-anchor")).size(11),
                             anchor_grid_3x3(ui.canvas_anchor.index(), |idx| {
-                                Message::EditorSetCanvasAnchor(CanvasAnchor::from_index(idx))
+                                EditorMessage::EditorSetCanvasAnchor(CanvasAnchor::from_index(idx))
                             }),
                         ]
                         .spacing(4),
@@ -1477,7 +2248,9 @@ fn build_tool_options_card<'a>(
                                 ui.canvas_fill.map(rgb_to_color),
                                 32.0,
                                 24.0,
-                                Some(Message::OpenColorPicker(ColorPickerTarget::CanvasSizeFill)),
+                                Some(EditorMessage::OpenColorPicker(
+                                    ColorPickerTarget::CanvasSizeFill
+                                )),
                             ),
                         ]
                         .spacing(4),
@@ -1488,7 +2261,7 @@ fn build_tool_options_card<'a>(
                             tr(lang, "action-canvas-size"),
                             Some(Icon::Check),
                             ButtonVariant::Primary,
-                            Some(Message::EditorApplyCanvasSize),
+                            Some(EditorMessage::EditorApplyCanvasSize),
                         )
                         .width(Fill),
                         tr(lang, "action-canvas-size"),
@@ -1515,10 +2288,10 @@ impl std::fmt::Display for BlendChoice {
 }
 
 fn build_layers_panel<'a>(
-    state: &'a PhotonGui,
+    state: EditorViewState<'a>,
     ed: &'a EditorState,
     lang: Language,
-) -> Element<'a, Message> {
+) -> Element<'a, EditorMessage> {
     let ui = &state.editor_ui;
     let active_layer = ed
         .layers
@@ -1571,7 +2344,7 @@ fn build_layers_panel<'a>(
 
         let blend_picker = with_tooltip_pos(
             pick_list(blend_options, selected_blend, move |choice: BlendChoice| {
-                Message::Dispatch(Command::EditorLayerSetProps {
+                EditorMessage::Dispatch(Command::EditorLayerSetProps {
                     id: layer_id,
                     name: None,
                     visible: None,
@@ -1626,7 +2399,7 @@ fn build_layers_panel<'a>(
             blend_picker,
             with_tooltip_pos(
                 slider(0.0..=1.0, layer.opacity, move |v| {
-                    Message::Dispatch(Command::EditorLayerSetProps {
+                    EditorMessage::Dispatch(Command::EditorLayerSetProps {
                         id: layer_id,
                         name: None,
                         visible: None,
@@ -1659,7 +2432,7 @@ fn build_layers_panel<'a>(
         props_col = props_col.push(opacity_row);
 
         if let Some(effect) = &layer.effect {
-            let effect_ctrl: Option<Element<'_, Message>> = match effect {
+            let effect_ctrl: Option<Element<'_, EditorMessage>> = match effect {
                 LayerEffect::Blur { radius } => Some(
                     row![
                         text(tr(lang, "label-radius"))
@@ -1668,7 +2441,7 @@ fn build_layers_panel<'a>(
                                 color: Some(PaletteTokens::for_theme(theme).text_muted),
                             }),
                         slider(1.0..=24.0, *radius, move |v| {
-                            Message::Dispatch(Command::EditorLayerUpdateEffect {
+                            EditorMessage::Dispatch(Command::EditorLayerUpdateEffect {
                                 id: layer_id,
                                 effect: LayerEffect::Blur { radius: v },
                             })
@@ -1690,7 +2463,7 @@ fn build_layers_panel<'a>(
                                 color: Some(PaletteTokens::for_theme(theme).text_muted),
                             }),
                         slider(0.0..=2.5, *amount, move |v| {
-                            Message::Dispatch(Command::EditorLayerUpdateEffect {
+                            EditorMessage::Dispatch(Command::EditorLayerUpdateEffect {
                                 id: layer_id,
                                 effect: LayerEffect::Sharpen { amount: v },
                             })
@@ -1720,7 +2493,7 @@ fn build_layers_panel<'a>(
                             tr(lang, "action-edit-effect"),
                             Some(Icon::Sliders),
                             ButtonVariant::Secondary,
-                            (!layer.locked).then_some(Message::EditorOpenAdjustPopup(tab)),
+                            (!layer.locked).then_some(EditorMessage::EditorOpenAdjustPopup(tab)),
                         )
                         .padding([3, 8])
                         .width(Fill)
@@ -1735,7 +2508,7 @@ fn build_layers_panel<'a>(
         }
 
         // Photoshop-style single Layer Mask quick controls for active layer
-        let mask_controls: Element<'_, Message> = if layer.has_mask {
+        let mask_controls: Element<'_, EditorMessage> = if layer.has_mask {
             row![
                 with_tooltip_pos(
                     button::labeled(
@@ -1751,10 +2524,12 @@ fn build_layers_panel<'a>(
                         ButtonVariant::Tab {
                             active: layer.editing_mask,
                         },
-                        Some(Message::Dispatch(Command::EditorLayerMaskSetEditing {
-                            id: layer_id,
-                            editing: !layer.editing_mask,
-                        })),
+                        Some(EditorMessage::Dispatch(
+                            Command::EditorLayerMaskSetEditing {
+                                id: layer_id,
+                                editing: !layer.editing_mask,
+                            }
+                        )),
                     )
                     .padding([3, 6])
                     .width(Fill),
@@ -1770,10 +2545,12 @@ fn build_layers_panel<'a>(
                     ButtonVariant::Tab {
                         active: layer.mask_enabled,
                     },
-                    Some(Message::Dispatch(Command::EditorLayerMaskSetEnabled {
-                        id: layer_id,
-                        enabled: !layer.mask_enabled,
-                    })),
+                    Some(EditorMessage::Dispatch(
+                        Command::EditorLayerMaskSetEnabled {
+                            id: layer_id,
+                            enabled: !layer.mask_enabled,
+                        }
+                    )),
                     tr(
                         lang,
                         if layer.mask_enabled {
@@ -1792,7 +2569,7 @@ fn build_layers_panel<'a>(
                     ButtonVariant::Tab {
                         active: layer.mask_linked,
                     },
-                    Some(Message::Dispatch(Command::EditorLayerMaskSetLinked {
+                    Some(EditorMessage::Dispatch(Command::EditorLayerMaskSetLinked {
                         id: layer_id,
                         linked: !layer.mask_linked,
                     })),
@@ -1808,25 +2585,25 @@ fn build_layers_panel<'a>(
                 button::compact_icon_tipped(
                     Icon::Swap,
                     ButtonVariant::Ghost,
-                    (!layer.locked).then_some(Message::Dispatch(Command::EditorLayerMaskInvert {
-                        id: layer_id,
-                    })),
+                    (!layer.locked).then_some(EditorMessage::Dispatch(
+                        Command::EditorLayerMaskInvert { id: layer_id }
+                    )),
                     tr(lang, "action-mask-invert"),
                 ),
                 button::compact_icon_tipped(
                     Icon::Check,
                     ButtonVariant::Ghost,
-                    (!layer.locked).then_some(Message::Dispatch(Command::EditorLayerMaskApply {
-                        id: layer_id,
-                    })),
+                    (!layer.locked).then_some(EditorMessage::Dispatch(
+                        Command::EditorLayerMaskApply { id: layer_id }
+                    )),
                     tr(lang, "action-mask-apply"),
                 ),
                 button::compact_icon_tipped(
                     Icon::Trash,
                     ButtonVariant::Ghost,
-                    (!layer.locked).then_some(Message::Dispatch(Command::EditorLayerMaskDelete {
-                        id: layer_id,
-                    })),
+                    (!layer.locked).then_some(EditorMessage::Dispatch(
+                        Command::EditorLayerMaskDelete { id: layer_id }
+                    )),
                     tr(lang, "action-mask-delete"),
                 ),
             ]
@@ -1839,10 +2616,12 @@ fn build_layers_panel<'a>(
                     tr(lang, "action-mask-add"),
                     Some(Icon::Mask),
                     ButtonVariant::Secondary,
-                    (!layer.locked).then_some(Message::Dispatch(Command::EditorLayerMaskAdd {
-                        id: layer_id,
-                        reveal_all: true,
-                    })),
+                    (!layer.locked).then_some(EditorMessage::Dispatch(
+                        Command::EditorLayerMaskAdd {
+                            id: layer_id,
+                            reveal_all: true,
+                        },
+                    )),
                 )
                 .padding([3, 8])
                 .width(Fill),
@@ -1878,12 +2657,12 @@ fn build_layers_panel<'a>(
         };
 
         let on_select = if is_active && layer.has_mask && layer.editing_mask {
-            Message::Dispatch(Command::EditorLayerMaskSetEditing {
+            EditorMessage::Dispatch(Command::EditorLayerMaskSetEditing {
                 id: layer.id,
                 editing: false,
             })
         } else {
-            Message::Dispatch(Command::EditorLayerSelect { id: layer.id })
+            EditorMessage::Dispatch(Command::EditorLayerSelect { id: layer.id })
         };
 
         let row_el = layer_row(LayerRowSpec {
@@ -1900,7 +2679,7 @@ fn build_layers_panel<'a>(
             mask_thumbnail: state.editor_mask_thumbs.get(&layer.id).cloned(),
             renaming: is_renaming.then_some(ui.layer_rename_input.as_str()),
             on_select,
-            on_toggle_visible: Message::Dispatch(Command::EditorLayerSetProps {
+            on_toggle_visible: EditorMessage::Dispatch(Command::EditorLayerSetProps {
                 id: layer.id,
                 name: None,
                 visible: Some(!layer.visible),
@@ -1910,7 +2689,7 @@ fn build_layers_panel<'a>(
                 offset_x: None,
                 offset_y: None,
             }),
-            on_toggle_lock: Message::Dispatch(Command::EditorLayerSetProps {
+            on_toggle_lock: EditorMessage::Dispatch(Command::EditorLayerSetProps {
                 id: layer.id,
                 name: None,
                 visible: None,
@@ -1920,35 +2699,35 @@ fn build_layers_panel<'a>(
                 offset_x: None,
                 offset_y: None,
             }),
-            on_toggle_mask_edit: layer.has_mask.then_some(Message::Dispatch(
+            on_toggle_mask_edit: layer.has_mask.then_some(EditorMessage::Dispatch(
                 Command::EditorLayerMaskSetEditing {
                     id: layer.id,
                     editing: !(is_active && layer.editing_mask),
                 },
             )),
-            on_toggle_mask_link: layer.has_mask.then_some(Message::Dispatch(
+            on_toggle_mask_link: layer.has_mask.then_some(EditorMessage::Dispatch(
                 Command::EditorLayerMaskSetLinked {
                     id: layer.id,
                     linked: !layer.mask_linked,
                 },
             )),
-            on_toggle_mask: (!layer.locked).then(|| {
+            on_toggle_mask: (!layer.locked).then_some({
                 if layer.has_mask {
-                    Message::Dispatch(Command::EditorLayerMaskDelete { id: layer.id })
+                    EditorMessage::Dispatch(Command::EditorLayerMaskDelete { id: layer.id })
                 } else {
-                    Message::Dispatch(Command::EditorLayerMaskAdd {
+                    EditorMessage::Dispatch(Command::EditorLayerMaskAdd {
                         id: layer.id,
                         reveal_all: true,
                     })
                 }
             }),
-            on_start_rename: Some(Message::EditorStartLayerRename(
+            on_start_rename: Some(EditorMessage::EditorStartLayerRename(
                 layer.id,
                 layer.name.clone(),
             )),
-            on_rename_input: Some(Box::new(Message::EditorLayerRenameChanged)),
-            on_rename_submit: Some(Message::EditorCommitLayerRename),
-            on_right_press: Some(Message::OpenLayerContextMenu { layer_id: layer.id }),
+            on_rename_input: Some(Box::new(EditorMessage::EditorLayerRenameChanged)),
+            on_rename_submit: Some(EditorMessage::EditorCommitLayerRename),
+            on_right_press: Some(EditorMessage::OpenLayerContextMenu { layer_id: layer.id }),
             visibility_tooltip: Some(tr(lang, "tooltip-layer-visibility")),
             lock_tooltip: Some(tr(lang, "tooltip-layer-lock")),
             mask_tooltip: Some(tr(lang, "tooltip-layer-mask")),
@@ -1978,7 +2757,7 @@ fn build_layers_panel<'a>(
                     button::compact_icon_tipped(
                         Icon::Close,
                         ButtonVariant::Ghost,
-                        Some(Message::EditorCancelLayerRename),
+                        Some(EditorMessage::EditorCancelLayerRename),
                         tr(lang, "action-cancel"),
                     ),
                 ]
@@ -2001,14 +2780,16 @@ fn build_layers_panel<'a>(
                     Icon::Eye
                 },
                 ButtonVariant::Ghost,
-                Some(Message::Dispatch(Command::EditorSetCanvasBackground {
-                    color: if is_bg_transparent {
-                        Some([255, 255, 255])
-                    } else {
-                        None
-                    },
-                    transparent: !is_bg_transparent,
-                })),
+                Some(EditorMessage::Dispatch(
+                    Command::EditorSetCanvasBackground {
+                        color: if is_bg_transparent {
+                            Some([255, 255, 255])
+                        } else {
+                            None
+                        },
+                        transparent: !is_bg_transparent,
+                    }
+                )),
                 tr(lang, "label-canvas-bg"),
             ),
             with_tooltip(
@@ -2016,7 +2797,7 @@ fn build_layers_panel<'a>(
                     ed.canvas_background.map(rgb_to_color),
                     22.0,
                     18.0,
-                    Some(Message::OpenColorPicker(
+                    Some(EditorMessage::OpenColorPicker(
                         ColorPickerTarget::CanvasBackground
                     )),
                 ),
@@ -2059,19 +2840,20 @@ fn build_layers_panel<'a>(
     let action_bar = layer_action_bar(vec![
         LayerActionButton::new(
             Icon::Plus,
-            Some(Message::ToggleMenu(ActiveMenu::EditorAddLayer)),
+            Some(EditorMessage::ToggleMenu(EditorMenuKind::AddLayer)),
         )
-        .active(state.active_menu == Some(ActiveMenu::EditorAddLayer))
+        .active(state.active_menu == Some(EditorMenuKind::AddLayer))
         .tooltip(tr(lang, "tooltip-layer-add")),
         LayerActionButton::new(
             Icon::Duplicate,
-            active_layer.map(|l| Message::Dispatch(Command::EditorLayerDuplicate { id: l.id })),
+            active_layer
+                .map(|l| EditorMessage::Dispatch(Command::EditorLayerDuplicate { id: l.id })),
         )
         .tooltip(tr(lang, "tooltip-layer-duplicate")),
         LayerActionButton::new(
             Icon::ArrowUp,
             active_layer.filter(|_| can_move_up).map(|l| {
-                Message::Dispatch(Command::EditorLayerReorder {
+                EditorMessage::Dispatch(Command::EditorLayerReorder {
                     id: l.id,
                     new_index: active_idx + 1,
                 })
@@ -2081,7 +2863,7 @@ fn build_layers_panel<'a>(
         LayerActionButton::new(
             Icon::ArrowDown,
             active_layer.filter(|_| can_move_down).map(|l| {
-                Message::Dispatch(Command::EditorLayerReorder {
+                EditorMessage::Dispatch(Command::EditorLayerReorder {
                     id: l.id,
                     new_index: active_idx - 1,
                 })
@@ -2092,19 +2874,19 @@ fn build_layers_panel<'a>(
             Icon::MergeDown,
             active_layer
                 .filter(|_| can_merge_down)
-                .map(|l| Message::Dispatch(Command::EditorLayerMergeDown { id: l.id })),
+                .map(|l| EditorMessage::Dispatch(Command::EditorLayerMergeDown { id: l.id })),
         )
         .tooltip(tr(lang, "tooltip-layer-merge-down")),
         LayerActionButton::new(
             Icon::Flatten,
-            (ed.layers.len() > 1).then_some(Message::Dispatch(Command::EditorLayerFlatten)),
+            (ed.layers.len() > 1).then_some(EditorMessage::Dispatch(Command::EditorLayerFlatten)),
         )
         .tooltip(tr(lang, "tooltip-layer-flatten")),
         LayerActionButton::new(
             Icon::Trash,
             active_layer
                 .filter(|_| can_delete)
-                .map(|l| Message::Dispatch(Command::EditorLayerDelete { id: l.id })),
+                .map(|l| EditorMessage::Dispatch(Command::EditorLayerDelete { id: l.id })),
         )
         .tooltip(tr(lang, "tooltip-layer-delete")),
     ]);
@@ -2121,7 +2903,7 @@ fn build_layers_panel<'a>(
     .into()
 }
 
-fn build_history_panel<'a>(ed: &'a EditorState, lang: Language) -> Element<'a, Message> {
+fn build_history_panel<'a>(ed: &'a EditorState, lang: Language) -> Element<'a, EditorMessage> {
     let mut col = column![].spacing(4);
     let at_original = ed.history.is_empty();
 
@@ -2132,7 +2914,7 @@ fn build_history_panel<'a>(ed: &'a EditorState, lang: Language) -> Element<'a, M
             ButtonVariant::Tab {
                 active: at_original,
             },
-            Some(Message::Dispatch(Command::EditorHistoryJump {
+            Some(EditorMessage::Dispatch(Command::EditorHistoryJump {
                 target_index: 0,
             })),
         )
@@ -2150,7 +2932,7 @@ fn build_history_panel<'a>(ed: &'a EditorState, lang: Language) -> Element<'a, M
                 } else {
                     ButtonVariant::Ghost
                 },
-                Some(Message::Dispatch(Command::EditorHistoryJump {
+                Some(EditorMessage::Dispatch(Command::EditorHistoryJump {
                     target_index: idx + 1,
                 })),
             )
@@ -2165,7 +2947,7 @@ fn build_history_panel<'a>(ed: &'a EditorState, lang: Language) -> Element<'a, M
                 format!("↷ {}. {}", target, tr_ui_text(lang, op)),
                 None,
                 ButtonVariant::Ghost,
-                Some(Message::Dispatch(Command::EditorHistoryJump {
+                Some(EditorMessage::Dispatch(Command::EditorHistoryJump {
                     target_index: target,
                 })),
             )
@@ -2192,7 +2974,7 @@ fn build_history_panel<'a>(ed: &'a EditorState, lang: Language) -> Element<'a, M
             Some(Icon::Reset),
             ButtonVariant::Secondary,
             ed.modified
-                .then_some(Message::Dispatch(Command::EditorReset)),
+                .then_some(EditorMessage::Dispatch(Command::EditorReset)),
         )
         .width(Fill),
         tr(lang, "tooltip-history-reset"),
@@ -2211,7 +2993,7 @@ pub fn build_color_picker_dialog<'a>(
     b: u8,
     hex: &'a str,
     transparent: bool,
-) -> DialogSpec<'a, Message> {
+) -> DialogSpec<'a, EditorMessage> {
     let allow_transparent = !matches!(
         target,
         ColorPickerTarget::Foreground | ColorPickerTarget::ViewportBackground
@@ -2238,7 +3020,7 @@ pub fn build_color_picker_dialog<'a>(
             Some(rgb_to_color(p)),
             22.0,
             22.0,
-            Some(Message::ColorPickerSetRgb(p[0], p[1], p[2])),
+            Some(EditorMessage::ColorPickerSetRgb(p[0], p[1], p[2])),
         ));
     }
 
@@ -2248,7 +3030,7 @@ pub fn build_color_picker_dialog<'a>(
             column![
                 text("Hex").size(TEXT_SIZE_CAPTION),
                 text_input("#000000", hex)
-                    .on_input(Message::ColorPickerHexChanged)
+                    .on_input(EditorMessage::ColorPickerHexChanged)
                     .size(TEXT_SIZE_CONTROL)
                     .padding([6, 8])
                     .style(input_style),
@@ -2259,11 +3041,20 @@ pub fn build_color_picker_dialog<'a>(
         .spacing(12)
         .align_y(Alignment::Center),
         kv_row("R", r.to_string()),
-        slider(0..=255, r, move |v| Message::ColorPickerSetRgb(v, g, b)).style(slider_style),
+        slider(0..=255, r, move |v| EditorMessage::ColorPickerSetRgb(
+            v, g, b
+        ))
+        .style(slider_style),
         kv_row("G", g.to_string()),
-        slider(0..=255, g, move |v| Message::ColorPickerSetRgb(r, v, b)).style(slider_style),
+        slider(0..=255, g, move |v| EditorMessage::ColorPickerSetRgb(
+            r, v, b
+        ))
+        .style(slider_style),
         kv_row("B", b.to_string()),
-        slider(0..=255, b, move |v| Message::ColorPickerSetRgb(r, g, v)).style(slider_style),
+        slider(0..=255, b, move |v| EditorMessage::ColorPickerSetRgb(
+            r, g, v
+        ))
+        .style(slider_style),
         preset_row,
     ]
     .spacing(8);
@@ -2273,7 +3064,7 @@ pub fn build_color_picker_dialog<'a>(
             checkbox(transparent)
                 .label(tr(lang, "label-transparent"))
                 .text_size(TEXT_SIZE_CONTROL)
-                .on_toggle(Message::ColorPickerToggleTransparent),
+                .on_toggle(EditorMessage::ColorPickerToggleTransparent),
         );
     }
 
@@ -2291,7 +3082,7 @@ pub fn build_color_picker_dialog<'a>(
         tr(lang, "dialog-cancel"),
         None,
         ButtonVariant::Ghost,
-        Some(Message::CloseDialog),
+        Some(EditorMessage::CloseDialog),
     ),]
     .spacing(6)
     .align_y(Alignment::Center);
@@ -2300,7 +3091,7 @@ pub fn build_color_picker_dialog<'a>(
             tr(lang, "action-reset"),
             Some(Icon::Reset),
             ButtonVariant::Ghost,
-            Some(Message::ResetViewportBackground),
+            Some(EditorMessage::ResetViewportBackground),
         ));
     }
     let footer = footer
@@ -2309,7 +3100,7 @@ pub fn build_color_picker_dialog<'a>(
             "OK",
             Some(Icon::Check),
             ButtonVariant::Primary,
-            Some(Message::ConfirmColorPicker),
+            Some(EditorMessage::ConfirmColorPicker),
         ));
 
     DialogSpec {
@@ -2318,8 +3109,8 @@ pub fn build_color_picker_dialog<'a>(
         width: 380.0,
         body: body.into(),
         footer: footer.into(),
-        on_close: Message::CloseDialog,
-        on_noop: Message::Noop,
+        on_close: EditorMessage::CloseDialog,
+        on_noop: EditorMessage::Noop,
     }
 }
 
@@ -2331,13 +3122,13 @@ pub fn build_export_dialog<'a>(
     max_edge: &'a str,
     metadata: bool,
     error: Option<&'a str>,
-) -> DialogSpec<'a, Message> {
+) -> DialogSpec<'a, EditorMessage> {
     let mut body = column![
         column![
             text(tr(lang, "label-export-file")).size(TEXT_SIZE_CONTROL),
             row![
                 text_input("/path/to/export.jpg", path)
-                    .on_input(Message::ExportPathChanged)
+                    .on_input(EditorMessage::ExportPathChanged)
                     .size(TEXT_SIZE_CONTROL)
                     .padding([7, 10])
                     .style(input_style)
@@ -2346,20 +3137,20 @@ pub fn build_export_dialog<'a>(
                     "…",
                     Some(Icon::FolderOpen),
                     ButtonVariant::Secondary,
-                    Some(Message::PickExportDialog),
+                    Some(EditorMessage::PickExportDialog),
                 ),
             ]
             .spacing(6),
         ]
         .spacing(4),
         kv_row(tr(lang, "label-quality"), format!("{quality}%")),
-        slider(10..=100, quality, Message::ExportQualityChanged)
+        slider(10..=100, quality, EditorMessage::ExportQualityChanged)
             .step(1_u8)
             .style(slider_style),
         column![
             text(tr(lang, "label-max-edge")).size(TEXT_SIZE_CONTROL),
             text_input(&tr(lang, "label-original-size"), max_edge)
-                .on_input(Message::ExportMaxEdgeChanged)
+                .on_input(EditorMessage::ExportMaxEdgeChanged)
                 .size(TEXT_SIZE_CONTROL)
                 .padding([7, 10])
                 .style(input_style),
@@ -2368,7 +3159,7 @@ pub fn build_export_dialog<'a>(
         checkbox(metadata)
             .label(tr(lang, "label-keep-metadata"))
             .text_size(TEXT_SIZE_CONTROL)
-            .on_toggle(Message::ExportMetadataToggled),
+            .on_toggle(EditorMessage::ExportMetadataToggled),
     ]
     .spacing(10);
 
@@ -2386,14 +3177,14 @@ pub fn build_export_dialog<'a>(
             tr(lang, "dialog-cancel"),
             None,
             ButtonVariant::Ghost,
-            Some(Message::CloseDialog),
+            Some(EditorMessage::CloseDialog),
         ),
         iced::widget::space::horizontal(),
         button::labeled(
             tr(lang, "action-export"),
             Some(Icon::Export),
             ButtonVariant::Primary,
-            Some(Message::ConfirmExport),
+            Some(EditorMessage::ConfirmExport),
         ),
     ]
     .align_y(Alignment::Center);
@@ -2404,8 +3195,8 @@ pub fn build_export_dialog<'a>(
         width: 460.0,
         body: body.into(),
         footer: footer.into(),
-        on_close: Message::CloseDialog,
-        on_noop: Message::Noop,
+        on_close: EditorMessage::CloseDialog,
+        on_noop: EditorMessage::Noop,
     }
 }
 
@@ -2419,14 +3210,16 @@ pub fn crop_uv_to_signed(uv: [f32; 4], img_w: u32, img_h: u32) -> (i32, i32, u32
     (x as i32, y as i32, x2 - x, y2 - y)
 }
 
-pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_, Message>> {
+pub fn build_editor_canvas_context_menu<'a>(
+    state: EditorViewState<'a>,
+) -> Option<Element<'a, EditorMessage>> {
     let ed = state.snapshot.meta.editor.as_ref()?;
     let lang = state.snapshot.meta.language;
     let entries = vec![
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-undo"),
-                Message::ContextMenuDispatch(Command::EditorUndo),
+                EditorMessage::ContextMenuDispatch(Command::EditorUndo),
             )
             .icon(Icon::Undo)
             .shortcut("Ctrl+Z")
@@ -2435,7 +3228,7 @@ pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_,
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-redo"),
-                Message::ContextMenuDispatch(Command::EditorRedo),
+                EditorMessage::ContextMenuDispatch(Command::EditorRedo),
             )
             .icon(Icon::Redo)
             .shortcut("Ctrl+Y")
@@ -2445,7 +3238,7 @@ pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_,
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-copy-image"),
-                Message::CopyImageToClipboard(None),
+                EditorMessage::CopyImageToClipboard(None),
             )
             .icon(Icon::Copy)
             .shortcut("Ctrl+Shift+C")
@@ -2454,7 +3247,7 @@ pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_,
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-layer-duplicate"),
-                Message::ContextMenuDispatch(Command::EditorLayerDuplicate {
+                EditorMessage::ContextMenuDispatch(Command::EditorLayerDuplicate {
                     id: ed.active_layer_id,
                 }),
             )
@@ -2465,7 +3258,7 @@ pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_,
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-adjustments"),
-                Message::EditorOpenAdjustPopup(AdjustmentPopupTab::ColorAndLight),
+                EditorMessage::EditorOpenAdjustPopup(AdjustmentPopupTab::ColorAndLight),
             )
             .icon(Icon::Sliders),
         ),
@@ -2473,7 +3266,7 @@ pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_,
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-rotate-left"),
-                Message::ContextMenuDispatch(Command::EditorRotate {
+                EditorMessage::ContextMenuDispatch(Command::EditorRotate {
                     degrees: -90,
                     target: ApplyTarget::WholeImage,
                 }),
@@ -2483,7 +3276,7 @@ pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_,
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-rotate-right"),
-                Message::ContextMenuDispatch(Command::EditorRotate {
+                EditorMessage::ContextMenuDispatch(Command::EditorRotate {
                     degrees: 90,
                     target: ApplyTarget::WholeImage,
                 }),
@@ -2493,7 +3286,7 @@ pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_,
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-flip-h"),
-                Message::ContextMenuDispatch(Command::EditorFlip {
+                EditorMessage::ContextMenuDispatch(Command::EditorFlip {
                     axis: FlipAxis::Horizontal,
                     target: ApplyTarget::WholeImage,
                 }),
@@ -2503,7 +3296,7 @@ pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_,
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-flip-v"),
-                Message::ContextMenuDispatch(Command::EditorFlip {
+                EditorMessage::ContextMenuDispatch(Command::EditorFlip {
                     axis: FlipAxis::Vertical,
                     target: ApplyTarget::WholeImage,
                 }),
@@ -2512,19 +3305,19 @@ pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_,
         ),
         MenuEntry::Separator,
         MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-crop"), Message::ToggleCropMode)
+            MenuItem::new(tr(lang, "action-crop"), EditorMessage::ToggleCropMode)
                 .icon(Icon::Crop)
                 .checked(state.crop_uv.is_some()),
         ),
         MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-resize"), Message::OpenResizeDialog)
+            MenuItem::new(tr(lang, "action-resize"), EditorMessage::OpenResizeDialog)
                 .icon(Icon::Resize)
                 .shortcut("Ctrl+R"),
         ),
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "tool-canvas-size"),
-                Message::EditorSelectTool(EditorTool::CanvasSize),
+                EditorMessage::EditorSelectTool(EditorTool::CanvasSize),
             )
             .icon(Icon::CanvasSize),
         ),
@@ -2532,7 +3325,7 @@ pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_,
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-fit"),
-                Message::Canvas(crate::shader_canvas::CanvasEvent::ResetFit),
+                EditorMessage::Canvas(photon_canvas::CanvasEvent::ResetFit),
             )
             .icon(Icon::Fit)
             .shortcut("F"),
@@ -2540,7 +3333,7 @@ pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_,
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-compare-original"),
-                Message::EditorCycleCompareMode,
+                EditorMessage::EditorCycleCompareMode,
             )
             .icon(Icon::Compare)
             .checked(state.editor_ui.compare_mode != CompareMode::Off),
@@ -2548,7 +3341,7 @@ pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_,
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "label-compare-side-by-side"),
-                Message::EditorSetCompareMode(CompareMode::SideBySide),
+                EditorMessage::EditorSetCompareMode(CompareMode::SideBySide),
             )
             .icon(Icon::ViewDouble)
             .checked(state.editor_ui.compare_mode == CompareMode::SideBySide),
@@ -2556,7 +3349,7 @@ pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_,
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-reset"),
-                Message::ContextMenuDispatch(Command::EditorReset),
+                EditorMessage::ContextMenuDispatch(Command::EditorReset),
             )
             .icon(Icon::Reset)
             .enabled(ed.modified),
@@ -2565,10 +3358,10 @@ pub fn build_editor_canvas_context_menu(state: &PhotonGui) -> Option<Element<'_,
     Some(menu_panel_entries(entries, 225.0))
 }
 
-pub fn build_editor_layer_context_menu(
-    state: &PhotonGui,
+pub fn build_editor_layer_context_menu<'a>(
+    state: EditorViewState<'a>,
     layer_id: u64,
-) -> Option<Element<'_, Message>> {
+) -> Option<Element<'a, EditorMessage>> {
     let ed = state.snapshot.meta.editor.as_ref()?;
     let stack_idx = ed.layers.iter().position(|l| l.id == layer_id)?;
     let layer = &ed.layers[stack_idx];
@@ -2584,14 +3377,14 @@ pub fn build_editor_layer_context_menu(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-layer-duplicate"),
-                Message::ContextMenuDispatch(Command::EditorLayerDuplicate { id: layer_id }),
+                EditorMessage::ContextMenuDispatch(Command::EditorLayerDuplicate { id: layer_id }),
             )
             .icon(Icon::Duplicate),
         ),
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-rename"),
-                Message::EditorStartLayerRename(layer_id, layer.name.clone()),
+                EditorMessage::EditorStartLayerRename(layer_id, layer.name.clone()),
             )
             .icon(Icon::Editor),
         ),
@@ -2599,7 +3392,7 @@ pub fn build_editor_layer_context_menu(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-layer-move-up"),
-                Message::ContextMenuDispatch(Command::EditorLayerReorder {
+                EditorMessage::ContextMenuDispatch(Command::EditorLayerReorder {
                     id: layer_id,
                     new_index: stack_idx + 1,
                 }),
@@ -2610,7 +3403,7 @@ pub fn build_editor_layer_context_menu(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-layer-move-down"),
-                Message::ContextMenuDispatch(Command::EditorLayerReorder {
+                EditorMessage::ContextMenuDispatch(Command::EditorLayerReorder {
                     id: layer_id,
                     new_index: stack_idx.saturating_sub(1),
                 }),
@@ -2621,7 +3414,7 @@ pub fn build_editor_layer_context_menu(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-layer-merge-down"),
-                Message::ContextMenuDispatch(Command::EditorLayerMergeDown { id: layer_id }),
+                EditorMessage::ContextMenuDispatch(Command::EditorLayerMergeDown { id: layer_id }),
             )
             .icon(Icon::MergeDown)
             .enabled(can_merge_down),
@@ -2629,7 +3422,7 @@ pub fn build_editor_layer_context_menu(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-layer-flatten"),
-                Message::ContextMenuDispatch(Command::EditorLayerFlatten),
+                EditorMessage::ContextMenuDispatch(Command::EditorLayerFlatten),
             )
             .icon(Icon::Flatten)
             .enabled(can_flatten),
@@ -2649,7 +3442,7 @@ pub fn build_editor_layer_context_menu(
                             "action-mask-edit"
                         },
                     ),
-                    Message::ContextMenuDispatch(Command::EditorLayerMaskSetEditing {
+                    EditorMessage::ContextMenuDispatch(Command::EditorLayerMaskSetEditing {
                         id: layer_id,
                         editing: !layer.editing_mask,
                     }),
@@ -2667,7 +3460,7 @@ pub fn build_editor_layer_context_menu(
                             "action-mask-enable"
                         },
                     ),
-                    Message::ContextMenuDispatch(Command::EditorLayerMaskSetEnabled {
+                    EditorMessage::ContextMenuDispatch(Command::EditorLayerMaskSetEnabled {
                         id: layer_id,
                         enabled: !layer.mask_enabled,
                     }),
@@ -2681,7 +3474,9 @@ pub fn build_editor_layer_context_menu(
             MenuEntry::Item(
                 MenuItem::new(
                     tr(lang, "action-mask-invert"),
-                    Message::ContextMenuDispatch(Command::EditorLayerMaskInvert { id: layer_id }),
+                    EditorMessage::ContextMenuDispatch(Command::EditorLayerMaskInvert {
+                        id: layer_id,
+                    }),
                 )
                 .icon(Icon::Swap)
                 .enabled(!layer.locked),
@@ -2689,7 +3484,9 @@ pub fn build_editor_layer_context_menu(
             MenuEntry::Item(
                 MenuItem::new(
                     tr(lang, "action-mask-apply"),
-                    Message::ContextMenuDispatch(Command::EditorLayerMaskApply { id: layer_id }),
+                    EditorMessage::ContextMenuDispatch(Command::EditorLayerMaskApply {
+                        id: layer_id,
+                    }),
                 )
                 .icon(Icon::Check)
                 .enabled(!layer.locked),
@@ -2697,7 +3494,9 @@ pub fn build_editor_layer_context_menu(
             MenuEntry::Item(
                 MenuItem::new(
                     tr(lang, "action-mask-delete"),
-                    Message::ContextMenuDispatch(Command::EditorLayerMaskDelete { id: layer_id }),
+                    EditorMessage::ContextMenuDispatch(Command::EditorLayerMaskDelete {
+                        id: layer_id,
+                    }),
                 )
                 .icon(Icon::Trash)
                 .enabled(!layer.locked),
@@ -2709,7 +3508,7 @@ pub fn build_editor_layer_context_menu(
             MenuEntry::Item(
                 MenuItem::new(
                     tr(lang, "action-mask-add"),
-                    Message::ContextMenuDispatch(Command::EditorLayerMaskAdd {
+                    EditorMessage::ContextMenuDispatch(Command::EditorLayerMaskAdd {
                         id: layer_id,
                         reveal_all: true,
                     }),
@@ -2732,7 +3531,7 @@ pub fn build_editor_layer_context_menu(
                         "action-layer-show"
                     },
                 ),
-                Message::ContextMenuDispatch(Command::EditorLayerSetProps {
+                EditorMessage::ContextMenuDispatch(Command::EditorLayerSetProps {
                     id: layer_id,
                     name: None,
                     visible: Some(!layer.visible),
@@ -2759,7 +3558,7 @@ pub fn build_editor_layer_context_menu(
                         "action-layer-lock"
                     },
                 ),
-                Message::ContextMenuDispatch(Command::EditorLayerSetProps {
+                EditorMessage::ContextMenuDispatch(Command::EditorLayerSetProps {
                     id: layer_id,
                     name: None,
                     visible: None,
@@ -2779,7 +3578,7 @@ pub fn build_editor_layer_context_menu(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-layer-delete"),
-                Message::ContextMenuDispatch(Command::EditorLayerDelete { id: layer_id }),
+                EditorMessage::ContextMenuDispatch(Command::EditorLayerDelete { id: layer_id }),
             )
             .icon(Icon::Trash)
             .enabled(can_delete),
@@ -2789,7 +3588,7 @@ pub fn build_editor_layer_context_menu(
     Some(menu_panel_entries(entries, 220.0))
 }
 
-pub(crate) fn build_editor_add_layer_menu(state: &PhotonGui) -> Element<'_, Message> {
+pub fn build_editor_add_layer_menu<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMessage> {
     let lang = state.snapshot.meta.language;
     let next_idx = state
         .snapshot
@@ -2801,7 +3600,7 @@ pub(crate) fn build_editor_add_layer_menu(state: &PhotonGui) -> Element<'_, Mess
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-layer-add-paint"),
-                Message::Dispatch(Command::EditorLayerAdd {
+                EditorMessage::Dispatch(Command::EditorLayerAdd {
                     name: format!("Layer {next_idx}"),
                 }),
             )
@@ -2812,7 +3611,7 @@ pub(crate) fn build_editor_add_layer_menu(state: &PhotonGui) -> Element<'_, Mess
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "filter-blur"),
-                Message::Dispatch(Command::EditorLayerAddEffect {
+                EditorMessage::Dispatch(Command::EditorLayerAddEffect {
                     name: tr(lang, "filter-blur"),
                     effect: LayerEffect::Blur { radius: 4.0 },
                 }),
@@ -2822,7 +3621,7 @@ pub(crate) fn build_editor_add_layer_menu(state: &PhotonGui) -> Element<'_, Mess
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "filter-sharpen"),
-                Message::Dispatch(Command::EditorLayerAddEffect {
+                EditorMessage::Dispatch(Command::EditorLayerAddEffect {
                     name: tr(lang, "filter-sharpen"),
                     effect: LayerEffect::Sharpen { amount: 0.8 },
                 }),
@@ -2832,7 +3631,7 @@ pub(crate) fn build_editor_add_layer_menu(state: &PhotonGui) -> Element<'_, Mess
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "filter-invert"),
-                Message::Dispatch(Command::EditorLayerAddEffect {
+                EditorMessage::Dispatch(Command::EditorLayerAddEffect {
                     name: tr(lang, "filter-invert"),
                     effect: LayerEffect::Invert,
                 }),
@@ -2842,7 +3641,7 @@ pub(crate) fn build_editor_add_layer_menu(state: &PhotonGui) -> Element<'_, Mess
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "filter-desaturate"),
-                Message::Dispatch(Command::EditorLayerAddEffect {
+                EditorMessage::Dispatch(Command::EditorLayerAddEffect {
                     name: tr(lang, "filter-desaturate"),
                     effect: LayerEffect::Desaturate,
                 }),
@@ -2852,7 +3651,7 @@ pub(crate) fn build_editor_add_layer_menu(state: &PhotonGui) -> Element<'_, Mess
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "filter-sepia"),
-                Message::Dispatch(Command::EditorLayerAddEffect {
+                EditorMessage::Dispatch(Command::EditorLayerAddEffect {
                     name: tr(lang, "filter-sepia"),
                     effect: LayerEffect::Sepia,
                 }),
@@ -2864,7 +3663,7 @@ pub(crate) fn build_editor_add_layer_menu(state: &PhotonGui) -> Element<'_, Mess
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "menu-filter-color"),
-                Message::Dispatch(Command::EditorLayerAddEffect {
+                EditorMessage::Dispatch(Command::EditorLayerAddEffect {
                     name: tr(lang, "menu-filter-color"),
                     effect: LayerEffect::ColorLight(ColorAdjustments::default()),
                 }),
@@ -2874,7 +3673,7 @@ pub(crate) fn build_editor_add_layer_menu(state: &PhotonGui) -> Element<'_, Mess
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "menu-filter-hsv"),
-                Message::Dispatch(Command::EditorLayerAddEffect {
+                EditorMessage::Dispatch(Command::EditorLayerAddEffect {
                     name: tr(lang, "menu-filter-hsv"),
                     effect: LayerEffect::Hsv(HsvAdjustment::default()),
                 }),
@@ -2884,7 +3683,7 @@ pub(crate) fn build_editor_add_layer_menu(state: &PhotonGui) -> Element<'_, Mess
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "menu-filter-balance"),
-                Message::Dispatch(Command::EditorLayerAddEffect {
+                EditorMessage::Dispatch(Command::EditorLayerAddEffect {
                     name: tr(lang, "menu-filter-balance"),
                     effect: LayerEffect::ColorBalance(ColorBalanceAdjustment::default()),
                 }),
@@ -2894,7 +3693,7 @@ pub(crate) fn build_editor_add_layer_menu(state: &PhotonGui) -> Element<'_, Mess
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "menu-filter-curves"),
-                Message::Dispatch(Command::EditorLayerAddEffect {
+                EditorMessage::Dispatch(Command::EditorLayerAddEffect {
                     name: tr(lang, "menu-filter-curves"),
                     effect: LayerEffect::Curves(CurvesAdjustment::default()),
                 }),

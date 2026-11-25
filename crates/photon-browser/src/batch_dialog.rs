@@ -21,23 +21,21 @@ use photon_ui::theme::{
 };
 use photon_ui::tooltip::{TooltipPosition, with_tooltip_pos};
 
-use crate::app::{DesktopDialogId, Message, PhotonGui, default_window_state_for};
+use photon_dialogs::{DialogEvent, DialogWindowState};
+
+#[derive(Debug, Clone)]
+pub enum BatchDialogAction<Id> {
+    Msg(BatchDialogMsg),
+    Close,
+    DialogEvent(DialogEvent<Id>),
+    Noop,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchDialogKind {
     Resize,
     Crop,
     Convert,
-}
-
-impl BatchDialogKind {
-    pub const fn dialog_id(self) -> DesktopDialogId {
-        match self {
-            Self::Resize => DesktopDialogId::BatchResize,
-            Self::Crop => DesktopDialogId::BatchCrop,
-            Self::Convert => DesktopDialogId::BatchConvert,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -464,44 +462,65 @@ impl BatchDialogState {
     }
 }
 
-pub fn build_batch_resize_dialog<'a>(
-    state: &'a PhotonGui,
+pub fn build_batch_resize_dialog<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
+    snapshot: &'a UiStateSnapshot,
     batch: &'a BatchDialogState,
+    id: Id,
+    defaults: DialogWindowState,
     theme: &iced::Theme,
-) -> ManagedDialogSpec<'a, DesktopDialogId, Message> {
-    build_batch_dialog_for_kind(BatchDialogKind::Resize, state, batch, theme)
+) -> ManagedDialogSpec<'a, Id, BatchDialogAction<Id>> {
+    build_batch_dialog_for_kind(
+        BatchDialogKind::Resize,
+        snapshot,
+        batch,
+        id,
+        defaults,
+        theme,
+    )
 }
 
-pub fn build_batch_crop_dialog<'a>(
-    state: &'a PhotonGui,
+pub fn build_batch_crop_dialog<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
+    snapshot: &'a UiStateSnapshot,
     batch: &'a BatchDialogState,
+    id: Id,
+    defaults: DialogWindowState,
     theme: &iced::Theme,
-) -> ManagedDialogSpec<'a, DesktopDialogId, Message> {
-    build_batch_dialog_for_kind(BatchDialogKind::Crop, state, batch, theme)
+) -> ManagedDialogSpec<'a, Id, BatchDialogAction<Id>> {
+    build_batch_dialog_for_kind(BatchDialogKind::Crop, snapshot, batch, id, defaults, theme)
 }
 
-pub fn build_batch_convert_dialog<'a>(
-    state: &'a PhotonGui,
+pub fn build_batch_convert_dialog<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
+    snapshot: &'a UiStateSnapshot,
     batch: &'a BatchDialogState,
+    id: Id,
+    defaults: DialogWindowState,
     theme: &iced::Theme,
-) -> ManagedDialogSpec<'a, DesktopDialogId, Message> {
-    build_batch_dialog_for_kind(BatchDialogKind::Convert, state, batch, theme)
+) -> ManagedDialogSpec<'a, Id, BatchDialogAction<Id>> {
+    build_batch_dialog_for_kind(
+        BatchDialogKind::Convert,
+        snapshot,
+        batch,
+        id,
+        defaults,
+        theme,
+    )
 }
 
-fn build_batch_dialog_for_kind<'a>(
+fn build_batch_dialog_for_kind<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
     kind: BatchDialogKind,
-    state: &'a PhotonGui,
+    snapshot: &'a UiStateSnapshot,
     batch: &'a BatchDialogState,
+    id: Id,
+    defaults: DialogWindowState,
     theme: &iced::Theme,
-) -> ManagedDialogSpec<'a, DesktopDialogId, Message> {
-    let lang = state.snapshot.meta.language;
-    let selected_img_count = state
-        .snapshot
+) -> ManagedDialogSpec<'a, Id, BatchDialogAction<Id>> {
+    let lang = snapshot.meta.language;
+    let selected_img_count = snapshot
         .entries
         .iter()
-        .filter(|e| e.is_image && state.snapshot.meta.selection.contains(&e.path))
+        .filter(|e| e.is_image && snapshot.meta.selection.contains(&e.path))
         .count();
-    let folder_img_count = state.snapshot.entries.iter().filter(|e| e.is_image).count();
+    let folder_img_count = snapshot.entries.iter().filter(|e| e.is_image).count();
 
     let source_section = container(
         column![
@@ -524,7 +543,7 @@ fn build_batch_dialog_for_kind<'a>(
                         active: batch.use_selection,
                     },
                     (selected_img_count > 0)
-                        .then_some(Message::BatchDialog(BatchDialogMsg::UseSelection(true))),
+                        .then_some(BatchDialogAction::Msg(BatchDialogMsg::UseSelection(true))),
                 ),
                 button::labeled(
                     format!("{} ({folder_img_count})", tr(lang, "batch-source-folder")),
@@ -532,7 +551,7 @@ fn build_batch_dialog_for_kind<'a>(
                     ButtonVariant::Tab {
                         active: !batch.use_selection,
                     },
-                    Some(Message::BatchDialog(BatchDialogMsg::UseSelection(false))),
+                    Some(BatchDialogAction::Msg(BatchDialogMsg::UseSelection(false))),
                 ),
             ]
             .spacing(6),
@@ -543,7 +562,7 @@ fn build_batch_dialog_for_kind<'a>(
     .width(Fill)
     .style(card_style);
 
-    let op_section: Element<'a, Message> = match kind {
+    let op_section: Element<'a, BatchDialogAction<Id>> = match kind {
         BatchDialogKind::Resize => build_batch_resize_section(lang, batch),
         BatchDialogKind::Crop => build_batch_crop_section(lang, batch),
         BatchDialogKind::Convert => build_batch_convert_section(lang, batch),
@@ -565,7 +584,9 @@ fn build_batch_dialog_for_kind<'a>(
                 ButtonVariant::Tab {
                     active: batch.beside_originals,
                 },
-                Some(Message::BatchDialog(BatchDialogMsg::BesideOriginals(true))),
+                Some(BatchDialogAction::Msg(BatchDialogMsg::BesideOriginals(
+                    true
+                ))),
             ),
             button::labeled(
                 tr(lang, "batch-output-folder"),
@@ -573,7 +594,9 @@ fn build_batch_dialog_for_kind<'a>(
                 ButtonVariant::Tab {
                     active: !batch.beside_originals,
                 },
-                Some(Message::BatchDialog(BatchDialogMsg::BesideOriginals(false))),
+                Some(BatchDialogAction::Msg(BatchDialogMsg::BesideOriginals(
+                    false
+                ))),
             ),
         ]
         .spacing(6),
@@ -584,7 +607,7 @@ fn build_batch_dialog_for_kind<'a>(
         output_col = output_col.push(
             row![
                 text_input("/path/to/output", &batch.output_folder)
-                    .on_input(|v| Message::BatchDialog(BatchDialogMsg::OutputFolderChanged(v)))
+                    .on_input(|v| BatchDialogAction::Msg(BatchDialogMsg::OutputFolderChanged(v)))
                     .padding([6, 8])
                     .size(TEXT_SIZE_CONTROL)
                     .style(input_style)
@@ -593,7 +616,7 @@ fn build_batch_dialog_for_kind<'a>(
                     button::icon_only(
                         Icon::FolderOpen,
                         ButtonVariant::Secondary,
-                        Some(Message::BatchDialog(BatchDialogMsg::PickOutputFolder)),
+                        Some(BatchDialogAction::Msg(BatchDialogMsg::PickOutputFolder)),
                     ),
                     tr(lang, "batch-output-folder"),
                     TooltipPosition::Top,
@@ -616,7 +639,7 @@ fn build_batch_dialog_for_kind<'a>(
                         }
                     }),
                 text_input("_edited", &batch.suffix)
-                    .on_input(|v| Message::BatchDialog(BatchDialogMsg::SuffixChanged(v)))
+                    .on_input(|v| BatchDialogAction::Msg(BatchDialogMsg::SuffixChanged(v)))
                     .padding([6, 8])
                     .size(TEXT_SIZE_CONTROL)
                     .style(input_style),
@@ -627,7 +650,7 @@ fn build_batch_dialog_for_kind<'a>(
                 checkbox(batch.overwrite)
                     .label(tr(lang, "batch-overwrite"))
                     .text_size(TEXT_SIZE_CONTROL)
-                    .on_toggle(|v| Message::BatchDialog(BatchDialogMsg::OverwriteToggled(v))),
+                    .on_toggle(|v| BatchDialogAction::Msg(BatchDialogMsg::OverwriteToggled(v))),
             )
             .padding([16, 0]),
         ]
@@ -663,7 +686,7 @@ fn build_batch_dialog_for_kind<'a>(
                 tr(lang, "dialog-cancel"),
                 None,
                 ButtonVariant::Ghost,
-                Some(Message::CloseDialog),
+                Some(BatchDialogAction::Close),
             ),
             tr(lang, "tooltip-dialog-close"),
             TooltipPosition::Top,
@@ -674,7 +697,7 @@ fn build_batch_dialog_for_kind<'a>(
                 tr(lang, "batch-run"),
                 Some(Icon::Check),
                 ButtonVariant::Primary,
-                can_run.then_some(Message::BatchDialog(BatchDialogMsg::Confirm)),
+                can_run.then_some(BatchDialogAction::Msg(BatchDialogMsg::Confirm)),
             ),
             tr(lang, "batch-run"),
             TooltipPosition::Top,
@@ -682,7 +705,6 @@ fn build_batch_dialog_for_kind<'a>(
     ]
     .align_y(Alignment::Center);
 
-    let id = kind.dialog_id();
     let title = match kind {
         BatchDialogKind::Resize => tr(lang, "batch-resize-title"),
         BatchDialogKind::Crop => tr(lang, "batch-crop-title"),
@@ -693,7 +715,7 @@ fn build_batch_dialog_for_kind<'a>(
         button::icon_only(
             Icon::Close,
             ButtonVariant::Ghost,
-            Some(Message::CloseDialog),
+            Some(BatchDialogAction::Close),
         ),
         tr(lang, "tooltip-dialog-close"),
         TooltipPosition::Left,
@@ -703,7 +725,7 @@ fn build_batch_dialog_for_kind<'a>(
         id,
         open: true,
         title,
-        defaults: default_window_state_for(id),
+        defaults,
         resizable: true,
         draggable: true,
         overlay: OverlayMode::default(),
@@ -711,16 +733,16 @@ fn build_batch_dialog_for_kind<'a>(
         footer: Some(footer.into()),
         close_button: Some(close_btn),
         style: dialog_style_for_theme(theme),
-        on_event: Box::new(Message::DialogEvent),
-        on_close: Message::CloseDialog,
-        on_noop: Message::Noop,
+        on_event: Box::new(BatchDialogAction::DialogEvent),
+        on_close: BatchDialogAction::Close,
+        on_noop: BatchDialogAction::Noop,
     }
 }
 
-fn build_batch_resize_section<'a>(
+fn build_batch_resize_section<'a, Id: Clone + 'a>(
     lang: photon_protocol::Language,
     batch: &'a BatchDialogState,
-) -> Element<'a, Message> {
+) -> Element<'a, BatchDialogAction<Id>> {
     let grid = dimension_ratio_grid(DimensionRatioSpec {
         width_label: tr(lang, "label-width"),
         height_label: tr(lang, "label-height"),
@@ -735,32 +757,36 @@ fn build_batch_resize_section<'a>(
         lock_width: batch.resize_lock_width,
         lock_height: batch.resize_lock_height,
         lock_ratio: batch.resize_lock_ratio,
-        on_width_change: Box::new(|v| Message::BatchDialog(BatchDialogMsg::ResizeWidthChanged(v))),
-        on_height_change: Box::new(|v| {
-            Message::BatchDialog(BatchDialogMsg::ResizeHeightChanged(v))
+        on_width_change: Box::new(|v| {
+            BatchDialogAction::Msg(BatchDialogMsg::ResizeWidthChanged(v))
         }),
-        on_ratio_change: Box::new(|v| Message::BatchDialog(BatchDialogMsg::ResizeRatioChanged(v))),
-        on_unit_change: Box::new(|u| Message::BatchDialog(BatchDialogMsg::ResizeUnitChanged(u))),
-        on_dpi_change: Box::new(|d| Message::BatchDialog(BatchDialogMsg::ResizeDpiChanged(d))),
-        on_toggle_lock_width: Message::BatchDialog(BatchDialogMsg::ResizeToggleLockWidth),
-        on_toggle_lock_height: Message::BatchDialog(BatchDialogMsg::ResizeToggleLockHeight),
-        on_toggle_lock_ratio: Message::BatchDialog(BatchDialogMsg::ResizeToggleLockRatio),
+        on_height_change: Box::new(|v| {
+            BatchDialogAction::Msg(BatchDialogMsg::ResizeHeightChanged(v))
+        }),
+        on_ratio_change: Box::new(|v| {
+            BatchDialogAction::Msg(BatchDialogMsg::ResizeRatioChanged(v))
+        }),
+        on_unit_change: Box::new(|u| BatchDialogAction::Msg(BatchDialogMsg::ResizeUnitChanged(u))),
+        on_dpi_change: Box::new(|d| BatchDialogAction::Msg(BatchDialogMsg::ResizeDpiChanged(d))),
+        on_toggle_lock_width: BatchDialogAction::Msg(BatchDialogMsg::ResizeToggleLockWidth),
+        on_toggle_lock_height: BatchDialogAction::Msg(BatchDialogMsg::ResizeToggleLockHeight),
+        on_toggle_lock_ratio: BatchDialogAction::Msg(BatchDialogMsg::ResizeToggleLockRatio),
         ratio_presets: vec![
             (
                 "1:1".to_owned(),
-                Message::BatchDialog(BatchDialogMsg::ResizeApplyRatioPreset(1.0)),
+                BatchDialogAction::Msg(BatchDialogMsg::ResizeApplyRatioPreset(1.0)),
             ),
             (
                 "4:3".to_owned(),
-                Message::BatchDialog(BatchDialogMsg::ResizeApplyRatioPreset(4.0 / 3.0)),
+                BatchDialogAction::Msg(BatchDialogMsg::ResizeApplyRatioPreset(4.0 / 3.0)),
             ),
             (
                 "3:2".to_owned(),
-                Message::BatchDialog(BatchDialogMsg::ResizeApplyRatioPreset(1.5)),
+                BatchDialogAction::Msg(BatchDialogMsg::ResizeApplyRatioPreset(1.5)),
             ),
             (
                 "16:9".to_owned(),
-                Message::BatchDialog(BatchDialogMsg::ResizeApplyRatioPreset(16.0 / 9.0)),
+                BatchDialogAction::Msg(BatchDialogMsg::ResizeApplyRatioPreset(16.0 / 9.0)),
             ),
         ],
     });
@@ -772,7 +798,7 @@ fn build_batch_resize_section<'a>(
             ButtonVariant::Tab {
                 active: batch.resize_mode == ResizeMode::Stretch,
             },
-            Some(Message::BatchDialog(BatchDialogMsg::ResizeModeChanged(
+            Some(BatchDialogAction::Msg(BatchDialogMsg::ResizeModeChanged(
                 ResizeMode::Stretch,
             ))),
         ),
@@ -782,7 +808,7 @@ fn build_batch_resize_section<'a>(
             ButtonVariant::Tab {
                 active: batch.resize_mode == ResizeMode::Cover,
             },
-            Some(Message::BatchDialog(BatchDialogMsg::ResizeModeChanged(
+            Some(BatchDialogAction::Msg(BatchDialogMsg::ResizeModeChanged(
                 ResizeMode::Cover,
             ))),
         ),
@@ -792,7 +818,7 @@ fn build_batch_resize_section<'a>(
             ButtonVariant::Tab {
                 active: batch.resize_mode == ResizeMode::Pad,
             },
-            Some(Message::BatchDialog(BatchDialogMsg::ResizeModeChanged(
+            Some(BatchDialogAction::Msg(BatchDialogMsg::ResizeModeChanged(
                 ResizeMode::Pad,
             ))),
         ),
@@ -833,28 +859,28 @@ fn build_batch_resize_section<'a>(
     .into()
 }
 
-fn filter_tab<'a>(
+fn filter_tab<'a, Id: Clone + 'a>(
     label: &'static str,
     filter: ResizeFilter,
     active_filter: ResizeFilter,
-) -> Element<'a, Message> {
+) -> Element<'a, BatchDialogAction<Id>> {
     button::labeled(
         label,
         None,
         ButtonVariant::Tab {
             active: filter == active_filter,
         },
-        Some(Message::BatchDialog(BatchDialogMsg::ResizeFilterChanged(
+        Some(BatchDialogAction::Msg(BatchDialogMsg::ResizeFilterChanged(
             filter,
         ))),
     )
     .into()
 }
 
-fn build_batch_crop_section<'a>(
+fn build_batch_crop_section<'a, Id: Clone + 'a>(
     lang: photon_protocol::Language,
     batch: &'a BatchDialogState,
-) -> Element<'a, Message> {
+) -> Element<'a, BatchDialogAction<Id>> {
     let unit_row = row![
         button::labeled(
             "%",
@@ -862,7 +888,7 @@ fn build_batch_crop_section<'a>(
             ButtonVariant::Tab {
                 active: batch.crop_unit == BatchCropUnit::Percent,
             },
-            Some(Message::BatchDialog(BatchDialogMsg::CropUnitChanged(
+            Some(BatchDialogAction::Msg(BatchDialogMsg::CropUnitChanged(
                 BatchCropUnit::Percent,
             ))),
         ),
@@ -872,7 +898,7 @@ fn build_batch_crop_section<'a>(
             ButtonVariant::Tab {
                 active: batch.crop_unit == BatchCropUnit::Pixels,
             },
-            Some(Message::BatchDialog(BatchDialogMsg::CropUnitChanged(
+            Some(BatchDialogAction::Msg(BatchDialogMsg::CropUnitChanged(
                 BatchCropUnit::Pixels,
             ))),
         ),
@@ -881,27 +907,27 @@ fn build_batch_crop_section<'a>(
 
     let dims_row = row![
         labeled_small_input("W", &batch.crop_w_str, |v| {
-            Message::BatchDialog(BatchDialogMsg::CropWChanged(v))
+            BatchDialogAction::Msg(BatchDialogMsg::CropWChanged(v))
         }),
         labeled_small_input("H", &batch.crop_h_str, |v| {
-            Message::BatchDialog(BatchDialogMsg::CropHChanged(v))
+            BatchDialogAction::Msg(BatchDialogMsg::CropHChanged(v))
         }),
     ]
     .spacing(8);
 
     let xy_row = row![
         labeled_small_input("X", &batch.crop_x_str, |v| {
-            Message::BatchDialog(BatchDialogMsg::CropXChanged(v))
+            BatchDialogAction::Msg(BatchDialogMsg::CropXChanged(v))
         }),
         labeled_small_input("Y", &batch.crop_y_str, |v| {
-            Message::BatchDialog(BatchDialogMsg::CropYChanged(v))
+            BatchDialogAction::Msg(BatchDialogMsg::CropYChanged(v))
         }),
     ]
     .spacing(8);
 
     let anchor_idx = batch.crop_anchor.map(CanvasAnchor::index).unwrap_or(4);
     let anchor_grid = anchor_grid_3x3(anchor_idx, |idx| {
-        Message::BatchDialog(BatchDialogMsg::CropAnchorChanged(Some(
+        BatchDialogAction::Msg(BatchDialogMsg::CropAnchorChanged(Some(
             CanvasAnchor::from_index(idx),
         )))
     });
@@ -916,7 +942,7 @@ fn build_batch_crop_section<'a>(
                 ButtonVariant::Tab {
                     active: batch.crop_anchor.is_none(),
                 },
-                Some(Message::BatchDialog(BatchDialogMsg::CropAnchorChanged(
+                Some(BatchDialogAction::Msg(BatchDialogMsg::CropAnchorChanged(
                     None
                 ))),
             ),
@@ -969,11 +995,11 @@ fn build_batch_crop_section<'a>(
     .into()
 }
 
-fn crop_ratio_chip<'a>(
+fn crop_ratio_chip<'a, Id: Clone + 'a>(
     label: &'static str,
     ratio: Option<f64>,
     current: Option<f64>,
-) -> Element<'a, Message> {
+) -> Element<'a, BatchDialogAction<Id>> {
     let active = match (ratio, current) {
         (None, None) => true,
         (Some(a), Some(b)) => (a - b).abs() < 0.01,
@@ -983,17 +1009,17 @@ fn crop_ratio_chip<'a>(
         label,
         None,
         ButtonVariant::Tab { active },
-        Some(Message::BatchDialog(BatchDialogMsg::CropRatioChanged(
+        Some(BatchDialogAction::Msg(BatchDialogMsg::CropRatioChanged(
             ratio,
         ))),
     )
     .into()
 }
 
-fn build_batch_convert_section<'a>(
+fn build_batch_convert_section<'a, Id: Clone + 'a>(
     lang: photon_protocol::Language,
     batch: &'a BatchDialogState,
-) -> Element<'a, Message> {
+) -> Element<'a, BatchDialogAction<Id>> {
     let mut row1 = row![].spacing(4);
     let mut row2 = row![].spacing(4);
     for (idx, fmt) in BatchImageFormat::ALL.iter().copied().enumerate() {
@@ -1003,9 +1029,9 @@ fn build_batch_convert_section<'a>(
             ButtonVariant::Tab {
                 active: batch.convert_format == fmt,
             },
-            Some(Message::BatchDialog(BatchDialogMsg::ConvertFormatChanged(
-                fmt,
-            ))),
+            Some(BatchDialogAction::Msg(
+                BatchDialogMsg::ConvertFormatChanged(fmt),
+            )),
         );
         if idx < 4 {
             row1 = row1.push(btn);
@@ -1040,7 +1066,7 @@ fn build_batch_convert_section<'a>(
                     text(format!("{}%", batch.convert_quality)).size(TEXT_SIZE_CONTROL),
                 ],
                 slider(1..=100, batch.convert_quality, |q| {
-                    Message::BatchDialog(BatchDialogMsg::ConvertQualityChanged(q))
+                    BatchDialogAction::Msg(BatchDialogMsg::ConvertQualityChanged(q))
                 })
                 .style(slider_style),
             ]
@@ -1055,11 +1081,11 @@ fn build_batch_convert_section<'a>(
         .into()
 }
 
-fn labeled_small_input<'a>(
+fn labeled_small_input<'a, M: Clone + 'a>(
     label: &'static str,
     val: &'a str,
-    on_input: impl Fn(String) -> Message + 'a,
-) -> Element<'a, Message> {
+    on_input: impl Fn(String) -> M + 'a,
+) -> Element<'a, M> {
     column![
         text(label).size(TEXT_SIZE_CAPTION).style(|theme| {
             let t = PaletteTokens::for_theme(theme);

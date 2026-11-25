@@ -10,6 +10,10 @@ members = [
     "crates/photon-ipc",
     "crates/photon-ui",
     "crates/photon-panels",
+    "crates/photon-canvas",
+    "crates/photon-browser",
+    "crates/photon-viewer",
+    "crates/photon-editor",
     "crates/photon-cli",
     "crates/photon-desktop",
 ]
@@ -30,6 +34,10 @@ photon-dialogs = { path = "crates/photon-dialogs" }
 photon-ipc = { path = "crates/photon-ipc" }
 photon-ui = { path = "crates/photon-ui" }
 photon-panels = { path = "crates/photon-panels" }
+photon-canvas = { path = "crates/photon-canvas" }
+photon-browser = { path = "crates/photon-browser" }
+photon-viewer = { path = "crates/photon-viewer" }
+photon-editor = { path = "crates/photon-editor" }
 
 clap = { version = "4", features = ["derive", "env"] }
 fluent-templates = "0.15"

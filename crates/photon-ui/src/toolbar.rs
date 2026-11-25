@@ -33,10 +33,67 @@ impl<M> WorkspaceTab<M> {
     }
 }
 
+/// Responsive layout mode for the workspace switcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceSwitcherMode {
+    Full,
+    CompactIcons,
+    Dropdown,
+}
+
+/// Canonical responsive breakpoints for [`WorkspaceSwitcherMode`] based on window width.
+pub fn workspace_switcher_mode(window_width: f32) -> WorkspaceSwitcherMode {
+    if window_width >= 1120.0 {
+        WorkspaceSwitcherMode::Full
+    } else if window_width >= 820.0 {
+        WorkspaceSwitcherMode::CompactIcons
+    } else {
+        WorkspaceSwitcherMode::Dropdown
+    }
+}
+
 /// Segmented Browser / Viewer / Editor workspace switcher with uniform control height
 /// and optional tooltips.
 pub fn workspace_switcher<'a, M: Clone + 'a>(tabs: Vec<WorkspaceTab<M>>) -> Element<'a, M> {
     workspace_switcher_compact(tabs, false)
+}
+
+/// Responsive workspace switcher supporting full segmented tabs, compact icon-only tabs,
+/// and a single-button dropdown trigger.
+pub fn workspace_switcher_responsive<'a, M: Clone + 'a>(
+    tabs: Vec<WorkspaceTab<M>>,
+    mode: WorkspaceSwitcherMode,
+    menu_open: bool,
+    on_toggle_menu: Option<M>,
+) -> Element<'a, M> {
+    match mode {
+        WorkspaceSwitcherMode::Full => workspace_switcher_compact(tabs, false),
+        WorkspaceSwitcherMode::CompactIcons => workspace_switcher_compact(tabs, true),
+        WorkspaceSwitcherMode::Dropdown => {
+            let active_tab = tabs.iter().find(|t| t.active).or_else(|| tabs.first());
+            let icon_color = menu_open.then_some(Color::WHITE);
+            let mut icons_row = row![].spacing(4).align_y(Alignment::Center);
+            if let Some(tab) = active_tab {
+                icons_row = icons_row.push(icons::render(tab.icon, 16.0, icon_color));
+            }
+            icons_row = icons_row.push(icons::render(Icon::ChevronDown, 12.0, icon_color));
+
+            let content = container(icons_row)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center);
+            let mut b = iced_button(content)
+                .height(Length::Fixed(TOOLBAR_CONTROL_HEIGHT))
+                .padding([0, 8])
+                .style(button::style_for(ButtonVariant::Tab { active: menu_open }));
+            if let Some(msg) = on_toggle_menu {
+                b = b.on_press(msg);
+            }
+            let tip =
+                active_tab.and_then(|tab| tab.tooltip.clone().or_else(|| Some(tab.label.clone())));
+            workspace_switcher_pill(with_optional_tooltip(b, tip, TooltipPosition::Bottom))
+        }
+    }
 }
 
 /// Segmented Browser / Viewer / Editor workspace switcher with optional compact icon-only mode.
@@ -76,7 +133,11 @@ pub fn workspace_switcher_compact<'a, M: Clone + 'a>(
             ));
         }
     }
-    container(r)
+    workspace_switcher_pill(r.into())
+}
+
+fn workspace_switcher_pill<'a, M: 'a>(content: Element<'a, M>) -> Element<'a, M> {
+    container(content)
         .padding(3)
         .style(|theme| {
             let t = PaletteTokens::for_theme(theme);
@@ -178,5 +239,45 @@ mod tests {
         let _legacy: Element<'_, u8> = workspace_switcher(make_tabs());
         let _full: Element<'_, u8> = workspace_switcher_compact(make_tabs(), false);
         let _compact: Element<'_, u8> = workspace_switcher_compact(make_tabs(), true);
+    }
+
+    #[test]
+    fn workspace_switcher_responsive_builds_all_modes() {
+        let make_tabs = || {
+            vec![
+                WorkspaceTab::new("Browser", Icon::Browser, true, 1u8)
+                    .tooltip("Browser Workspace (Ctrl+1)"),
+                WorkspaceTab::new("Viewer", Icon::Viewer, false, 2u8)
+                    .tooltip("Viewer Workspace (Ctrl+2)"),
+                WorkspaceTab::new("Editor", Icon::Editor, false, 3u8),
+            ]
+        };
+
+        let _full: Element<'_, u8> = workspace_switcher_responsive(
+            make_tabs(),
+            WorkspaceSwitcherMode::Full,
+            false,
+            Some(99),
+        );
+        let _compact: Element<'_, u8> = workspace_switcher_responsive(
+            make_tabs(),
+            WorkspaceSwitcherMode::CompactIcons,
+            false,
+            Some(99),
+        );
+        let _dropdown_closed: Element<'_, u8> = workspace_switcher_responsive(
+            make_tabs(),
+            WorkspaceSwitcherMode::Dropdown,
+            false,
+            Some(99),
+        );
+        let _dropdown_open: Element<'_, u8> =
+            workspace_switcher_responsive(make_tabs(), WorkspaceSwitcherMode::Dropdown, true, None);
+        let _dropdown_empty: Element<'_, u8> = workspace_switcher_responsive(
+            Vec::<WorkspaceTab<u8>>::new(),
+            WorkspaceSwitcherMode::Dropdown,
+            false,
+            Some(99),
+        );
     }
 }

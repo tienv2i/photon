@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ApplyTarget, BatchOperation, BatchOutput, BatchSource, BlendMode, BrushSettings, CanvasAnchor,
-    ClientKind, Language, LayerEffect, LayoutState, LiquifyMode, LiveStrokeKind, MoveDirection,
-    PROTOCOL_VERSION, ResizeMode, Theme, TranslateSettings, TranslationBlock, Workspace,
-    default_half_f32, default_one_f32, default_opaque_alpha,
+    ClientKind, DrawShapeKind, GradientColorMode, GradientKind, Language, LayerEffect, LayoutState,
+    LiquifyMode, LiveStrokeKind, MoveDirection, PROTOCOL_VERSION, ResizeMode, SelectionBooleanOp,
+    SelectionModifyOp, SelectionShape, ShapeFillMode, Theme, TranslateSettings, TranslationBlock,
+    VectorPathNode, Workspace, default_half_f32, default_one_f32, default_opaque_alpha,
 };
 
 fn default_protocol() -> u32 {
@@ -257,6 +258,32 @@ pub enum Command {
         #[serde(default = "default_true")]
         commit: bool,
     },
+    EditorDrawShape {
+        kind: DrawShapeKind,
+        #[serde(default)]
+        points: Vec<[f32; 2]>,
+        #[serde(default)]
+        nodes: Vec<VectorPathNode>,
+        #[serde(default)]
+        fill_mode: ShapeFillMode,
+        #[serde(default)]
+        closed: bool,
+    },
+    EditorFloodFill {
+        x: u32,
+        y: u32,
+        tolerance: u8,
+        #[serde(default = "default_true")]
+        contiguous: bool,
+    },
+    EditorDrawGradient {
+        start: [f32; 2],
+        end: [f32; 2],
+        #[serde(default)]
+        kind: GradientKind,
+        #[serde(default)]
+        color_mode: GradientColorMode,
+    },
     EditorLayerAdd {
         #[serde(default)]
         name: String,
@@ -356,6 +383,27 @@ pub enum Command {
         #[serde(default = "default_half_f32")]
         strength: f32,
     },
+    EditorSelectAll,
+    EditorDeselect,
+    EditorReselect,
+    EditorSelectInvert,
+    EditorSelectShape {
+        shape: SelectionShape,
+        #[serde(default)]
+        op: SelectionBooleanOp,
+    },
+    EditorSelectModify {
+        op: SelectionModifyOp,
+    },
+    EditorSelectToggleQuickMask,
+    EditorSelectFromLayerAlpha {
+        #[serde(default)]
+        op: SelectionBooleanOp,
+    },
+    EditorSelectionToMask,
+    EditorSelectionClearPixels,
+    EditorSelectionDuplicateLayer,
+    EditorCropToSelection,
     BatchRun {
         operation: BatchOperation,
         source: BatchSource,
@@ -480,6 +528,9 @@ impl Command {
             Self::EditorLiveStrokeBegin { .. } => "editor_live_stroke_begin",
             Self::EditorLiveStrokeStep { .. } => "editor_live_stroke_step",
             Self::EditorLiveStrokeEnd { .. } => "editor_live_stroke_end",
+            Self::EditorDrawShape { .. } => "editor_draw_shape",
+            Self::EditorFloodFill { .. } => "editor_flood_fill",
+            Self::EditorDrawGradient { .. } => "editor_draw_gradient",
             Self::EditorLayerAdd { .. } => "editor_layer_add",
             Self::EditorLayerAddEffect { .. } => "editor_layer_add_effect",
             Self::EditorLayerUpdateEffect { .. } => "editor_layer_update_effect",
@@ -501,6 +552,18 @@ impl Command {
             Self::EditorLayerMaskSetEditing { .. } => "editor_layer_mask_set_editing",
             Self::EditorLayerMaskSetLinked { .. } => "editor_layer_mask_set_linked",
             Self::EditorLiquifyStroke { .. } => "editor_liquify_stroke",
+            Self::EditorSelectAll => "editor_select_all",
+            Self::EditorDeselect => "editor_deselect",
+            Self::EditorReselect => "editor_reselect",
+            Self::EditorSelectInvert => "editor_select_invert",
+            Self::EditorSelectShape { .. } => "editor_select_shape",
+            Self::EditorSelectModify { .. } => "editor_select_modify",
+            Self::EditorSelectToggleQuickMask => "editor_select_toggle_quick_mask",
+            Self::EditorSelectFromLayerAlpha { .. } => "editor_select_from_layer_alpha",
+            Self::EditorSelectionToMask => "editor_selection_to_mask",
+            Self::EditorSelectionClearPixels => "editor_selection_clear_pixels",
+            Self::EditorSelectionDuplicateLayer => "editor_selection_duplicate_layer",
+            Self::EditorCropToSelection => "editor_crop_to_selection",
             Self::BatchRun { .. } => "batch_run",
             Self::BatchCancel => "batch_cancel",
             Self::AddFavorite { .. } => "add_favorite",

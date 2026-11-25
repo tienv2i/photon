@@ -10,10 +10,10 @@ use std::time::{Instant, UNIX_EPOCH};
 use photon_image::{EditOp, EditorDocument, ImageError, LayerOperation};
 use photon_protocol::{
     ApplyTarget, BatchSource, BatchState, ColorAdjustments, ColorBalanceAdjustment, Command,
-    CommandResponse, CommandStatus, Crumb, CurvesAdjustment, EditorState, Entry, HsvAdjustment,
-    IMAGE_EXTENSIONS, LayoutState, ProtocolError, Query, RuntimeStatus, SelectionInfo,
-    TaskRunStatus, TaskSnapshot, UiStateMeta, UiStateSnapshot, UiText, UiTreeSnapshot, Workspace,
-    protocol_schemas,
+    CommandResponse, CommandStatus, Crumb, CurvesAdjustment, EditorSelectionSummary, EditorState,
+    Entry, HsvAdjustment, IMAGE_EXTENSIONS, LayoutState, ProtocolError, Query, RuntimeStatus,
+    SelectionInfo, TaskRunStatus, TaskSnapshot, UiStateMeta, UiStateSnapshot, UiText,
+    UiTreeSnapshot, Workspace, protocol_schemas,
 };
 use photon_storage::journal::now_ms;
 use photon_storage::logging::current_boot_id;
@@ -313,6 +313,13 @@ impl Core {
                     canvas_background: doc.stack().background,
                     original_revision: doc.original_revision,
                     adjustments: doc.latest_color_adjustments(),
+                    selection: EditorSelectionSummary {
+                        has_selection: doc.selection().has_selection(),
+                        bounds: doc.selection().bounds,
+                        quick_mask_active: doc.selection().quick_mask_active,
+                        can_reselect: doc.selection().can_reselect(),
+                        selection_revision: doc.selection_revision,
+                    },
                 }
             }),
             status: self.status.clone(),
@@ -965,6 +972,59 @@ impl Core {
                 };
                 Ok((ui, None))
             }
+            Command::EditorDrawShape {
+                kind,
+                points,
+                nodes,
+                fill_mode,
+                closed,
+            } => self.apply_editor_op(
+                EditOp::DrawShape {
+                    kind: *kind,
+                    points: points.clone(),
+                    nodes: nodes.clone(),
+                    fill_mode: *fill_mode,
+                    closed: *closed,
+                    color: [0, 0, 0],
+                    radius: 3.0,
+                    opacity: 1.0,
+                    brush: photon_protocol::BrushSettings::default(),
+                },
+                ApplyTarget::ActiveLayer,
+            ),
+            Command::EditorFloodFill {
+                x,
+                y,
+                tolerance,
+                contiguous,
+            } => self.apply_editor_op(
+                EditOp::FloodFill {
+                    x: *x,
+                    y: *y,
+                    tolerance: *tolerance,
+                    contiguous: *contiguous,
+                    color: [0, 0, 0],
+                    opacity: 1.0,
+                },
+                ApplyTarget::ActiveLayer,
+            ),
+            Command::EditorDrawGradient {
+                start,
+                end,
+                kind,
+                color_mode,
+            } => self.apply_editor_op(
+                EditOp::DrawGradient {
+                    start: *start,
+                    end: *end,
+                    kind: *kind,
+                    color_mode: *color_mode,
+                    fg_color: [0, 0, 0],
+                    bg_color: [255, 255, 255],
+                    opacity: 1.0,
+                },
+                ApplyTarget::ActiveLayer,
+            ),
             Command::EditorLayerAdd { name } => {
                 self.apply_layer_op(LayerOperation::AddEmpty { name: name.clone() })
             }
@@ -1103,6 +1163,66 @@ impl Core {
                 },
                 ApplyTarget::ActiveLayer,
             ),
+            Command::EditorSelectAll => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.select_all();
+                Ok((None, None))
+            }
+            Command::EditorDeselect => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.deselect();
+                Ok((None, None))
+            }
+            Command::EditorReselect => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.reselect();
+                Ok((None, None))
+            }
+            Command::EditorSelectInvert => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.invert_selection();
+                Ok((None, None))
+            }
+            Command::EditorSelectShape { shape, op } => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.select_shape(shape, *op);
+                Ok((None, None))
+            }
+            Command::EditorSelectModify { op } => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.modify_selection(*op);
+                Ok((None, None))
+            }
+            Command::EditorSelectToggleQuickMask => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.toggle_quick_mask();
+                Ok((None, None))
+            }
+            Command::EditorSelectFromLayerAlpha { op } => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.select_from_layer_alpha(*op);
+                Ok((None, None))
+            }
+            Command::EditorSelectionToMask => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.selection_to_mask().map_err(map_image_err)?;
+                Ok((None, None))
+            }
+            Command::EditorSelectionClearPixels => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.clear_selected_pixels().map_err(map_image_err)?;
+                Ok((None, None))
+            }
+            Command::EditorSelectionDuplicateLayer => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.duplicate_selection_to_layer().map_err(map_image_err)?;
+                Ok((None, None))
+            }
+            Command::EditorCropToSelection => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.crop_to_selection().map_err(map_image_err)?;
+                Ok((None, None))
+            }
             Command::BatchRun {
                 operation,
                 source,

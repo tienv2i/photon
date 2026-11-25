@@ -7,7 +7,7 @@ use photon_protocol::{
 };
 
 use crate::app::ActiveContextMenu;
-use crate::editor_view::{AdjustmentPopupTab, CompareMode, EditorTool, EditorUiState};
+use photon_editor::{AdjustmentPopupTab, CompareMode, EditorTool, EditorUiState};
 
 pub struct ViewerUiPresentation {
     pub view_mode: ViewerViewMode,
@@ -791,6 +791,52 @@ pub fn build_ui_tree(
                 ("editor.tool.pointer", "tool-pointer", EditorTool::Pointer),
                 ("editor.tool.hand", "tool-hand", EditorTool::Hand),
                 ("editor.tool.zoom", "tool-zoom", EditorTool::Zoom),
+                (
+                    "editor.tool.marquee_rect",
+                    "tool-marquee-rect",
+                    EditorTool::MarqueeRect,
+                ),
+                (
+                    "editor.tool.marquee_ellipse",
+                    "tool-marquee-ellipse",
+                    EditorTool::MarqueeEllipse,
+                ),
+                (
+                    "editor.tool.single_row",
+                    "tool-single-row",
+                    EditorTool::SingleRow,
+                ),
+                (
+                    "editor.tool.single_col",
+                    "tool-single-col",
+                    EditorTool::SingleCol,
+                ),
+                ("editor.tool.lasso", "tool-lasso", EditorTool::Lasso),
+                (
+                    "editor.tool.polygon_lasso",
+                    "tool-polygon-lasso",
+                    EditorTool::PolygonLasso,
+                ),
+                (
+                    "editor.tool.magnetic_lasso",
+                    "tool-magnetic-lasso",
+                    EditorTool::MagneticLasso,
+                ),
+                (
+                    "editor.tool.bezier_select",
+                    "tool-bezier-select",
+                    EditorTool::BezierSelect,
+                ),
+                (
+                    "editor.tool.quick_select",
+                    "tool-quick-select",
+                    EditorTool::QuickSelect,
+                ),
+                (
+                    "editor.tool.magic_wand",
+                    "tool-magic-wand",
+                    EditorTool::MagicWand,
+                ),
                 ("editor.tool.brush", "tool-brush", EditorTool::Brush),
                 ("editor.tool.eraser", "tool-eraser", EditorTool::Eraser),
                 ("editor.tool.liquify", "tool-liquify", EditorTool::Liquify),
@@ -809,6 +855,46 @@ pub fn build_ui_tree(
                     "editor.tool.rotate_angle",
                     "tool-rotate-angle",
                     EditorTool::RotateAngle,
+                ),
+                (
+                    "editor.tool.draw_line",
+                    "tool-draw-line",
+                    EditorTool::DrawLine,
+                ),
+                (
+                    "editor.tool.draw_rect",
+                    "tool-draw-rect",
+                    EditorTool::DrawRect,
+                ),
+                (
+                    "editor.tool.draw_ellipse",
+                    "tool-draw-ellipse",
+                    EditorTool::DrawEllipse,
+                ),
+                (
+                    "editor.tool.draw_polygon",
+                    "tool-draw-polygon",
+                    EditorTool::DrawPolygon,
+                ),
+                (
+                    "editor.tool.draw_polyline",
+                    "tool-draw-polyline",
+                    EditorTool::DrawPolyline,
+                ),
+                (
+                    "editor.tool.bezier_pen",
+                    "tool-bezier-pen",
+                    EditorTool::BezierPen,
+                ),
+                (
+                    "editor.tool.paint_bucket",
+                    "tool-paint-bucket",
+                    EditorTool::PaintBucket,
+                ),
+                (
+                    "editor.tool.gradient",
+                    "tool-gradient",
+                    EditorTool::Gradient,
                 ),
             ] {
                 widgets.push(SemanticWidgetNode {
@@ -984,6 +1070,16 @@ pub fn build_ui_tree(
                 id: "editor.menu.filter".to_owned(),
                 role: "menu_button".to_owned(),
                 label: tr(lang, "menu-filter"),
+                workspace: ws,
+                enabled: has_doc,
+                visible: true,
+                bounds: None,
+                value: None,
+            });
+            widgets.push(SemanticWidgetNode {
+                id: "editor.menu.select".to_owned(),
+                role: "menu_button".to_owned(),
+                label: tr(lang, "menu-select"),
                 workspace: ws,
                 enabled: has_doc,
                 visible: true,

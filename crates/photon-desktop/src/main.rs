@@ -1,13 +1,7 @@
 //! `photon`: Unified Browser / Viewer / Editor (`iced 0.14` + `wgpu 27`) with `--headless` daemon mode.
 
 mod app;
-mod batch_dialog;
-mod browser_view;
-mod editor_view;
 mod inspector;
-mod panel_splitter;
-mod shader_canvas;
-mod viewer_view;
 
 use std::path::PathBuf;
 

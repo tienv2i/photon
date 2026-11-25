@@ -37,6 +37,9 @@ enum GatewayMsg {
     ReadEditorThumbnails {
         reply: oneshot::Sender<(u64, Vec<LayerThumbnail>)>,
     },
+    ReadEditorSelectionMask {
+        reply: oneshot::Sender<Option<PixelFrameData>>,
+    },
     EmitEvent {
         kind: EventKind,
     },
@@ -103,6 +106,15 @@ impl CoreHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(GatewayMsg::ReadEditorPixels { reply: reply_tx })
+            .await
+            .ok()?;
+        reply_rx.await.ok().flatten()
+    }
+
+    pub async fn read_editor_selection_mask(&self) -> Option<PixelFrameData> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(GatewayMsg::ReadEditorSelectionMask { reply: reply_tx })
             .await
             .ok()?;
         reply_rx.await.ok().flatten()
@@ -301,6 +313,18 @@ impl CoreRuntime {
                             })
                             .unwrap_or_default();
                         let _ = reply.send(thumbs);
+                    }
+                    GatewayMsg::ReadEditorSelectionMask { reply } => {
+                        let mask = core.editor_document().map(|doc: &EditorDocument| {
+                            let sel = doc.selection();
+                            (
+                                doc.selection_revision,
+                                sel.width,
+                                sel.height,
+                                sel.alpha.as_ref().clone(),
+                            )
+                        });
+                        let _ = reply.send(mask);
                     }
                     GatewayMsg::EmitEvent { kind } => {
                         let _ = event_tx.send(Event {

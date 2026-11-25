@@ -592,6 +592,12 @@ pub fn paint_stroke_with_brush(
     erase: bool,
     brush: BrushSettings,
 ) -> RgbaImage {
+    let smoothed = crate::drawing::smooth_stroke_points(
+        points,
+        brush.smoothing_mode,
+        brush.stabilizer_distance,
+    );
+    let points = smoothed.as_slice();
     let radius = f64::from(radius);
     let hardness = f64::from(brush.hardness).clamp(0.0, 1.0);
     let flow = brush.flow.clamp(0.05, 1.0);
@@ -930,7 +936,7 @@ fn hash_f32(a: i32, b: i32, seed: u32) -> f32 {
 }
 
 #[inline]
-fn blend_source_over_pixel(pixel: &mut Rgba<u8>, color: [u8; 3], src_alpha: f32) {
+pub(crate) fn blend_source_over_pixel(pixel: &mut Rgba<u8>, color: [u8; 3], src_alpha: f32) {
     if src_alpha <= 0.0 {
         return;
     }

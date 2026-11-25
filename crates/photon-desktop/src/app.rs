@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use iced::keyboard::{self, Key, Modifiers, key::Named};
 use iced::widget::{
-    checkbox, column, container, image as iced_image, operation as widget_operation, row, rule,
+    checkbox, column, container, image as iced_image, operation as widget_operation, row,
     scrollable, slider, text,
 };
 use iced::{
@@ -22,9 +22,9 @@ use photon_protocol::{
     ApplyTarget, BrowserLeftPanel, BrowserRightPanel, BrowserSortField, BrowserThumbSize,
     BrowserViewMode, ClientKind, ColorAdjustments, Command, CommandResponse, EditorRightPanel,
     EditorToolTab, Envelope, EventKind, FlipAxis, Language, LayerEffect, LiquifyMode,
-    LiveStrokeKind, MoveDirection, Query, ResizeFilter, ResizeMode, SortOrder,
-    SystemOpenWindowMode, Theme, UiStateSnapshot, UiText, ViewerRightPanel, ViewerViewMode,
-    WebtoonFitMode, Workspace,
+    LiveStrokeKind, MoveDirection, Query, ResizeFilter, ResizeMode, SelectionBooleanOp,
+    SelectionModifyOp, SelectionShape, SortOrder, SystemOpenWindowMode, Theme, UiStateSnapshot,
+    UiText, ViewerRightPanel, ViewerViewMode, WebtoonFitMode, Workspace,
 };
 use photon_ui::button::{self, ButtonVariant};
 use photon_ui::dialog::{
@@ -39,37 +39,37 @@ use photon_ui::menu::{
     with_context_menu, with_top_right_menu, with_top_right_menu_at,
 };
 use photon_ui::panel::{section_card, status_bar};
-use photon_ui::theme::{
-    PaletteTokens, TEXT_SIZE_CONTROL, app_shell_style, hairline_rule_style, slider_style,
-};
+use photon_ui::theme::{PaletteTokens, TEXT_SIZE_CONTROL, app_shell_style, slider_style};
 use photon_ui::tooltip::{TooltipPosition, with_tooltip_pos};
 
-use crate::batch_dialog::{
-    BatchDialogKind, BatchDialogMsg, BatchDialogState, build_batch_convert_dialog,
-    build_batch_crop_dialog, build_batch_resize_dialog,
-};
-use crate::browser_view::{
-    browser_filter_input_id, build_browser_context_menu_entries, build_browser_help_menu_entries,
-    build_browser_sort_menu, build_browser_toolbar, build_browser_view,
-    build_browser_window_menu_entries, build_quick_access_context_menu,
-};
-use crate::editor_view::{
-    AdjustmentPopupTab, ColorBalanceZone, ColorPickerTarget, CompareMode, CurvesChannel,
-    DimGridAction, DimensionInputState, EditorTool, EditorUiState, build_color_picker_dialog,
-    build_editor_add_layer_menu, build_editor_canvas_context_menu, build_editor_layer_context_menu,
-    build_editor_toolbar, build_editor_view, build_export_dialog, crop_uv_to_signed,
-    default_curves, format_hex, parse_hex_rgb,
-};
 use crate::inspector::{ViewerUiPresentation, build_ui_tree};
-use crate::panel_splitter::{DockDragState, DockSplitterKind};
-use crate::shader_canvas::{
-    CanvasEvent, CpuImageFrame, default_viewport_bg_rgb, dual_spread_geometry,
+use photon_browser::batch_dialog::{
+    BatchDialogAction, BatchDialogKind, BatchDialogMsg, BatchDialogState,
+    build_batch_convert_dialog, build_batch_crop_dialog, build_batch_resize_dialog,
 };
-use crate::viewer_view::{
-    build_viewer_context_menu, build_viewer_toolbar, build_viewer_view, dual_spread_slots,
-    dual_spread_slots_for, step_dual_spread, viewer_counter_summary,
-    viewer_reader_options_right_offset, viewer_status_summary, webtoon_index_at_scroll,
-    webtoon_offset_for_index, webtoon_scroll_id,
+use photon_browser::{
+    BrowserMenuKind, BrowserMessage, BrowserViewState, browser_filter_input_id,
+    build_browser_context_menu_entries, build_browser_help_menu_entries, build_browser_sort_menu,
+    build_browser_toolbar, build_browser_view, build_browser_window_menu_entries,
+    build_quick_access_context_menu,
+};
+use photon_canvas::{
+    CanvasEvent, CpuImageFrame, CpuMaskFrame, default_viewport_bg_rgb, dual_spread_geometry,
+};
+use photon_editor::panel_splitter::{DockDragState, DockSplitterKind};
+use photon_editor::{
+    AdjustmentPopupTab, ColorBalanceZone, ColorPickerTarget, CompareMode, CurvesChannel,
+    DimGridAction, DimensionInputState, EditorMenuKind, EditorMessage, EditorTool, EditorUiState,
+    EditorViewState, build_color_picker_dialog, build_editor_add_layer_menu,
+    build_editor_canvas_context_menu, build_editor_layer_context_menu, build_editor_toolbar,
+    build_editor_view, build_export_dialog, crop_uv_to_signed, default_curves, format_hex,
+    parse_hex_rgb,
+};
+use photon_viewer::{
+    ViewerMessage, ViewerViewState, build_viewer_context_menu, build_viewer_toolbar,
+    build_viewer_view, dual_spread_slots, dual_spread_slots_for, step_dual_spread,
+    viewer_counter_summary, viewer_reader_options_right_offset, viewer_status_summary,
+    webtoon_index_at_scroll, webtoon_offset_for_index, webtoon_scroll_id,
 };
 
 static CORE_HANDLE: OnceLock<CoreHandle> = OnceLock::new();
@@ -102,10 +102,12 @@ pub(crate) enum ActiveMenu {
     EditorEdit,
     EditorImage,
     EditorFilter,
+    EditorSelect,
     EditorView,
     EditorWindow,
     EditorHelp,
     EditorAddLayer,
+    WorkspaceSwitcher,
     WorkspacePanels,
 }
 
@@ -130,6 +132,7 @@ pub enum DesktopDialogId {
     AdjustHsv,
     AdjustColorBalance,
     AdjustCurves,
+    SelectionModify,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,8 +163,112 @@ pub(crate) enum ActiveContextMenu {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionModifyKind {
+    Feather,
+    Expand,
+    Contract,
+    Border,
+    Smooth,
+    Grow,
+    Similar,
+}
+
+impl SelectionModifyKind {
+    const fn title_key(self) -> &'static str {
+        match self {
+            Self::Feather => "dialog-select-feather-title",
+            Self::Expand => "dialog-select-expand-title",
+            Self::Contract => "dialog-select-contract-title",
+            Self::Border => "dialog-select-border-title",
+            Self::Smooth => "dialog-select-smooth-title",
+            Self::Grow => "dialog-select-grow-title",
+            Self::Similar => "dialog-select-similar-title",
+        }
+    }
+
+    const fn label_key(self) -> &'static str {
+        match self {
+            Self::Feather => "label-select-feather-radius",
+            Self::Expand => "label-select-expand-by",
+            Self::Contract => "label-select-contract-by",
+            Self::Border => "label-select-border-width",
+            Self::Smooth => "label-select-smooth-radius",
+            Self::Grow => "label-select-grow-tolerance",
+            Self::Similar => "label-select-similar-tolerance",
+        }
+    }
+
+    const fn hint_key(self) -> &'static str {
+        match self {
+            Self::Feather => "hint-select-feather-range",
+            Self::Expand | Self::Contract | Self::Border | Self::Smooth => "hint-select-px-range",
+            Self::Grow | Self::Similar => "hint-select-tolerance-range",
+        }
+    }
+
+    const fn error_key(self) -> &'static str {
+        match self {
+            Self::Feather => "error-select-feather-range",
+            Self::Expand | Self::Contract | Self::Border | Self::Smooth => "error-select-px-range",
+            Self::Grow | Self::Similar => "error-select-tolerance-range",
+        }
+    }
+
+    const fn default_value(self) -> &'static str {
+        match self {
+            Self::Feather => "2.0",
+            Self::Expand | Self::Contract | Self::Smooth => "2",
+            Self::Border => "4",
+            Self::Grow | Self::Similar => "24",
+        }
+    }
+
+    fn parse_and_validate(self, raw: &str, lang: Language) -> Result<SelectionModifyOp, String> {
+        let trimmed = raw.trim();
+        let err = || tr(lang, self.error_key());
+        match self {
+            Self::Feather => {
+                let v: f32 = trimmed.parse().map_err(|_| err())?;
+                if v.is_finite() && (0.5..=250.0).contains(&v) {
+                    Ok(SelectionModifyOp::Feather(v))
+                } else {
+                    Err(err())
+                }
+            }
+            Self::Expand | Self::Contract | Self::Border | Self::Smooth => {
+                let v: u32 = trimmed.parse().map_err(|_| err())?;
+                if (1..=500).contains(&v) {
+                    Ok(match self {
+                        Self::Expand => SelectionModifyOp::Expand(v),
+                        Self::Contract => SelectionModifyOp::Contract(v),
+                        Self::Border => SelectionModifyOp::Border(v),
+                        Self::Smooth => SelectionModifyOp::Smooth(v),
+                        _ => unreachable!(),
+                    })
+                } else {
+                    Err(err())
+                }
+            }
+            Self::Grow | Self::Similar => {
+                let v: u8 = trimmed.parse().map_err(|_| err())?;
+                Ok(match self {
+                    Self::Grow => SelectionModifyOp::Grow(v),
+                    Self::Similar => SelectionModifyOp::Similar(v),
+                    _ => unreachable!(),
+                })
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum InAppDialog {
+    SelectionModify {
+        kind: SelectionModifyKind,
+        value: String,
+        error: Option<String>,
+    },
     NewFolder {
         parent: String,
         name: String,
@@ -245,6 +352,8 @@ pub struct PhotonGui {
     pub(crate) viewer_pair_frame: Option<CpuImageFrame>,
     pub(crate) editor_frame: Option<CpuImageFrame>,
     pub(crate) editor_original_frame: Option<CpuImageFrame>,
+    pub(crate) editor_selection_mask: Option<CpuMaskFrame>,
+    pub(crate) marching_ants_phase: f32,
     pub(crate) editor_ui: EditorUiState,
     pub(crate) viewer_mode: ViewerViewMode,
     pub(crate) viewer_manga_rtl: bool,
@@ -333,6 +442,9 @@ pub enum Message {
     OpenNewFolderDialog,
     NewFolderNameChanged(String),
     ConfirmNewFolder,
+    OpenSelectionModifyDialog(SelectionModifyKind),
+    SelectionModifyValueChanged(String),
+    ConfirmSelectionModify,
     RequestResetLayout,
     ConfirmResetLayout,
     RequestEditorLeave {
@@ -486,6 +598,9 @@ pub enum Message {
     SetSystemOpenWindowMode(SystemOpenWindowMode),
     WebtoonScrolled(scrollable::Viewport),
     WebtoonPagesLoaded(Vec<(String, u32, u32, Vec<u8>)>),
+    Browser(BrowserMessage),
+    Viewer(ViewerMessage),
+    Editor(EditorMessage),
     BrowserEntryActivated {
         path: String,
         is_dir: bool,
@@ -561,7 +676,24 @@ pub enum Message {
     ViewerPairFrameLoaded(Option<CpuImageFrame>),
     EditorFrameLoaded(Option<CpuImageFrame>),
     EditorOriginalFrameLoaded(Option<CpuImageFrame>),
+    EditorSelectionMaskLoaded(Option<CpuMaskFrame>),
+    MarchingAntsTick,
     EditorThumbnailsLoaded(u64, Vec<photon_image::LayerThumbnail>),
+    EditorSetSelectOp(SelectionBooleanOp),
+    EditorSetSelectFeather(f32),
+    EditorToggleSelectAntiAlias,
+    EditorSetWandTolerance(u8),
+    EditorToggleWandContiguous,
+    EditorToggleSelectSampleAll,
+    EditorSetQuickSelectRadius(f32),
+    EditorSetBrushSmoothingMode(photon_protocol::BrushSmoothingMode),
+    EditorSetStabilizerDistance(f32),
+    EditorSetShapeFillMode(photon_protocol::ShapeFillMode),
+    EditorSetShapeStrokeWidth(f32),
+    EditorSetFloodFillTolerance(u8),
+    EditorToggleFloodFillContiguous,
+    EditorSetGradientKind(photon_protocol::GradientKind),
+    EditorSetGradientColorMode(photon_protocol::GradientColorMode),
     TriggerWindowScreenshot(window::Id),
     ScreenshotReady(window::Id, window::Screenshot),
     OpenSettings,
@@ -577,11 +709,9 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
     let snapshot = core.latest_snapshot();
     let folder_input = snapshot.meta.current_folder.clone().unwrap_or_default();
     let opened_with_files = OPENED_WITH_FILES.get().copied().unwrap_or(false);
-    // On first launch window_width/height will be the protocol default (1240×800).
-    // Clamp to new minimum so the Viewer toolbar is never clipped.
     let remembered_size = Size::new(
-        (snapshot.meta.layout.window_width as f32).clamp(960.0, 3840.0),
-        (snapshot.meta.layout.window_height as f32).clamp(540.0, 2160.0),
+        (snapshot.meta.layout.window_width as f32).clamp(680.0, 3840.0),
+        (snapshot.meta.layout.window_height as f32).clamp(500.0, 2160.0),
     );
     let launch_mode = snapshot.meta.layout.system_open_window_mode;
     let start_fullscreen = opened_with_files && launch_mode == SystemOpenWindowMode::Fullscreen;
@@ -617,7 +747,7 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
 
     let (id, open_task) = window::open(window::Settings {
         size: init_size,
-        min_size: Some(Size::new(960.0, 540.0)),
+        min_size: Some(Size::new(680.0, 500.0)),
         ..Default::default()
     });
 
@@ -695,6 +825,8 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
         viewer_pair_frame: None,
         editor_frame: None,
         editor_original_frame: None,
+        editor_selection_mask: None,
+        marching_ants_phase: 0.0,
         editor_ui,
         viewer_mode,
         viewer_manga_rtl,
@@ -839,7 +971,7 @@ pub fn title(state: &PhotonGui, window_id: window::Id) -> String {
             }
             ViewerViewMode::Double => {
                 let imgs = &state.snapshot.viewer_images;
-                let (left_slot, right_slot) = dual_spread_slots(state);
+                let (left_slot, right_slot) = dual_spread_slots(state.viewer_view_state(true));
                 let name_for = |idx: usize| {
                     imgs.get(idx)
                         .and_then(|p| Path::new(p).file_name())
@@ -908,8 +1040,8 @@ pub fn theme(state: &PhotonGui, _window: window::Id) -> IcedTheme {
     }
 }
 
-pub fn subscription(_state: &PhotonGui) -> Subscription<Message> {
-    let subs = vec![
+pub fn subscription(state: &PhotonGui) -> Subscription<Message> {
+    let mut subs = vec![
         Subscription::run(state_watch_stream),
         Subscription::run(event_broadcast_stream),
         keyboard::listen().map(Message::KeyEvent),
@@ -925,6 +1057,16 @@ pub fn subscription(_state: &PhotonGui) -> Subscription<Message> {
         window::close_events().map(Message::WindowClosed),
         window::resize_events().map(|(id, size)| Message::WindowResized(id, size)),
     ];
+    if state.snapshot.meta.workspace == Workspace::Editor
+        && state
+            .snapshot
+            .meta
+            .editor
+            .as_ref()
+            .is_some_and(|ed| ed.selection.has_selection)
+    {
+        subs.push(iced::time::every(Duration::from_millis(60)).map(|_| Message::MarchingAntsTick));
+    }
     Subscription::batch(subs)
 }
 
@@ -1158,12 +1300,12 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         }
         Message::WindowMonitorSizeCheck(id, Some(mon), is_maximized) => {
             if state.main_window == Some(id) && !state.is_fullscreen && !is_maximized {
-                let max_w = (mon.width * 0.94).max(960.0).min(mon.width);
-                let max_h = (mon.height * 0.90).max(540.0).min(mon.height);
+                let max_w = (mon.width * 0.94).max(680.0).min(mon.width);
+                let max_h = (mon.height * 0.90).max(500.0).min(mon.height);
                 if state.window_size.width > max_w || state.window_size.height > max_h {
                     let clamped = Size::new(
-                        state.window_size.width.min(max_w).max(960.0),
-                        state.window_size.height.min(max_h).max(540.0),
+                        state.window_size.width.min(max_w).max(680.0),
+                        state.window_size.height.min(max_h).max(500.0),
                     );
                     state.window_size = clamped;
                     state.suppress_resize_until = Some(Instant::now() + Duration::from_millis(600));
@@ -1269,6 +1411,19 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     .editor
                     .as_ref()
                     .map(|e| (e.path.clone(), e.original_revision));
+            let editor_selection_changed = snap.meta.editor.as_ref().map(|e| {
+                (
+                    e.path.clone(),
+                    e.selection.selection_revision,
+                    e.selection.has_selection,
+                )
+            }) != state.snapshot.meta.editor.as_ref().map(|e| {
+                (
+                    e.path.clone(),
+                    e.selection.selection_revision,
+                    e.selection.has_selection,
+                )
+            });
             let editor_dims_changed = snap
                 .meta
                 .editor
@@ -1406,7 +1561,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 state.webtoon_visible_index = state.snapshot.meta.viewer_index;
                 let vmode = state.viewer_mode;
                 if vmode == ViewerViewMode::Double {
-                    let (left_slot, right_slot) = dual_spread_slots(state);
+                    let (left_slot, right_slot) = dual_spread_slots(state.viewer_view_state(true));
                     let lp = left_slot.map(|(_, p)| p.to_owned());
                     let rp = right_slot.map(|(_, p)| p.to_owned());
                     if let Some(lp) = lp {
@@ -1430,7 +1585,8 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 if vmode == ViewerViewMode::Webtoon {
                     let center = state.snapshot.meta.viewer_index.unwrap_or(0);
                     tasks.push(schedule_webtoon_pages_near(state, center));
-                    if let Some(y) = webtoon_offset_for_index(state, center) {
+                    if let Some(y) = webtoon_offset_for_index(state.viewer_view_state(true), center)
+                    {
                         tasks.push(widget_operation::scroll_to(
                             webtoon_scroll_id(),
                             scrollable::AbsoluteOffset {
@@ -1441,7 +1597,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     }
                 }
             } else if state.viewer_mode == ViewerViewMode::Double {
-                let (left_slot, right_slot) = dual_spread_slots(state);
+                let (left_slot, right_slot) = dual_spread_slots(state.viewer_view_state(true));
                 let left_mismatch = match (left_slot, &state.viewer_frame) {
                     (Some((_, lp)), Some(f)) => f.key != format!("viewer:{lp}"),
                     (Some(_), None) | (None, Some(_)) => true,
@@ -1484,6 +1640,19 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     tasks.push(load_editor_original_frame_task(state.core.clone()));
                 } else {
                     state.editor_original_frame = None;
+                }
+            }
+            if editor_selection_changed {
+                if state
+                    .snapshot
+                    .meta
+                    .editor
+                    .as_ref()
+                    .is_some_and(|ed| ed.selection.has_selection)
+                {
+                    tasks.push(load_editor_selection_mask_task(state.core.clone()));
+                } else {
+                    state.editor_selection_mask = None;
                 }
             }
             Task::batch(tasks)
@@ -1723,6 +1892,44 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     name: clean,
                 },
             )
+        }
+        Message::OpenSelectionModifyDialog(kind) => {
+            state.active_menu = None;
+            state.dialog = Some(InAppDialog::SelectionModify {
+                kind,
+                value: kind.default_value().to_owned(),
+                error: None,
+            });
+            open_dialog_window(state, DesktopDialogId::SelectionModify);
+            Task::none()
+        }
+        Message::SelectionModifyValueChanged(val) => {
+            if let Some(InAppDialog::SelectionModify { value, error, .. }) = &mut state.dialog {
+                *value = val;
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::ConfirmSelectionModify => {
+            let Some(InAppDialog::SelectionModify { kind, value, .. }) = state.dialog.clone()
+            else {
+                return Task::none();
+            };
+            match kind.parse_and_validate(&value, state.snapshot.meta.language) {
+                Ok(op) => {
+                    state.dialog = None;
+                    state
+                        .dialog_manager
+                        .close(&DesktopDialogId::SelectionModify);
+                    dispatch_to_core(state.core.clone(), Command::EditorSelectModify { op })
+                }
+                Err(msg) => {
+                    if let Some(InAppDialog::SelectionModify { error, .. }) = &mut state.dialog {
+                        *error = Some(msg);
+                    }
+                    Task::none()
+                }
+            }
         }
         Message::RequestResetLayout => {
             state.dialog = Some(InAppDialog::ConfirmResetLayout);
@@ -2129,7 +2336,8 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     let center = state.snapshot.meta.viewer_index.unwrap_or(0);
                     state.webtoon_visible_index = Some(center);
                     tasks.push(schedule_webtoon_pages_near(state, center));
-                    if let Some(y) = webtoon_offset_for_index(state, center) {
+                    if let Some(y) = webtoon_offset_for_index(state.viewer_view_state(true), center)
+                    {
                         tasks.push(widget_operation::scroll_to(
                             webtoon_scroll_id(),
                             scrollable::AbsoluteOffset {
@@ -2152,7 +2360,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             })
         }
         Message::DualStepSpread(delta) => {
-            if let Some(path) = step_dual_spread(state, delta) {
+            if let Some(path) = step_dual_spread(state.viewer_view_state(true), delta) {
                 dispatch_to_core(state.core.clone(), Command::ViewerOpen { path })
             } else {
                 Task::none()
@@ -2161,7 +2369,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         Message::SetMangaRtl(rtl) => {
             state.viewer_manga_rtl = rtl;
             if state.viewer_mode == ViewerViewMode::Double {
-                let (left_slot, right_slot) = dual_spread_slots(state);
+                let (left_slot, right_slot) = dual_spread_slots(state.viewer_view_state(true));
                 let swapped = match (
                     left_slot,
                     right_slot,
@@ -2212,7 +2420,8 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             let y = vp.absolute_offset().y;
             let vh = vp.bounds().height;
             state.webtoon_scroll_y = y;
-            if let Some(idx) = webtoon_index_at_scroll(state, y + vh * 0.45) {
+            if let Some(idx) = webtoon_index_at_scroll(state.viewer_view_state(true), y + vh * 0.45)
+            {
                 let changed = state.webtoon_visible_index != Some(idx);
                 state.webtoon_visible_index = Some(idx);
                 if changed {
@@ -2238,6 +2447,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::Browser(msg) => update(state, map_browser_message(msg)),
+        Message::Viewer(msg) => update(state, map_viewer_message(msg)),
+        Message::Editor(msg) => update(state, map_editor_message(msg)),
         Message::BrowserEntryActivated {
             path,
             is_dir,
@@ -2320,10 +2532,17 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                         state.pan_y = (cy - half_h) - ((cy - half_h) - state.pan_y) * ratio;
                     }
                     state.zoom = new_zoom;
+                    if state.snapshot.meta.workspace == Workspace::Editor {
+                        clamp_editor_pan(state, bounds);
+                    }
                 }
                 CanvasEvent::PanBy { dx, dy } => {
                     state.pan_x += dx;
                     state.pan_y += dy;
+                    if state.snapshot.meta.workspace == Workspace::Editor {
+                        let rect = resolved_editor_canvas_bounds(state);
+                        clamp_editor_pan(state, [rect.width, rect.height]);
+                    }
                 }
                 CanvasEvent::CropUpdated(uv) => {
                     state.crop_uv = Some(uv);
@@ -2393,6 +2612,96 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     state.editor_ui.compare_split_x = frac.clamp(0.02, 0.98);
                     return Task::none();
                 }
+                CanvasEvent::SelectMarqueeCommit {
+                    is_ellipse,
+                    x,
+                    y,
+                    width,
+                    height,
+                    shift,
+                    alt,
+                } => {
+                    let op = resolve_select_op(state, shift, alt);
+                    let shape = if is_ellipse {
+                        SelectionShape::Ellipse {
+                            cx: x + width * 0.5,
+                            cy: y + height * 0.5,
+                            rx: width * 0.5,
+                            ry: height * 0.5,
+                            feather: state.editor_ui.select_feather,
+                            anti_alias: state.editor_ui.select_anti_alias,
+                        }
+                    } else {
+                        SelectionShape::Rect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            feather: state.editor_ui.select_feather,
+                            anti_alias: state.editor_ui.select_anti_alias,
+                        }
+                    };
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorSelectShape { shape, op },
+                    );
+                }
+                CanvasEvent::SelectLineCommit {
+                    is_row,
+                    coord,
+                    shift,
+                    alt,
+                } => {
+                    let op = resolve_select_op(state, shift, alt);
+                    let shape = if is_row {
+                        SelectionShape::SingleRow { y: coord }
+                    } else {
+                        SelectionShape::SingleCol { x: coord }
+                    };
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorSelectShape { shape, op },
+                    );
+                }
+                CanvasEvent::SelectPolygonCommit { points, shift, alt } => {
+                    let op = resolve_select_op(state, shift, alt);
+                    let shape = SelectionShape::Polygon {
+                        points,
+                        feather: state.editor_ui.select_feather,
+                        anti_alias: state.editor_ui.select_anti_alias,
+                    };
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorSelectShape { shape, op },
+                    );
+                }
+                CanvasEvent::SelectMagicWand { x, y, shift, alt } => {
+                    let op = resolve_select_op(state, shift, alt);
+                    let shape = SelectionShape::MagicWand {
+                        x,
+                        y,
+                        tolerance: state.editor_ui.wand_tolerance,
+                        contiguous: state.editor_ui.wand_contiguous,
+                        sample_all_layers: state.editor_ui.select_sample_all,
+                        anti_alias: state.editor_ui.select_anti_alias,
+                    };
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorSelectShape { shape, op },
+                    );
+                }
+                CanvasEvent::SelectQuickStroke { points, shift, alt } => {
+                    let op = resolve_select_op(state, shift, alt);
+                    let shape = SelectionShape::QuickSelectStroke {
+                        points,
+                        radius: state.editor_ui.quick_select_radius,
+                        sample_all_layers: state.editor_ui.select_sample_all,
+                    };
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorSelectShape { shape, op },
+                    );
+                }
                 CanvasEvent::ResetFit => {
                     state.context_menu = None;
                     if state.snapshot.meta.workspace == Workspace::Viewer
@@ -2405,6 +2714,67 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     state.zoom = 1.0;
                     state.pan_x = 0.0;
                     state.pan_y = 0.0;
+                }
+                CanvasEvent::DrawShapeCommit {
+                    kind,
+                    points,
+                    nodes,
+                    closed,
+                } => {
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorDrawShape {
+                            kind,
+                            points,
+                            nodes,
+                            fill_mode: state.editor_ui.shape_fill_mode,
+                            closed,
+                        },
+                    );
+                }
+                CanvasEvent::BezierToSelectionCommit { nodes } => {
+                    let points: Vec<[f32; 2]> =
+                        photon_image::drawing::tessellate_bezier_path(&nodes, true, 0.5)
+                            .into_iter()
+                            .map(|[x, y]| [x as f32, y as f32])
+                            .collect();
+                    if points.len() >= 3 {
+                        let shape = SelectionShape::Polygon {
+                            points,
+                            feather: state.editor_ui.select_feather,
+                            anti_alias: state.editor_ui.select_anti_alias,
+                        };
+                        return dispatch_to_core(
+                            state.core.clone(),
+                            Command::EditorSelectShape {
+                                shape,
+                                op: state.editor_ui.select_op,
+                            },
+                        );
+                    }
+                    return Task::none();
+                }
+                CanvasEvent::FloodFillClick { x, y } => {
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorFloodFill {
+                            x,
+                            y,
+                            tolerance: state.editor_ui.flood_fill_tolerance,
+                            contiguous: state.editor_ui.flood_fill_contiguous,
+                        },
+                    );
+                }
+                CanvasEvent::DrawGradientCommit { start, end } => {
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorDrawGradient {
+                            start,
+                            end,
+                            kind: state.editor_ui.gradient_kind,
+                            color_mode: state.editor_ui.gradient_color_mode,
+                        },
+                    );
                 }
             }
             sync_ui_tree_task(state)
@@ -2549,6 +2919,17 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             state.active_menu = None;
             state.context_menu = None;
             state.editor_ui.tool = tool;
+            if tool.is_marquee_group() {
+                state.editor_ui.marquee_subtool = tool;
+            } else if tool.is_lasso_group() {
+                state.editor_ui.lasso_subtool = tool;
+            } else if tool.is_smart_group() {
+                state.editor_ui.smart_subtool = tool;
+            } else if tool.is_shape_group() {
+                state.editor_ui.shape_subtool = tool;
+            } else if tool.is_fill_group() {
+                state.editor_ui.fill_subtool = tool;
+            }
             if tool == EditorTool::Crop {
                 if state.crop_uv.is_none() && state.snapshot.meta.editor.is_some() {
                     state.crop_uv = Some([0.1, 0.1, 0.9, 0.9]);
@@ -2562,6 +2943,66 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 state.editor_ui.sync_document_dims(ed.width, ed.height);
             }
             sync_ui_tree_task(state)
+        }
+        Message::EditorSetSelectOp(op) => {
+            state.editor_ui.select_op = op;
+            Task::none()
+        }
+        Message::EditorSetSelectFeather(v) => {
+            state.editor_ui.select_feather = v.clamp(0.0, 250.0);
+            Task::none()
+        }
+        Message::EditorToggleSelectAntiAlias => {
+            state.editor_ui.select_anti_alias = !state.editor_ui.select_anti_alias;
+            Task::none()
+        }
+        Message::EditorSetWandTolerance(v) => {
+            state.editor_ui.wand_tolerance = v;
+            Task::none()
+        }
+        Message::EditorToggleWandContiguous => {
+            state.editor_ui.wand_contiguous = !state.editor_ui.wand_contiguous;
+            Task::none()
+        }
+        Message::EditorToggleSelectSampleAll => {
+            state.editor_ui.select_sample_all = !state.editor_ui.select_sample_all;
+            Task::none()
+        }
+        Message::EditorSetQuickSelectRadius(v) => {
+            state.editor_ui.quick_select_radius = v.clamp(2.0, 200.0);
+            Task::none()
+        }
+        Message::EditorSetBrushSmoothingMode(m) => {
+            state.editor_ui.brush_settings.smoothing_mode = m;
+            Task::none()
+        }
+        Message::EditorSetStabilizerDistance(d) => {
+            state.editor_ui.brush_settings.stabilizer_distance = d.clamp(4.0, 100.0);
+            Task::none()
+        }
+        Message::EditorSetShapeFillMode(m) => {
+            state.editor_ui.shape_fill_mode = m;
+            Task::none()
+        }
+        Message::EditorSetShapeStrokeWidth(w) => {
+            state.editor_ui.shape_stroke_width = w.clamp(1.0, 64.0);
+            Task::none()
+        }
+        Message::EditorSetFloodFillTolerance(t) => {
+            state.editor_ui.flood_fill_tolerance = t;
+            Task::none()
+        }
+        Message::EditorToggleFloodFillContiguous => {
+            state.editor_ui.flood_fill_contiguous = !state.editor_ui.flood_fill_contiguous;
+            Task::none()
+        }
+        Message::EditorSetGradientKind(k) => {
+            state.editor_ui.gradient_kind = k;
+            Task::none()
+        }
+        Message::EditorSetGradientColorMode(c) => {
+            state.editor_ui.gradient_color_mode = c;
+            Task::none()
         }
         Message::EditorCycleCompareMode => {
             state.context_menu = None;
@@ -3424,6 +3865,14 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             state.editor_original_frame = frame;
             Task::none()
         }
+        Message::EditorSelectionMaskLoaded(mask) => {
+            state.editor_selection_mask = mask;
+            Task::none()
+        }
+        Message::MarchingAntsTick => {
+            state.marching_ants_phase = (state.marching_ants_phase + 0.08) % 1.0;
+            Task::none()
+        }
         Message::EditorThumbnailsLoaded(_rev, thumbs) => {
             let mut layer_map = HashMap::with_capacity(thumbs.len());
             let mut mask_map = HashMap::new();
@@ -3718,7 +4167,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 meta.current_folder.as_deref(),
                 ref_dims,
             )));
-            open_dialog_window(state, kind.dialog_id());
+            open_dialog_window(state, batch_dialog_id(kind));
             Task::none()
         }
         Message::BatchDialog(msg) => {
@@ -3743,7 +4192,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             if matches!(msg, BatchDialogMsg::Confirm) {
                 let (cmd_res, dialog_id) = match &mut state.dialog {
                     Some(InAppDialog::Batch(b)) => {
-                        (b.build_command(&state.snapshot), b.kind.dialog_id())
+                        (b.build_command(&state.snapshot), batch_dialog_id(b.kind))
                     }
                     _ => return Task::none(),
                 };
@@ -4147,6 +4596,22 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
             Key::Character("s") => {
                 return dispatch_to_core(state.core.clone(), Command::EditorSave);
             }
+            Key::Character("a") if state.snapshot.meta.workspace == Workspace::Editor => {
+                return dispatch_to_core(state.core.clone(), Command::EditorSelectAll);
+            }
+            Key::Character("d")
+                if state.snapshot.meta.workspace == Workspace::Editor && modifiers.shift() =>
+            {
+                return dispatch_to_core(state.core.clone(), Command::EditorReselect);
+            }
+            Key::Character("d") if state.snapshot.meta.workspace == Workspace::Editor => {
+                return dispatch_to_core(state.core.clone(), Command::EditorDeselect);
+            }
+            Key::Character("i")
+                if state.snapshot.meta.workspace == Workspace::Editor && modifiers.shift() =>
+            {
+                return dispatch_to_core(state.core.clone(), Command::EditorSelectInvert);
+            }
             _ => {}
         }
     }
@@ -4161,6 +4626,27 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
             }
             Key::Character("z") | Key::Character("Z") => {
                 update(state, Message::EditorSelectTool(EditorTool::Zoom))
+            }
+            Key::Character("m") | Key::Character("M") => update(
+                state,
+                Message::EditorSelectTool(state.editor_ui.marquee_subtool),
+            ),
+            Key::Character("w") | Key::Character("W") => update(
+                state,
+                Message::EditorSelectTool(state.editor_ui.smart_subtool),
+            ),
+            Key::Character("q") | Key::Character("Q") => {
+                dispatch_to_core(state.core.clone(), Command::EditorSelectToggleQuickMask)
+            }
+            Key::Named(Named::Delete)
+                if state
+                    .snapshot
+                    .meta
+                    .editor
+                    .as_ref()
+                    .is_some_and(|e| e.selection.has_selection) =>
+            {
+                dispatch_to_core(state.core.clone(), Command::EditorSelectionClearPixels)
             }
             Key::Character("b") | Key::Character("B") => {
                 update(state, Message::EditorSelectTool(EditorTool::Brush))
@@ -4177,6 +4663,19 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
             Key::Character("c") | Key::Character("C") => {
                 update(state, Message::EditorSelectTool(EditorTool::Crop))
             }
+            Key::Character("u") | Key::Character("U") => update(
+                state,
+                Message::EditorSelectTool(state.editor_ui.shape_subtool),
+            ),
+            Key::Character("p") | Key::Character("P") => {
+                update(state, Message::EditorSelectTool(EditorTool::BezierPen))
+            }
+            Key::Character("f") | Key::Character("F") => {
+                update(state, Message::EditorSelectTool(EditorTool::PaintBucket))
+            }
+            Key::Character("g") | Key::Character("G") => {
+                update(state, Message::EditorSelectTool(EditorTool::Gradient))
+            }
             Key::Character("x") | Key::Character("X") => update(state, Message::EditorSwapColors),
             Key::Character("[") => update(
                 state,
@@ -4186,6 +4685,8 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
                 state,
                 Message::EditorSetBrushRadius((state.editor_ui.brush_radius + 2.0).min(200.0)),
             ),
+            // Space is handled by photon-canvas for temporary Hand pan while held.
+            Key::Named(Named::Space) => Task::none(),
             _ => Task::none(),
         },
         Workspace::Viewer => match key.as_ref() {
@@ -4313,13 +4814,15 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
 
     let top_bar = build_toolbar(state, role, ws);
     let body: Element<'_, Message> = match ws {
-        Workspace::Browser => build_browser_view(state),
-        Workspace::Viewer => build_viewer_view(state),
-        Workspace::Editor => build_editor_view(state),
+        Workspace::Browser => build_browser_view(state.browser_view_state()).map(Message::Browser),
+        Workspace::Viewer => build_viewer_view(state.viewer_view_state(true)).map(Message::Viewer),
+        Workspace::Editor => build_editor_view(state.editor_view_state()).map(Message::Editor),
     };
 
     let status_left = match ws {
-        Workspace::Viewer => viewer_status_summary(state, lang),
+        Workspace::Viewer => {
+            viewer_status_summary(state.viewer_view_state(role == WindowRole::Main), lang)
+        }
         Workspace::Editor => editor_status_summary(state, lang),
         Workspace::Browser => {
             let s = tr_ui_text(lang, &state.snapshot.meta.status);
@@ -4328,9 +4831,10 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
     };
     let backend = GPU_BACKEND_NAME.get().map(String::as_str).unwrap_or("wgpu");
     let right_meta = if ws == Workspace::Viewer {
-        let counter_prefix = viewer_counter_summary(state)
-            .map(|c| format!("{c} · "))
-            .unwrap_or_default();
+        let counter_prefix =
+            viewer_counter_summary(state.viewer_view_state(role == WindowRole::Main))
+                .map(|c| format!("{c} · "))
+                .unwrap_or_default();
         if state.snapshot.meta.safe_mode {
             format!("{counter_prefix}{}", tr(lang, "label-safe-mode"))
         } else {
@@ -4377,13 +4881,18 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
             with_anchored_menu(shell, true, left_offset, 44.0, menu_el, Message::CloseMenu)
         }
         Some((None, menu_el)) => match state.active_menu {
+            Some(ActiveMenu::WorkspaceSwitcher) => {
+                with_top_right_menu_at(shell, true, 48.0, 44.0, menu_el, Message::CloseMenu)
+            }
             Some(ActiveMenu::WorkspacePanels) => {
                 with_top_right_menu_at(shell, true, 44.0, 44.0, menu_el, Message::CloseMenu)
             }
             Some(ActiveMenu::ReaderOptions) => with_top_right_menu_at(
                 shell,
                 true,
-                viewer_reader_options_right_offset(state, role),
+                viewer_reader_options_right_offset(
+                    state.viewer_view_state(role == WindowRole::Main),
+                ),
                 44.0,
                 menu_el,
                 Message::CloseMenu,
@@ -4415,7 +4924,8 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
     let with_ctx = match &state.context_menu {
         Some(ActiveContextMenu::BrowserEntry { x, y, path }) => {
             let (menu_el, est_h) = clamp_menu_height(
-                build_browser_context_menu_entries(state, path),
+                build_browser_context_menu_entries(state.browser_view_state(), path)
+                    .map(Message::Browser),
                 480.0,
                 max_menu_h,
             );
@@ -4433,7 +4943,8 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
         }
         Some(ActiveContextMenu::BrowserQuickAccess { x, y, path }) => {
             let (menu_el, est_h) = clamp_menu_height(
-                build_quick_access_context_menu(state, path),
+                build_quick_access_context_menu(state.browser_view_state(), path)
+                    .map(Message::Browser),
                 220.0,
                 max_menu_h,
             );
@@ -4451,7 +4962,11 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
         }
         Some(ActiveContextMenu::Viewer { x, y, target_path }) => {
             let (menu_el, est_h) = clamp_menu_height(
-                build_viewer_context_menu(state, target_path.as_deref()),
+                build_viewer_context_menu(
+                    state.viewer_view_state(role == WindowRole::Main),
+                    target_path.as_deref(),
+                )
+                .map(Message::Viewer),
                 615.0,
                 max_menu_h,
             );
@@ -4468,8 +4983,9 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
             )
         }
         Some(ActiveContextMenu::EditorCanvas { x, y }) => {
-            if let Some(raw_menu) = build_editor_canvas_context_menu(state) {
-                let (menu_el, est_h) = clamp_menu_height(raw_menu, 575.0, max_menu_h);
+            if let Some(raw_menu) = build_editor_canvas_context_menu(state.editor_view_state()) {
+                let (menu_el, est_h) =
+                    clamp_menu_height(raw_menu.map(Message::Editor), 575.0, max_menu_h);
                 with_context_menu(
                     with_menu,
                     true,
@@ -4486,8 +5002,11 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
             }
         }
         Some(ActiveContextMenu::EditorLayer { x, y, layer_id }) => {
-            if let Some(raw_menu) = build_editor_layer_context_menu(state, *layer_id) {
-                let (menu_el, est_h) = clamp_menu_height(raw_menu, 380.0, max_menu_h);
+            if let Some(raw_menu) =
+                build_editor_layer_context_menu(state.editor_view_state(), *layer_id)
+            {
+                let (menu_el, est_h) =
+                    clamp_menu_height(raw_menu.map(Message::Editor), 380.0, max_menu_h);
                 with_context_menu(
                     with_menu,
                     true,
@@ -4574,16 +5093,25 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
 
 fn build_toolbar(state: &PhotonGui, role: WindowRole, ws: Workspace) -> Element<'_, Message> {
     match ws {
-        Workspace::Browser => build_browser_toolbar(state),
-        Workspace::Viewer => build_viewer_toolbar(state, role),
-        Workspace::Editor => build_editor_toolbar(state, role),
+        Workspace::Browser => build_browser_toolbar(
+            state.browser_view_state(),
+            Element::from(toolbar_right_utilities(state))
+                .map(|_| BrowserMessage::ToggleWorkspacePanels),
+        )
+        .map(Message::Browser),
+        Workspace::Viewer => build_viewer_toolbar(
+            state.viewer_view_state(role == WindowRole::Main),
+            Element::from(toolbar_right_utilities(state))
+                .map(|_| ViewerMessage::ToggleWorkspacePanels),
+        )
+        .map(Message::Viewer),
+        Workspace::Editor => build_editor_toolbar(
+            state.editor_view_state(),
+            Element::from(toolbar_right_utilities(state))
+                .map(|_| EditorMessage::ToggleWorkspacePanels),
+        )
+        .map(Message::Editor),
     }
-}
-
-pub(crate) fn toolbar_divider<'a, M: 'a>() -> Element<'a, M> {
-    container(rule::vertical(1).style(hairline_rule_style))
-        .height(Length::Fixed(18.0))
-        .into()
 }
 
 pub(crate) fn toolbar_right_utilities(state: &PhotonGui) -> row::Row<'_, Message> {
@@ -4730,17 +5258,70 @@ fn build_workspace_panels_menu(state: &PhotonGui, ws: Workspace) -> Element<'_, 
     menu_panel_entries(entries, 256.0)
 }
 
+fn build_workspace_switcher_menu(state: &PhotonGui, ws: Workspace) -> Element<'_, Message> {
+    let lang = state.snapshot.meta.language;
+    let browser_msg = if ws == Workspace::Editor {
+        Message::RequestEditorLeaveToBrowser
+    } else {
+        Message::Dispatch(Command::SetWorkspace {
+            workspace: Workspace::Browser,
+        })
+    };
+    let viewer_msg = if ws == Workspace::Editor {
+        Message::RequestEditorLeave {
+            close_editor: false,
+        }
+    } else {
+        Message::Dispatch(Command::SetWorkspace {
+            workspace: Workspace::Viewer,
+        })
+    };
+    let editor_msg = if ws == Workspace::Editor {
+        Message::Noop
+    } else {
+        Message::Dispatch(Command::SetWorkspace {
+            workspace: Workspace::Editor,
+        })
+    };
+
+    let entries = vec![
+        MenuEntry::Item(
+            MenuItem::new(tr(lang, "workspace-browser"), browser_msg)
+                .icon(Icon::Browser)
+                .checked(ws == Workspace::Browser),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(tr(lang, "workspace-viewer"), viewer_msg)
+                .icon(Icon::Viewer)
+                .checked(ws == Workspace::Viewer),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(tr(lang, "workspace-editor"), editor_msg)
+                .icon(Icon::Editor)
+                .checked(ws == Workspace::Editor),
+        ),
+    ];
+
+    menu_panel_entries(entries, 180.0)
+}
+
 fn build_active_menu(
     state: &PhotonGui,
     _role: WindowRole,
     ws: Workspace,
 ) -> Option<(Option<f32>, Element<'_, Message>)> {
     let menu = state.active_menu?;
+    if menu == ActiveMenu::WorkspaceSwitcher {
+        return Some((None, build_workspace_switcher_menu(state, ws)));
+    }
     if menu == ActiveMenu::WorkspacePanels {
         return Some((None, build_workspace_panels_menu(state, ws)));
     }
     if ws == Workspace::Editor && menu == ActiveMenu::EditorAddLayer {
-        return Some((None, build_editor_add_layer_menu(state)));
+        return Some((
+            None,
+            build_editor_add_layer_menu(state.editor_view_state()).map(Message::Editor),
+        ));
     }
     let lang = state.snapshot.meta.language;
     let layout = &state.snapshot.meta.layout;
@@ -4919,14 +5500,25 @@ fn build_active_menu(
                 ),
             ],
         ),
-        (Workspace::Browser, ActiveMenu::BrowserWindow) => {
-            (Some(214.0), build_browser_window_menu_entries(state))
-        }
-        (Workspace::Browser, ActiveMenu::BrowserHelp) => {
-            (Some(276.0), build_browser_help_menu_entries(lang))
-        }
+        (Workspace::Browser, ActiveMenu::BrowserWindow) => (
+            Some(214.0),
+            build_browser_window_menu_entries(state.browser_view_state())
+                .into_iter()
+                .map(|e| e.map(Message::Browser))
+                .collect(),
+        ),
+        (Workspace::Browser, ActiveMenu::BrowserHelp) => (
+            Some(276.0),
+            build_browser_help_menu_entries(lang)
+                .into_iter()
+                .map(|e| e.map(Message::Browser))
+                .collect(),
+        ),
         (Workspace::Browser, ActiveMenu::BrowserSort) => {
-            return Some((None, build_browser_sort_menu(state)));
+            return Some((
+                None,
+                build_browser_sort_menu(state.browser_view_state()).map(Message::Browser),
+            ));
         }
         (Workspace::Editor, ActiveMenu::EditorFile) => (
             Some(12.0),
@@ -5098,7 +5690,7 @@ fn build_active_menu(
             ],
         ),
         (Workspace::Editor, ActiveMenu::EditorFilter) => (
-            Some(150.0),
+            Some(208.0),
             vec![
                 MenuEntry::Item(
                     MenuItem::new(
@@ -5134,8 +5726,151 @@ fn build_active_menu(
                 ),
             ],
         ),
+        (Workspace::Editor, ActiveMenu::EditorSelect) => {
+            let has_sel = ed.is_some_and(|e| e.selection.has_selection);
+            let can_reselect = ed.is_some_and(|e| e.selection.can_reselect);
+            let quick_mask = ed.is_some_and(|e| e.selection.quick_mask_active);
+            (
+                Some(152.0),
+                vec![
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-select-all"),
+                            Message::Dispatch(Command::EditorSelectAll),
+                        )
+                        .shortcut("Ctrl+A")
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-deselect"),
+                            Message::Dispatch(Command::EditorDeselect),
+                        )
+                        .shortcut("Ctrl+D")
+                        .enabled(has_sel),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-reselect"),
+                            Message::Dispatch(Command::EditorReselect),
+                        )
+                        .shortcut("Ctrl+Shift+D")
+                        .enabled(can_reselect),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-select-invert"),
+                            Message::Dispatch(Command::EditorSelectInvert),
+                        )
+                        .shortcut("Ctrl+Shift+I")
+                        .enabled(has_sel),
+                    ),
+                    MenuEntry::Separator,
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-select-feather"),
+                            Message::OpenSelectionModifyDialog(SelectionModifyKind::Feather),
+                        )
+                        .enabled(has_sel),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-select-expand"),
+                            Message::OpenSelectionModifyDialog(SelectionModifyKind::Expand),
+                        )
+                        .enabled(has_sel),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-select-contract"),
+                            Message::OpenSelectionModifyDialog(SelectionModifyKind::Contract),
+                        )
+                        .enabled(has_sel),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-select-border"),
+                            Message::OpenSelectionModifyDialog(SelectionModifyKind::Border),
+                        )
+                        .enabled(has_sel),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-select-smooth"),
+                            Message::OpenSelectionModifyDialog(SelectionModifyKind::Smooth),
+                        )
+                        .enabled(has_sel),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-select-grow"),
+                            Message::OpenSelectionModifyDialog(SelectionModifyKind::Grow),
+                        )
+                        .enabled(has_sel),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-select-similar"),
+                            Message::OpenSelectionModifyDialog(SelectionModifyKind::Similar),
+                        )
+                        .enabled(has_sel),
+                    ),
+                    MenuEntry::Separator,
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-select-quick-mask"),
+                            Message::Dispatch(Command::EditorSelectToggleQuickMask),
+                        )
+                        .icon(Icon::QuickMask)
+                        .shortcut("Q")
+                        .checked(quick_mask)
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-select-from-alpha"),
+                            Message::Dispatch(Command::EditorSelectFromLayerAlpha {
+                                op: state.editor_ui.select_op,
+                            }),
+                        )
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-select-to-mask"),
+                            Message::Dispatch(Command::EditorSelectionToMask),
+                        )
+                        .enabled(has_sel),
+                    ),
+                    MenuEntry::Separator,
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-select-duplicate-layer"),
+                            Message::Dispatch(Command::EditorSelectionDuplicateLayer),
+                        )
+                        .enabled(has_sel),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-select-clear-pixels"),
+                            Message::Dispatch(Command::EditorSelectionClearPixels),
+                        )
+                        .shortcut("Del")
+                        .enabled(has_sel),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-crop-to-selection"),
+                            Message::Dispatch(Command::EditorCropToSelection),
+                        )
+                        .icon(Icon::Crop)
+                        .enabled(has_sel),
+                    ),
+                ],
+            )
+        }
         (Workspace::Editor, ActiveMenu::EditorView) => (
-            Some(198.0),
+            Some(258.0),
             vec![
                 MenuEntry::Item(
                     MenuItem::new(tr(lang, "action-zoom-in"), Message::ZoomStep(1.25))
@@ -5202,7 +5937,7 @@ fn build_active_menu(
             ],
         ),
         (Workspace::Editor, ActiveMenu::EditorWindow) => (
-            Some(248.0),
+            Some(308.0),
             vec![
                 MenuEntry::Item(
                     MenuItem::new(tr(lang, "panel-tools"), Message::ToggleEditorToolsVisible)
@@ -5245,7 +5980,7 @@ fn build_active_menu(
             ],
         ),
         (Workspace::Editor, ActiveMenu::EditorHelp) => (
-            Some(312.0),
+            Some(376.0),
             vec![
                 MenuEntry::Item(
                     MenuItem::new(tr(lang, "action-shortcuts"), Message::OpenShortcutsDialog)
@@ -5762,6 +6497,9 @@ pub(crate) fn default_window_state_for(id: DesktopDialogId) -> DialogWindowState
         DesktopDialogId::AdjustCurves => DialogWindowState::new(460.0, 255.0)
             .min_size(360.0, 220.0)
             .max_size(760.0, 760.0),
+        DesktopDialogId::SelectionModify => {
+            DialogWindowState::new(400.0, 195.0).min_size(320.0, 170.0)
+        }
     }
 }
 
@@ -5886,19 +6624,73 @@ fn commit_layout_with(
     )
 }
 
+const fn batch_dialog_id(kind: BatchDialogKind) -> DesktopDialogId {
+    match kind {
+        BatchDialogKind::Resize => DesktopDialogId::BatchResize,
+        BatchDialogKind::Crop => DesktopDialogId::BatchCrop,
+        BatchDialogKind::Convert => DesktopDialogId::BatchConvert,
+    }
+}
+
 fn dialog_id_for_in_app(dialog: &InAppDialog) -> DesktopDialogId {
     match dialog {
+        InAppDialog::SelectionModify { .. } => DesktopDialogId::SelectionModify,
         InAppDialog::NewFolder { .. } => DesktopDialogId::NewFolder,
         InAppDialog::ConfirmResetLayout => DesktopDialogId::ConfirmResetLayout,
         InAppDialog::ConfirmUnsavedLeave { .. } => DesktopDialogId::ConfirmUnsavedLeave,
         InAppDialog::Resize { .. } => DesktopDialogId::Resize,
         InAppDialog::Export { .. } => DesktopDialogId::Export,
         InAppDialog::ColorPicker { .. } => DesktopDialogId::ColorPicker,
-        InAppDialog::Batch(b) => b.kind.dialog_id(),
+        InAppDialog::Batch(b) => batch_dialog_id(b.kind),
         InAppDialog::RenameItem { .. } => DesktopDialogId::RenameItem,
         InAppDialog::ConfirmDeletePermanently { .. } => DesktopDialogId::ConfirmDeletePermanently,
         InAppDialog::Alert { id, .. } => *id,
     }
+}
+
+pub(crate) fn clamp_pan_for_bounds(
+    pan_x: &mut f32,
+    pan_y: &mut f32,
+    img_width: u32,
+    img_height: u32,
+    zoom: f32,
+    bounds: [f32; 2],
+) {
+    let vp_w = bounds[0].max(1.0);
+    let vp_h = bounds[1].max(1.0);
+    let iw = img_width.max(1) as f32;
+    let ih = img_height.max(1) as f32;
+    let fit_scale = (vp_w / iw).min(vp_h / ih);
+    let disp_w = iw * fit_scale * zoom;
+    let disp_h = ih * fit_scale * zoom;
+
+    if disp_w <= vp_w {
+        *pan_x = 0.0;
+    } else {
+        let max_x = (disp_w - vp_w) * 0.5;
+        *pan_x = pan_x.clamp(-max_x, max_x);
+    }
+
+    if disp_h <= vp_h {
+        *pan_y = 0.0;
+    } else {
+        let max_y = (disp_h - vp_h) * 0.5;
+        *pan_y = pan_y.clamp(-max_y, max_y);
+    }
+}
+
+pub(crate) fn clamp_editor_pan(state: &mut PhotonGui, bounds: [f32; 2]) {
+    let Some(frame) = state.editor_frame.as_ref() else {
+        return;
+    };
+    clamp_pan_for_bounds(
+        &mut state.pan_x,
+        &mut state.pan_y,
+        frame.width,
+        frame.height,
+        state.zoom,
+        bounds,
+    );
 }
 
 pub(crate) fn resolved_editor_canvas_bounds(state: &PhotonGui) -> Rectangle {
@@ -6302,6 +7094,28 @@ fn build_in_app_dialog<'a>(
     let id = dialog_id_for_in_app(dialog);
     let overlay = OverlayMode::default();
     match dialog {
+        InAppDialog::SelectionModify { kind, value, error } => dialog_spec_to_managed(
+            id,
+            prompt_dialog_spec(
+                PromptDialogSpec::new(
+                    tr(lang, kind.title_key()),
+                    tr(lang, kind.hint_key()),
+                    value.clone(),
+                    tr(lang, "dialog-select-modify-apply"),
+                    tr(lang, "dialog-cancel"),
+                    Message::SelectionModifyValueChanged,
+                    Message::ConfirmSelectionModify,
+                    Message::CloseDialog,
+                    Message::Noop,
+                )
+                .label(tr(lang, kind.label_key()))
+                .error(error.clone()),
+            ),
+            default_window_state_for(id),
+            overlay,
+            lang,
+            theme,
+        ),
         InAppDialog::NewFolder {
             parent,
             name,
@@ -6505,11 +7319,21 @@ fn build_in_app_dialog<'a>(
                 theme,
             )
         }
-        InAppDialog::Batch(batch_state) => match batch_state.kind {
-            BatchDialogKind::Resize => build_batch_resize_dialog(state, batch_state, theme),
-            BatchDialogKind::Crop => build_batch_crop_dialog(state, batch_state, theme),
-            BatchDialogKind::Convert => build_batch_convert_dialog(state, batch_state, theme),
-        },
+        InAppDialog::Batch(batch_state) => {
+            let defaults = default_window_state_for(id);
+            let spec = match batch_state.kind {
+                BatchDialogKind::Resize => {
+                    build_batch_resize_dialog(&state.snapshot, batch_state, id, defaults, theme)
+                }
+                BatchDialogKind::Crop => {
+                    build_batch_crop_dialog(&state.snapshot, batch_state, id, defaults, theme)
+                }
+                BatchDialogKind::Convert => {
+                    build_batch_convert_dialog(&state.snapshot, batch_state, id, defaults, theme)
+                }
+            };
+            map_batch_dialog_spec(spec)
+        }
         InAppDialog::RenameItem { path, name, error } => dialog_spec_to_managed(
             id,
             prompt_dialog_spec(
@@ -6558,7 +7382,14 @@ fn build_in_app_dialog<'a>(
             error,
         } => dialog_spec_to_managed(
             id,
-            build_export_dialog(lang, path, *quality, max_edge, *metadata, error.as_deref()),
+            map_editor_dialog_spec(build_export_dialog(
+                lang,
+                path,
+                *quality,
+                max_edge,
+                *metadata,
+                error.as_deref(),
+            )),
             default_window_state_for(id),
             overlay,
             lang,
@@ -6574,7 +7405,15 @@ fn build_in_app_dialog<'a>(
             ..
         } => dialog_spec_to_managed(
             id,
-            build_color_picker_dialog(lang, *target, *r, *g, *b, hex, *transparent),
+            map_editor_dialog_spec(build_color_picker_dialog(
+                lang,
+                *target,
+                *r,
+                *g,
+                *b,
+                hex,
+                *transparent,
+            )),
             default_window_state_for(id),
             overlay,
             lang,
@@ -6620,7 +7459,423 @@ fn dispatch_to_core(core: CoreHandle, command: Command) -> Task<Message> {
     )
 }
 
+fn map_batch_dialog_spec<'a>(
+    spec: ManagedDialogSpec<'a, DesktopDialogId, BatchDialogAction<DesktopDialogId>>,
+) -> ManagedDialogSpec<'a, DesktopDialogId, Message> {
+    let map_act = |act: BatchDialogAction<DesktopDialogId>| match act {
+        BatchDialogAction::Msg(m) => Message::BatchDialog(m),
+        BatchDialogAction::Close => Message::CloseDialog,
+        BatchDialogAction::DialogEvent(ev) => Message::DialogEvent(ev),
+        BatchDialogAction::Noop => Message::Noop,
+    };
+    let on_ev = spec.on_event;
+    ManagedDialogSpec {
+        id: spec.id,
+        open: spec.open,
+        title: spec.title,
+        defaults: spec.defaults,
+        resizable: spec.resizable,
+        draggable: spec.draggable,
+        overlay: spec.overlay,
+        body: spec.body.map(map_act),
+        footer: spec.footer.map(|f| f.map(map_act)),
+        close_button: spec.close_button.map(|b| b.map(map_act)),
+        style: spec.style,
+        on_event: Box::new(move |ev| map_act(on_ev(ev))),
+        on_close: map_act(spec.on_close),
+        on_noop: map_act(spec.on_noop),
+    }
+}
+
+fn map_browser_message(msg: BrowserMessage) -> Message {
+    match msg {
+        BrowserMessage::Noop => Message::Noop,
+        BrowserMessage::Dispatch(cmd) => Message::Dispatch(cmd),
+        BrowserMessage::ContextMenuDispatch(cmd) => Message::ContextMenuDispatch(cmd),
+        BrowserMessage::ToggleMenu(kind) => {
+            let m = match kind {
+                BrowserMenuKind::File => ActiveMenu::BrowserFile,
+                BrowserMenuKind::View => ActiveMenu::BrowserView,
+                BrowserMenuKind::Tools => ActiveMenu::BrowserTools,
+                BrowserMenuKind::Plugins => ActiveMenu::BrowserPlugins,
+                BrowserMenuKind::Window => ActiveMenu::BrowserWindow,
+                BrowserMenuKind::Help => ActiveMenu::BrowserHelp,
+                BrowserMenuKind::Sort => ActiveMenu::BrowserSort,
+                BrowserMenuKind::WorkspaceSwitcher => ActiveMenu::WorkspaceSwitcher,
+            };
+            Message::ToggleMenu(m)
+        }
+        BrowserMessage::ToggleWorkspacePanels => Message::ToggleMenu(ActiveMenu::WorkspacePanels),
+        BrowserMessage::ToggleFullscreen => Message::ToggleFullscreen,
+        BrowserMessage::OpenSettings => Message::OpenSettings,
+        BrowserMessage::OpenShortcutsDialog => Message::OpenShortcutsDialog,
+        BrowserMessage::OpenAboutDialog => Message::OpenAboutDialog,
+        BrowserMessage::RequestResetLayout => Message::RequestResetLayout,
+        BrowserMessage::OpenBatchDialog(k) => Message::OpenBatchDialog(k),
+        BrowserMessage::TogglePathEdit(b) => Message::TogglePathEdit(b),
+        BrowserMessage::FolderInputChanged(v) => Message::FolderInputChanged(v),
+        BrowserMessage::SubmitFolderInput => Message::SubmitFolderInput,
+        BrowserMessage::ToggleBrowserFilterBar => Message::ToggleBrowserFilterBar,
+        BrowserMessage::BrowserFilterChanged(v) => Message::BrowserFilterChanged(v),
+        BrowserMessage::ClearBrowserFilter => Message::ClearBrowserFilter,
+        BrowserMessage::ToggleBrowserFilterCaseSensitive => {
+            Message::ToggleBrowserFilterCaseSensitive
+        }
+        BrowserMessage::ToggleBrowserFilterRegex => Message::ToggleBrowserFilterRegex,
+        BrowserMessage::SetBrowserSortField(f) => Message::SetBrowserSortField(f),
+        BrowserMessage::SetBrowserSortOrder(o) => Message::SetBrowserSortOrder(o),
+        BrowserMessage::SetBrowserThumbSize(s) => Message::SetBrowserThumbSize(s),
+        BrowserMessage::SetBrowserViewMode(m) => Message::SetBrowserViewMode(m),
+        BrowserMessage::BrowserEntryActivated {
+            path,
+            is_dir,
+            is_image,
+        } => Message::BrowserEntryActivated {
+            path,
+            is_dir,
+            is_image,
+        },
+        BrowserMessage::ToggleFolderExpand(p) => Message::ToggleFolderExpand(p),
+        BrowserMessage::OpenBrowserContextMenu { path, x, y } => {
+            Message::OpenBrowserContextMenu { path, x, y }
+        }
+        BrowserMessage::OpenQuickAccessContextMenu { path, x, y } => {
+            Message::OpenQuickAccessContextMenu { path, x, y }
+        }
+        BrowserMessage::BrowserCopyPath(p) => Message::BrowserCopyPath(p),
+        BrowserMessage::BrowserStartRename(p) => Message::BrowserStartRename(p),
+        BrowserMessage::BrowserCopyTo(ps) => Message::BrowserCopyTo(ps),
+        BrowserMessage::BrowserMoveTo(ps) => Message::BrowserMoveTo(ps),
+        BrowserMessage::BrowserConfirmDeletePermanently(ps) => {
+            Message::BrowserConfirmDeletePermanently(ps)
+        }
+        BrowserMessage::CopyImageToClipboard(p) => Message::CopyImageToClipboard(p),
+        BrowserMessage::RevealInFolder(p) => Message::RevealInFolder(p),
+        BrowserMessage::BeginDragBrowserPanel(p) => Message::BeginDragBrowserPanel(p),
+        BrowserMessage::HoverBrowserPanelDrop(p) => Message::HoverBrowserPanelDrop(p),
+        BrowserMessage::DropBrowserPanel(p) => Message::DropBrowserPanel(p),
+        BrowserMessage::SwapBrowserLeftPanels => Message::SwapBrowserLeftPanels,
+        BrowserMessage::ToggleBrowserLeftPanelCollapse(p) => {
+            Message::ToggleBrowserLeftPanelCollapse(p)
+        }
+        BrowserMessage::CloseBrowserLeftPanel(p) => Message::CloseBrowserLeftPanel(p),
+        BrowserMessage::ToggleBrowserPanelVisible(p) => Message::ToggleBrowserPanelVisible(p),
+        BrowserMessage::BrowserSplitterDrag(w) => Message::BrowserSplitterDrag(w),
+        BrowserMessage::BrowserSplitterRelease(w) => Message::BrowserSplitterRelease(w),
+        BrowserMessage::BeginDragBrowserRightPanel(p) => Message::BeginDragBrowserRightPanel(p),
+        BrowserMessage::HoverBrowserRightPanelDrop(p) => Message::HoverBrowserRightPanelDrop(p),
+        BrowserMessage::DropBrowserRightPanel(p) => Message::DropBrowserRightPanel(p),
+        BrowserMessage::SwapBrowserRightPanels => Message::SwapBrowserRightPanels,
+        BrowserMessage::ToggleBrowserRightPanelCollapse(p) => {
+            Message::ToggleBrowserRightPanelCollapse(p)
+        }
+        BrowserMessage::CloseBrowserRightPanel(p) => Message::CloseBrowserRightPanel(p),
+        BrowserMessage::ToggleBrowserRightPanelVisible(p) => {
+            Message::ToggleBrowserRightPanelVisible(p)
+        }
+        BrowserMessage::BrowserRightSplitterDrag(w) => Message::BrowserRightSplitterDrag(w),
+        BrowserMessage::BrowserRightSplitterRelease(w) => Message::BrowserRightSplitterRelease(w),
+    }
+}
+
+fn map_editor_dialog_spec<'a>(spec: DialogSpec<'a, EditorMessage>) -> DialogSpec<'a, Message> {
+    DialogSpec {
+        open: spec.open,
+        title: spec.title,
+        width: spec.width,
+        body: spec.body.map(Message::Editor),
+        footer: spec.footer.map(Message::Editor),
+        on_close: map_editor_message(spec.on_close),
+        on_noop: map_editor_message(spec.on_noop),
+    }
+}
+
+fn map_editor_message(msg: EditorMessage) -> Message {
+    match msg {
+        EditorMessage::Noop => Message::Noop,
+        EditorMessage::Dispatch(cmd) => Message::Dispatch(cmd),
+        EditorMessage::ContextMenuDispatch(cmd) => Message::ContextMenuDispatch(cmd),
+        EditorMessage::ToggleMenu(kind) => {
+            let m = match kind {
+                EditorMenuKind::File => ActiveMenu::EditorFile,
+                EditorMenuKind::Edit => ActiveMenu::EditorEdit,
+                EditorMenuKind::Image => ActiveMenu::EditorImage,
+                EditorMenuKind::Filter => ActiveMenu::EditorFilter,
+                EditorMenuKind::Select => ActiveMenu::EditorSelect,
+                EditorMenuKind::View => ActiveMenu::EditorView,
+                EditorMenuKind::Window => ActiveMenu::EditorWindow,
+                EditorMenuKind::Help => ActiveMenu::EditorHelp,
+                EditorMenuKind::AddLayer => ActiveMenu::EditorAddLayer,
+                EditorMenuKind::WorkspaceSwitcher => ActiveMenu::WorkspaceSwitcher,
+            };
+            Message::ToggleMenu(m)
+        }
+        EditorMessage::HoverMenu(kind) => {
+            let m = match kind {
+                EditorMenuKind::File => ActiveMenu::EditorFile,
+                EditorMenuKind::Edit => ActiveMenu::EditorEdit,
+                EditorMenuKind::Image => ActiveMenu::EditorImage,
+                EditorMenuKind::Filter => ActiveMenu::EditorFilter,
+                EditorMenuKind::Select => ActiveMenu::EditorSelect,
+                EditorMenuKind::View => ActiveMenu::EditorView,
+                EditorMenuKind::Window => ActiveMenu::EditorWindow,
+                EditorMenuKind::Help => ActiveMenu::EditorHelp,
+                EditorMenuKind::AddLayer => ActiveMenu::EditorAddLayer,
+                EditorMenuKind::WorkspaceSwitcher => ActiveMenu::WorkspaceSwitcher,
+            };
+            Message::HoverMenu(m)
+        }
+        EditorMessage::ToggleWorkspacePanels => Message::ToggleMenu(ActiveMenu::WorkspacePanels),
+        EditorMessage::RequestEditorLeaveToBrowser => Message::RequestEditorLeaveToBrowser,
+        EditorMessage::RequestEditorLeave { close_editor } => {
+            Message::RequestEditorLeave { close_editor }
+        }
+        EditorMessage::Canvas(ev) => Message::Canvas(ev),
+        EditorMessage::CloseDialog => Message::CloseDialog,
+        EditorMessage::OpenExportDialog => Message::OpenExportDialog,
+        EditorMessage::PickExportDialog => Message::PickExportDialog,
+        EditorMessage::ConfirmExport => Message::ConfirmExport,
+        EditorMessage::ExportPathChanged(v) => Message::ExportPathChanged(v),
+        EditorMessage::ExportQualityChanged(v) => Message::ExportQualityChanged(v),
+        EditorMessage::ExportMaxEdgeChanged(v) => Message::ExportMaxEdgeChanged(v),
+        EditorMessage::ExportMetadataToggled(v) => Message::ExportMetadataToggled(v),
+        EditorMessage::OpenResizeDialog => Message::OpenResizeDialog,
+        EditorMessage::OpenColorPicker(t) => Message::OpenColorPicker(t),
+        EditorMessage::ColorPickerSetRgb(r, g, b) => Message::ColorPickerSetRgb(r, g, b),
+        EditorMessage::ColorPickerHexChanged(v) => Message::ColorPickerHexChanged(v),
+        EditorMessage::ColorPickerToggleTransparent(v) => Message::ColorPickerToggleTransparent(v),
+        EditorMessage::ConfirmColorPicker => Message::ConfirmColorPicker,
+        EditorMessage::ResetViewportBackground => Message::ResetViewportBackground,
+        EditorMessage::CopyImageToClipboard(p) => Message::CopyImageToClipboard(p),
+        EditorMessage::EditorSelectTool(t) => Message::EditorSelectTool(t),
+        EditorMessage::EditorSetSelectOp(op) => Message::EditorSetSelectOp(op),
+        EditorMessage::EditorSetSelectFeather(v) => Message::EditorSetSelectFeather(v),
+        EditorMessage::EditorToggleSelectAntiAlias => Message::EditorToggleSelectAntiAlias,
+        EditorMessage::EditorSetWandTolerance(v) => Message::EditorSetWandTolerance(v),
+        EditorMessage::EditorToggleWandContiguous => Message::EditorToggleWandContiguous,
+        EditorMessage::EditorToggleSelectSampleAll => Message::EditorToggleSelectSampleAll,
+        EditorMessage::EditorSetQuickSelectRadius(v) => Message::EditorSetQuickSelectRadius(v),
+        EditorMessage::EditorSetBrushSmoothingMode(m) => Message::EditorSetBrushSmoothingMode(m),
+        EditorMessage::EditorSetStabilizerDistance(d) => Message::EditorSetStabilizerDistance(d),
+        EditorMessage::EditorSetShapeFillMode(m) => Message::EditorSetShapeFillMode(m),
+        EditorMessage::EditorSetShapeStrokeWidth(w) => Message::EditorSetShapeStrokeWidth(w),
+        EditorMessage::EditorSetFloodFillTolerance(t) => Message::EditorSetFloodFillTolerance(t),
+        EditorMessage::EditorToggleFloodFillContiguous => Message::EditorToggleFloodFillContiguous,
+        EditorMessage::EditorSetGradientKind(k) => Message::EditorSetGradientKind(k),
+        EditorMessage::EditorSetGradientColorMode(c) => Message::EditorSetGradientColorMode(c),
+        EditorMessage::SelectEditorToolTab(t) => Message::SelectEditorToolTab(t),
+        EditorMessage::EditorSwapColors => Message::EditorSwapColors,
+        EditorMessage::EditorResetColors => Message::EditorResetColors,
+        EditorMessage::EditorCycleCompareMode => Message::EditorCycleCompareMode,
+        EditorMessage::EditorSetCompareMode(m) => Message::EditorSetCompareMode(m),
+        EditorMessage::EditorOpenAdjustPopup(tab) => Message::EditorOpenAdjustPopup(tab),
+        EditorMessage::EditorSetBrushRadius(v) => Message::EditorSetBrushRadius(v),
+        EditorMessage::EditorSetBrushOpacity(v) => Message::EditorSetBrushOpacity(v),
+        EditorMessage::EditorSetBrushHardness(v) => Message::EditorSetBrushHardness(v),
+        EditorMessage::EditorSetBrushFlow(v) => Message::EditorSetBrushFlow(v),
+        EditorMessage::EditorSetBrushSpacing(v) => Message::EditorSetBrushSpacing(v),
+        EditorMessage::EditorSetBrushTip(t) => Message::EditorSetBrushTip(t),
+        EditorMessage::EditorSetLiquifyMode(m) => Message::EditorSetLiquifyMode(m),
+        EditorMessage::EditorSetLiquifyRadius(v) => Message::EditorSetLiquifyRadius(v),
+        EditorMessage::EditorSetLiquifyStrength(v) => Message::EditorSetLiquifyStrength(v),
+        EditorMessage::EditorSetRotateAngle(v) => Message::EditorSetRotateAngle(v),
+        EditorMessage::EditorApplyRotateAngle => Message::EditorApplyRotateAngle,
+        EditorMessage::EditorSetCanvasAnchor(a) => Message::EditorSetCanvasAnchor(a),
+        EditorMessage::EditorCanvasDimAction(a) => Message::EditorCanvasDimAction(a),
+        EditorMessage::EditorApplyCanvasSize => Message::EditorApplyCanvasSize,
+        EditorMessage::ToggleCropMode => Message::ToggleCropMode,
+        EditorMessage::SetCropPreset(p) => Message::SetCropPreset(p),
+        EditorMessage::ApplyCrop => Message::ApplyCrop,
+        EditorMessage::CancelCrop => Message::CancelCrop,
+        EditorMessage::BeginDragEditorPanel(p) => Message::BeginDragEditorPanel(p),
+        EditorMessage::HoverEditorPanelDrop(p) => Message::HoverEditorPanelDrop(p),
+        EditorMessage::DropEditorPanel(p) => Message::DropEditorPanel(p),
+        EditorMessage::SwapEditorPanelOrder => Message::SwapEditorPanelOrder,
+        EditorMessage::ToggleEditorPanelCollapse(p) => Message::ToggleEditorPanelCollapse(p),
+        EditorMessage::CloseEditorPanel(p) => Message::CloseEditorPanel(p),
+        EditorMessage::CloseEditorToolsPanel => Message::CloseEditorToolsPanel,
+        EditorMessage::DockSplitterDrag(k, v) => Message::DockSplitterDrag(k, v),
+        EditorMessage::DockSplitterRelease(k, v) => Message::DockSplitterRelease(k, v),
+        EditorMessage::OpenLayerContextMenu { layer_id } => {
+            Message::OpenLayerContextMenu { layer_id }
+        }
+        EditorMessage::EditorStartLayerRename(id, name) => {
+            Message::EditorStartLayerRename(id, name)
+        }
+        EditorMessage::EditorLayerRenameChanged(v) => Message::EditorLayerRenameChanged(v),
+        EditorMessage::EditorCommitLayerRename => Message::EditorCommitLayerRename,
+        EditorMessage::EditorCancelLayerRename => Message::EditorCancelLayerRename,
+    }
+}
+
+fn map_viewer_message(msg: ViewerMessage) -> Message {
+    match msg {
+        ViewerMessage::Noop => Message::Noop,
+        ViewerMessage::Dispatch(cmd) => Message::Dispatch(cmd),
+        ViewerMessage::ContextMenuDispatch(cmd) => Message::ContextMenuDispatch(cmd),
+        ViewerMessage::PickImagesDialog => Message::PickImagesDialog,
+        ViewerMessage::DualStepSpread(d) => Message::DualStepSpread(d),
+        ViewerMessage::ZoomStep(f) => Message::ZoomStep(f),
+        ViewerMessage::Canvas(ev) => Message::Canvas(ev),
+        ViewerMessage::ViewerCanvas(p, ev) => Message::ViewerCanvas(p, ev),
+        ViewerMessage::ViewerZoomActual => Message::ViewerZoomActual,
+        ViewerMessage::ViewerRotatePreview(d) => Message::ViewerRotatePreview(d),
+        ViewerMessage::ToggleFullscreen => Message::ToggleFullscreen,
+        ViewerMessage::SetViewerViewMode(m) => Message::SetViewerViewMode(m),
+        ViewerMessage::ToggleReaderOptions => Message::ToggleMenu(ActiveMenu::ReaderOptions),
+        ViewerMessage::ToggleWorkspaceSwitcher => {
+            Message::ToggleMenu(ActiveMenu::WorkspaceSwitcher)
+        }
+        ViewerMessage::ToggleWorkspacePanels => Message::ToggleMenu(ActiveMenu::WorkspacePanels),
+        ViewerMessage::OpenViewerContextMenu { path, pos } => {
+            Message::OpenViewerContextMenu { path, pos }
+        }
+        ViewerMessage::CopyImageToClipboard(p) => Message::CopyImageToClipboard(p),
+        ViewerMessage::CopyViewerPath => Message::CopyViewerPath,
+        ViewerMessage::RevealInFolder(p) => Message::RevealInFolder(p),
+        ViewerMessage::ToggleFilmstrip => Message::ToggleFilmstrip,
+        ViewerMessage::CloseFilmstrip => Message::CloseFilmstrip,
+        ViewerMessage::ToggleViewerInspector => Message::ToggleViewerInspector,
+        ViewerMessage::ToggleViewerColorPopover => Message::ToggleViewerColorPopover,
+        ViewerMessage::CloseViewerPanel(p) => Message::CloseViewerPanel(p),
+        ViewerMessage::ToggleViewerPanelCollapse(p) => Message::ToggleViewerPanelCollapse(p),
+        ViewerMessage::BeginDragViewerPanel(p) => Message::BeginDragViewerPanel(p),
+        ViewerMessage::HoverViewerPanelDrop(p) => Message::HoverViewerPanelDrop(p),
+        ViewerMessage::DropViewerPanel(p) => Message::DropViewerPanel(p),
+        ViewerMessage::SwapViewerRightPanels => Message::SwapViewerRightPanels,
+        ViewerMessage::ViewerSplitterDrag(w) => Message::ViewerSplitterDrag(w),
+        ViewerMessage::ViewerSplitterRelease(w) => Message::ViewerSplitterRelease(w),
+        ViewerMessage::SetViewerAdjExposure(v) => Message::SetViewerAdjExposure(v),
+        ViewerMessage::SetViewerAdjGamma(v) => Message::SetViewerAdjGamma(v),
+        ViewerMessage::SetViewerAdjBrightness(v) => Message::SetViewerAdjBrightness(v),
+        ViewerMessage::SetViewerAdjContrast(v) => Message::SetViewerAdjContrast(v),
+        ViewerMessage::SetViewerAdjSaturation(v) => Message::SetViewerAdjSaturation(v),
+        ViewerMessage::SetViewerAdjHighlights(v) => Message::SetViewerAdjHighlights(v),
+        ViewerMessage::SetViewerAdjShadows(v) => Message::SetViewerAdjShadows(v),
+        ViewerMessage::ResetViewerAdj => Message::ResetViewerAdj,
+        ViewerMessage::ViewerAdjOpenInEditor => Message::ViewerAdjOpenInEditor,
+        ViewerMessage::WebtoonScrolled(vp) => Message::WebtoonScrolled(vp),
+    }
+}
+
 impl PhotonGui {
+    fn editor_view_state(&self) -> EditorViewState<'_> {
+        let active_menu = match self.active_menu {
+            Some(ActiveMenu::EditorFile) => Some(EditorMenuKind::File),
+            Some(ActiveMenu::EditorEdit) => Some(EditorMenuKind::Edit),
+            Some(ActiveMenu::EditorImage) => Some(EditorMenuKind::Image),
+            Some(ActiveMenu::EditorFilter) => Some(EditorMenuKind::Filter),
+            Some(ActiveMenu::EditorSelect) => Some(EditorMenuKind::Select),
+            Some(ActiveMenu::EditorView) => Some(EditorMenuKind::View),
+            Some(ActiveMenu::EditorWindow) => Some(EditorMenuKind::Window),
+            Some(ActiveMenu::EditorHelp) => Some(EditorMenuKind::Help),
+            Some(ActiveMenu::EditorAddLayer) => Some(EditorMenuKind::AddLayer),
+            Some(ActiveMenu::WorkspaceSwitcher) => Some(EditorMenuKind::WorkspaceSwitcher),
+            _ => None,
+        };
+        EditorViewState {
+            snapshot: &self.snapshot,
+            editor_frame: self.editor_frame.as_ref(),
+            editor_original_frame: self.editor_original_frame.as_ref(),
+            selection_mask: self.editor_selection_mask.as_ref(),
+            marching_ants_phase: self.marching_ants_phase,
+            editor_layer_thumbs: &self.editor_layer_thumbs,
+            editor_mask_thumbs: &self.editor_mask_thumbs,
+            editor_ui: &self.editor_ui,
+            pending_adj: &self.pending_adj,
+            crop_uv: self.crop_uv,
+            viewport_background: self.viewport_background,
+            editor_tool_tab: self.editor_tool_tab,
+            editor_history_open: self.editor_history_open,
+            editor_layers_open: self.editor_layers_open,
+            editor_history_collapsed: self.editor_history_collapsed,
+            editor_layers_collapsed: self.editor_layers_collapsed,
+            editor_panels: &self.editor_panels,
+            dock_drag: &self.dock_drag,
+            zoom: self.zoom,
+            pan_x: self.pan_x,
+            pan_y: self.pan_y,
+            window_size: self.window_size,
+            active_menu,
+        }
+    }
+
+    fn browser_view_state(&self) -> BrowserViewState<'_> {
+        let active_menu = match self.active_menu {
+            Some(ActiveMenu::BrowserFile) => Some(BrowserMenuKind::File),
+            Some(ActiveMenu::BrowserView) => Some(BrowserMenuKind::View),
+            Some(ActiveMenu::BrowserTools) => Some(BrowserMenuKind::Tools),
+            Some(ActiveMenu::BrowserPlugins) => Some(BrowserMenuKind::Plugins),
+            Some(ActiveMenu::BrowserWindow) => Some(BrowserMenuKind::Window),
+            Some(ActiveMenu::BrowserHelp) => Some(BrowserMenuKind::Help),
+            Some(ActiveMenu::BrowserSort) => Some(BrowserMenuKind::Sort),
+            Some(ActiveMenu::WorkspaceSwitcher) => Some(BrowserMenuKind::WorkspaceSwitcher),
+            _ => None,
+        };
+        BrowserViewState {
+            snapshot: &self.snapshot,
+            thumbnails: &self.thumbnails,
+            expanded_folders: &self.expanded_folders,
+            folder_children: &self.folder_children,
+            folder_input: &self.folder_input,
+            path_editing: self.path_editing,
+            browser_filter: &self.browser_filter,
+            browser_filter_bar_open: self.browser_filter_bar_open,
+            browser_filter_case_sensitive: self.browser_filter_case_sensitive,
+            browser_filter_regex: self.browser_filter_regex,
+            browser_quick_access_open: self.browser_quick_access_open,
+            browser_quick_access_collapsed: self.browser_quick_access_collapsed,
+            browser_explorer_open: self.browser_explorer_open,
+            browser_explorer_collapsed: self.browser_explorer_collapsed,
+            browser_preview_open: self.browser_preview_open,
+            browser_preview_collapsed: self.browser_preview_collapsed,
+            browser_info_open: self.browser_info_open,
+            browser_info_collapsed: self.browser_info_collapsed,
+            browser_left_panels: &self.browser_left_panels,
+            browser_right_panels: &self.browser_right_panels,
+            browser_left_width_drag: self.browser_left_width_drag,
+            browser_right_width_drag: self.browser_right_width_drag,
+            is_fullscreen: self.is_fullscreen,
+            last_cursor: self.last_cursor,
+            window_size: self.window_size,
+            active_menu,
+        }
+    }
+
+    fn viewer_view_state(&self, is_main_window: bool) -> ViewerViewState<'_> {
+        ViewerViewState {
+            snapshot: &self.snapshot,
+            viewer_mode: self.viewer_mode,
+            viewer_frame: self.viewer_frame.as_ref(),
+            viewer_pair_frame: self.viewer_pair_frame.as_ref(),
+            image_sizes: &self.image_sizes,
+            thumbnails: &self.thumbnails,
+            viewer_adj: self.viewer_adj,
+            viewer_quarter_turns: self.viewer_quarter_turns,
+            zoom: self.zoom,
+            pan_x: self.pan_x,
+            pan_y: self.pan_y,
+            webtoon_zoom: self.webtoon_zoom,
+            webtoon_visible_index: self.webtoon_visible_index,
+            webtoon_pages: &self.webtoon_pages,
+            viewer_manga_rtl: self.viewer_manga_rtl,
+            viewer_manga_cover_separate: self.viewer_manga_cover_separate,
+            viewer_manga_page_gap: self.viewer_manga_page_gap,
+            viewer_webtoon_fit_mode: self.viewer_webtoon_fit_mode,
+            viewer_adjustments_open: self.viewer_adjustments_open,
+            viewer_info_open: self.viewer_info_open,
+            viewer_filmstrip_open: self.viewer_filmstrip_open,
+            viewer_right_panels: &self.viewer_right_panels,
+            viewer_right_width_preview: self.viewer_right_width_preview,
+            viewer_right_split_preview: None,
+            is_fullscreen: self.is_fullscreen,
+            window_size: self.window_size,
+            is_main_window,
+            reader_options_open: self.active_menu == Some(ActiveMenu::ReaderOptions),
+            workspace_switcher_open: self.active_menu == Some(ActiveMenu::WorkspaceSwitcher),
+        }
+    }
+
     fn viewer_ui_presentation(&self) -> ViewerUiPresentation {
         ViewerUiPresentation {
             view_mode: self.viewer_mode,
@@ -6804,6 +8059,29 @@ fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) -> Task<Mes
         "editor.tool.pointer" => update(state, Message::EditorSelectTool(EditorTool::Pointer)),
         "editor.tool.hand" => update(state, Message::EditorSelectTool(EditorTool::Hand)),
         "editor.tool.zoom" => update(state, Message::EditorSelectTool(EditorTool::Zoom)),
+        "editor.tool.marquee_rect" => {
+            update(state, Message::EditorSelectTool(EditorTool::MarqueeRect))
+        }
+        "editor.tool.marquee_ellipse" => {
+            update(state, Message::EditorSelectTool(EditorTool::MarqueeEllipse))
+        }
+        "editor.tool.single_row" => update(state, Message::EditorSelectTool(EditorTool::SingleRow)),
+        "editor.tool.single_col" => update(state, Message::EditorSelectTool(EditorTool::SingleCol)),
+        "editor.tool.lasso" => update(state, Message::EditorSelectTool(EditorTool::Lasso)),
+        "editor.tool.polygon_lasso" => {
+            update(state, Message::EditorSelectTool(EditorTool::PolygonLasso))
+        }
+        "editor.tool.magnetic_lasso" => {
+            update(state, Message::EditorSelectTool(EditorTool::MagneticLasso))
+        }
+        "editor.tool.bezier_select" => {
+            update(state, Message::EditorSelectTool(EditorTool::BezierSelect))
+        }
+        "editor.tool.quick_select" => {
+            update(state, Message::EditorSelectTool(EditorTool::QuickSelect))
+        }
+        "editor.tool.magic_wand" => update(state, Message::EditorSelectTool(EditorTool::MagicWand)),
+        "editor.menu.select" => update(state, Message::ToggleMenu(ActiveMenu::EditorSelect)),
         "editor.tool.brush" => update(state, Message::EditorSelectTool(EditorTool::Brush)),
         "editor.tool.eraser" => update(state, Message::EditorSelectTool(EditorTool::Eraser)),
         "editor.tool.liquify" => update(state, Message::EditorSelectTool(EditorTool::Liquify)),
@@ -6817,6 +8095,22 @@ fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) -> Task<Mes
         "editor.tool.rotate_angle" => {
             update(state, Message::EditorSelectTool(EditorTool::RotateAngle))
         }
+        "editor.tool.draw_line" => update(state, Message::EditorSelectTool(EditorTool::DrawLine)),
+        "editor.tool.draw_rect" => update(state, Message::EditorSelectTool(EditorTool::DrawRect)),
+        "editor.tool.draw_ellipse" => {
+            update(state, Message::EditorSelectTool(EditorTool::DrawEllipse))
+        }
+        "editor.tool.draw_polygon" => {
+            update(state, Message::EditorSelectTool(EditorTool::DrawPolygon))
+        }
+        "editor.tool.draw_polyline" => {
+            update(state, Message::EditorSelectTool(EditorTool::DrawPolyline))
+        }
+        "editor.tool.bezier_pen" => update(state, Message::EditorSelectTool(EditorTool::BezierPen)),
+        "editor.tool.paint_bucket" => {
+            update(state, Message::EditorSelectTool(EditorTool::PaintBucket))
+        }
+        "editor.tool.gradient" => update(state, Message::EditorSelectTool(EditorTool::Gradient)),
         "editor.adjust_popup.open" | "editor.adjust_popup.tab.color" | "editor.adjust.color" => {
             update(
                 state,
@@ -7462,8 +8756,8 @@ fn schedule_missing_thumbnails(state: &mut PhotonGui) -> Task<Message> {
 fn window_size_for_image(snap: &UiStateSnapshot, img_w: u32, img_h: u32) -> Size {
     if img_w == 0 || img_h == 0 {
         return Size::new(
-            (snap.meta.layout.window_width as f32).clamp(960.0, 1728.0),
-            (snap.meta.layout.window_height as f32).clamp(540.0, 972.0),
+            (snap.meta.layout.window_width as f32).clamp(680.0, 1728.0),
+            (snap.meta.layout.window_height as f32).clamp(500.0, 972.0),
         );
     }
     let layout = &snap.meta.layout;
@@ -7495,8 +8789,8 @@ fn window_size_for_image(snap: &UiStateSnapshot, img_w: u32, img_h: u32) -> Size
         scale *= 0.98;
     }
 
-    let w = (iw * scale + chrome_w).round().clamp(960.0, max_w);
-    let h = (ih * scale + chrome_h).round().clamp(540.0, max_h);
+    let w = (iw * scale + chrome_w).round().clamp(680.0, max_w);
+    let h = (ih * scale + chrome_h).round().clamp(500.0, max_h);
     Size::new(w, h)
 }
 
@@ -7679,6 +8973,34 @@ fn load_viewer_pair_frame_task(path: Option<String>) -> Task<Message> {
     )
 }
 
+fn resolve_select_op(state: &PhotonGui, shift: bool, alt: bool) -> SelectionBooleanOp {
+    if shift && alt {
+        SelectionBooleanOp::Intersect
+    } else if shift {
+        SelectionBooleanOp::Add
+    } else if alt {
+        SelectionBooleanOp::Subtract
+    } else {
+        state.editor_ui.select_op
+    }
+}
+
+fn load_editor_selection_mask_task(core: CoreHandle) -> Task<Message> {
+    Task::perform(
+        async move {
+            let (rev, w, h, alpha) = core.read_editor_selection_mask().await?;
+            Some(CpuMaskFrame {
+                key: format!("editor:sel:{rev}"),
+                revision: rev,
+                width: w,
+                height: h,
+                alpha: Arc::new(alpha),
+            })
+        },
+        Message::EditorSelectionMaskLoaded,
+    )
+}
+
 fn load_editor_frame_task(core: CoreHandle) -> Task<Message> {
     Task::perform(
         async move {
@@ -7785,4 +9107,94 @@ fn reveal_path_in_folder(path: &str) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_editor_pan_centers_when_smaller_than_viewport_and_clamps_when_larger() {
+        // 1000x500 image in 1000x1000 viewport => fit_scale = 1.0.
+        // At zoom = 1.0: disp = (1000, 500) <= (1000, 1000) => pan resets to 0.0.
+        let (mut pan_x, mut pan_y) = (120.0, -80.0);
+        clamp_pan_for_bounds(&mut pan_x, &mut pan_y, 1000, 500, 1.0, [1000.0, 1000.0]);
+        assert_eq!(pan_x, 0.0);
+        assert_eq!(pan_y, 0.0);
+
+        // At zoom = 2.0: disp = (2000, 1000).
+        // disp_w (2000) > 1000 => max_x = 500; disp_h (1000) <= 1000 => pan_y = 0.0.
+        pan_x = 800.0;
+        pan_y = 40.0;
+        clamp_pan_for_bounds(&mut pan_x, &mut pan_y, 1000, 500, 2.0, [1000.0, 1000.0]);
+        assert_eq!(pan_x, 500.0);
+        assert_eq!(pan_y, 0.0);
+
+        // Negative pan clamps to -500.0.
+        pan_x = -900.0;
+        clamp_pan_for_bounds(&mut pan_x, &mut pan_y, 1000, 500, 2.0, [1000.0, 1000.0]);
+        assert_eq!(pan_x, -500.0);
+    }
+
+    #[test]
+    fn selection_modify_kind_validates_ranges() {
+        let lang = Language::English;
+        assert!(
+            SelectionModifyKind::Feather
+                .parse_and_validate("0.5", lang)
+                .is_ok()
+        );
+        assert!(
+            SelectionModifyKind::Feather
+                .parse_and_validate("250.0", lang)
+                .is_ok()
+        );
+        assert!(
+            SelectionModifyKind::Feather
+                .parse_and_validate("0.4", lang)
+                .is_err()
+        );
+        assert!(
+            SelectionModifyKind::Feather
+                .parse_and_validate("250.1", lang)
+                .is_err()
+        );
+
+        assert!(
+            SelectionModifyKind::Expand
+                .parse_and_validate("1", lang)
+                .is_ok()
+        );
+        assert!(
+            SelectionModifyKind::Expand
+                .parse_and_validate("500", lang)
+                .is_ok()
+        );
+        assert!(
+            SelectionModifyKind::Expand
+                .parse_and_validate("0", lang)
+                .is_err()
+        );
+        assert!(
+            SelectionModifyKind::Expand
+                .parse_and_validate("501", lang)
+                .is_err()
+        );
+
+        assert!(
+            SelectionModifyKind::Grow
+                .parse_and_validate("0", lang)
+                .is_ok()
+        );
+        assert!(
+            SelectionModifyKind::Grow
+                .parse_and_validate("255", lang)
+                .is_ok()
+        );
+        assert!(
+            SelectionModifyKind::Grow
+                .parse_and_validate("256", lang)
+                .is_err()
+        );
+    }
 }

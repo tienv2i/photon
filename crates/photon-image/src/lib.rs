@@ -3,9 +3,11 @@
 
 pub mod codec;
 pub mod document;
+pub mod drawing;
 pub mod layer;
 pub mod liquify;
 pub mod pixels;
+pub mod selection;
 
 use photon_protocol::UiText;
 use thiserror::Error;
@@ -16,6 +18,7 @@ pub use layer::{
     Layer, LayerOperation, LayerStack, LayerThumbnail, blend_layer_onto, composite_stack,
     render_layer_thumbnails,
 };
+pub use selection::{SelectionMask, SelectionSnapshot, rasterize_shape};
 
 pub const MAX_IMAGE_DIMENSION: u32 = 32_768;
 pub const MAX_DOCUMENT_PIXELS: u64 = 100_000_000;

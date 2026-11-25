@@ -34,91 +34,218 @@ use photon_ui::theme::{
     PaletteTokens, RADIUS_SM, TEXT_SIZE_CAPTION, TEXT_SIZE_CONTROL, canvas_backdrop_style,
     card_style, hairline_rule_style, input_style, surface_panel_style,
 };
-use photon_ui::toolbar::{WorkspaceTab, toolbar, workspace_switcher_compact};
+use photon_ui::toolbar::{WorkspaceTab, toolbar, workspace_switcher_responsive};
 use photon_ui::tooltip::{TooltipPosition, with_tooltip, with_tooltip_pos};
 use regex_automata::meta::Regex;
 use regex_automata::util::syntax::Config as RegexSyntaxConfig;
 
-use crate::app::{ActiveMenu, Message, PhotonGui, toolbar_divider, toolbar_right_utilities};
-use crate::batch_dialog::BatchDialogKind;
+pub mod batch_dialog;
 
-pub(crate) fn build_browser_toolbar(state: &PhotonGui) -> Element<'_, Message> {
+use iced::widget::container as iced_container;
+use photon_panels::SidebarOrderState;
+use photon_protocol::UiStateSnapshot;
+use photon_ui::toolbar::workspace_switcher_mode;
+use std::collections::{BTreeSet, HashMap};
+
+use batch_dialog::BatchDialogKind;
+
+fn toolbar_divider<'a, M: 'a>() -> Element<'a, M> {
+    iced_container(rule::vertical(1).style(hairline_rule_style))
+        .height(Length::Fixed(18.0))
+        .into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserMenuKind {
+    File,
+    View,
+    Tools,
+    Plugins,
+    Window,
+    Help,
+    Sort,
+    WorkspaceSwitcher,
+}
+
+#[derive(Clone, Copy)]
+pub struct BrowserViewState<'a> {
+    pub snapshot: &'a UiStateSnapshot,
+    pub thumbnails: &'a HashMap<String, iced_image::Handle>,
+    pub expanded_folders: &'a BTreeSet<String>,
+    pub folder_children: &'a HashMap<String, Vec<(String, String)>>,
+    pub folder_input: &'a str,
+    pub path_editing: bool,
+    pub browser_filter: &'a str,
+    pub browser_filter_bar_open: bool,
+    pub browser_filter_case_sensitive: bool,
+    pub browser_filter_regex: bool,
+    pub browser_quick_access_open: bool,
+    pub browser_quick_access_collapsed: bool,
+    pub browser_explorer_open: bool,
+    pub browser_explorer_collapsed: bool,
+    pub browser_preview_open: bool,
+    pub browser_preview_collapsed: bool,
+    pub browser_info_open: bool,
+    pub browser_info_collapsed: bool,
+    pub browser_left_panels: &'a SidebarOrderState<BrowserLeftPanel>,
+    pub browser_right_panels: &'a SidebarOrderState<BrowserRightPanel>,
+    pub browser_left_width_drag: Option<f32>,
+    pub browser_right_width_drag: Option<f32>,
+    pub is_fullscreen: bool,
+    pub last_cursor: Option<iced::Point>,
+    pub window_size: iced::Size,
+    pub active_menu: Option<BrowserMenuKind>,
+}
+
+#[derive(Debug, Clone)]
+pub enum BrowserMessage {
+    Noop,
+    Dispatch(Command),
+    ContextMenuDispatch(Command),
+    ToggleMenu(BrowserMenuKind),
+    ToggleWorkspacePanels,
+    ToggleFullscreen,
+    OpenSettings,
+    OpenShortcutsDialog,
+    OpenAboutDialog,
+    RequestResetLayout,
+    OpenBatchDialog(BatchDialogKind),
+    TogglePathEdit(bool),
+    FolderInputChanged(String),
+    SubmitFolderInput,
+    ToggleBrowserFilterBar,
+    BrowserFilterChanged(String),
+    ClearBrowserFilter,
+    ToggleBrowserFilterCaseSensitive,
+    ToggleBrowserFilterRegex,
+    SetBrowserSortField(BrowserSortField),
+    SetBrowserSortOrder(SortOrder),
+    SetBrowserThumbSize(BrowserThumbSize),
+    SetBrowserViewMode(BrowserViewMode),
+    BrowserEntryActivated {
+        path: String,
+        is_dir: bool,
+        is_image: bool,
+    },
+    ToggleFolderExpand(String),
+    OpenBrowserContextMenu {
+        path: String,
+        x: f32,
+        y: f32,
+    },
+    OpenQuickAccessContextMenu {
+        path: String,
+        x: f32,
+        y: f32,
+    },
+    BrowserCopyPath(String),
+    BrowserStartRename(String),
+    BrowserCopyTo(Vec<String>),
+    BrowserMoveTo(Vec<String>),
+    BrowserConfirmDeletePermanently(Vec<String>),
+    CopyImageToClipboard(Option<String>),
+    RevealInFolder(String),
+    BeginDragBrowserPanel(BrowserLeftPanel),
+    HoverBrowserPanelDrop(BrowserLeftPanel),
+    DropBrowserPanel(BrowserLeftPanel),
+    SwapBrowserLeftPanels,
+    ToggleBrowserLeftPanelCollapse(BrowserLeftPanel),
+    CloseBrowserLeftPanel(BrowserLeftPanel),
+    ToggleBrowserPanelVisible(BrowserLeftPanel),
+    BrowserSplitterDrag(f32),
+    BrowserSplitterRelease(f32),
+    BeginDragBrowserRightPanel(BrowserRightPanel),
+    HoverBrowserRightPanelDrop(BrowserRightPanel),
+    DropBrowserRightPanel(BrowserRightPanel),
+    SwapBrowserRightPanels,
+    ToggleBrowserRightPanelCollapse(BrowserRightPanel),
+    CloseBrowserRightPanel(BrowserRightPanel),
+    ToggleBrowserRightPanelVisible(BrowserRightPanel),
+    BrowserRightSplitterDrag(f32),
+    BrowserRightSplitterRelease(f32),
+}
+
+pub fn build_browser_toolbar<'a>(
+    state: BrowserViewState<'a>,
+    right_utilities: Element<'a, BrowserMessage>,
+) -> Element<'a, BrowserMessage> {
     let lang = state.snapshot.meta.language;
     let menu_open = matches!(
         state.active_menu,
         Some(
-            ActiveMenu::BrowserFile
-                | ActiveMenu::BrowserView
-                | ActiveMenu::BrowserTools
-                | ActiveMenu::BrowserPlugins
-                | ActiveMenu::BrowserWindow
-                | ActiveMenu::BrowserHelp
+            BrowserMenuKind::File
+                | BrowserMenuKind::View
+                | BrowserMenuKind::Tools
+                | BrowserMenuKind::Plugins
+                | BrowserMenuKind::Window
+                | BrowserMenuKind::Help
         )
     );
-    let hover_switch = |target: ActiveMenu| -> Option<Message> {
-        (menu_open && state.active_menu != Some(target)).then_some(Message::ToggleMenu(target))
+    let hover_switch = |target: BrowserMenuKind| -> Option<BrowserMessage> {
+        (menu_open && state.active_menu != Some(target))
+            .then_some(BrowserMessage::ToggleMenu(target))
     };
 
     let menubar = menubar_row_hoverable(vec![
         (
             MenubarTrigger {
                 label: tr(lang, "menu-file"),
-                active: state.active_menu == Some(ActiveMenu::BrowserFile),
-                on_press: Message::ToggleMenu(ActiveMenu::BrowserFile),
+                active: state.active_menu == Some(BrowserMenuKind::File),
+                on_press: BrowserMessage::ToggleMenu(BrowserMenuKind::File),
             },
-            hover_switch(ActiveMenu::BrowserFile),
+            hover_switch(BrowserMenuKind::File),
         ),
         (
             MenubarTrigger {
                 label: tr(lang, "menu-view"),
-                active: state.active_menu == Some(ActiveMenu::BrowserView),
-                on_press: Message::ToggleMenu(ActiveMenu::BrowserView),
+                active: state.active_menu == Some(BrowserMenuKind::View),
+                on_press: BrowserMessage::ToggleMenu(BrowserMenuKind::View),
             },
-            hover_switch(ActiveMenu::BrowserView),
+            hover_switch(BrowserMenuKind::View),
         ),
         (
             MenubarTrigger {
                 label: tr(lang, "menu-tools"),
-                active: state.active_menu == Some(ActiveMenu::BrowserTools),
-                on_press: Message::ToggleMenu(ActiveMenu::BrowserTools),
+                active: state.active_menu == Some(BrowserMenuKind::Tools),
+                on_press: BrowserMessage::ToggleMenu(BrowserMenuKind::Tools),
             },
-            hover_switch(ActiveMenu::BrowserTools),
+            hover_switch(BrowserMenuKind::Tools),
         ),
         (
             MenubarTrigger {
                 label: tr(lang, "menu-plugins"),
-                active: state.active_menu == Some(ActiveMenu::BrowserPlugins),
-                on_press: Message::ToggleMenu(ActiveMenu::BrowserPlugins),
+                active: state.active_menu == Some(BrowserMenuKind::Plugins),
+                on_press: BrowserMessage::ToggleMenu(BrowserMenuKind::Plugins),
             },
-            hover_switch(ActiveMenu::BrowserPlugins),
+            hover_switch(BrowserMenuKind::Plugins),
         ),
         (
             MenubarTrigger {
                 label: tr(lang, "menu-window"),
-                active: state.active_menu == Some(ActiveMenu::BrowserWindow),
-                on_press: Message::ToggleMenu(ActiveMenu::BrowserWindow),
+                active: state.active_menu == Some(BrowserMenuKind::Window),
+                on_press: BrowserMessage::ToggleMenu(BrowserMenuKind::Window),
             },
-            hover_switch(ActiveMenu::BrowserWindow),
+            hover_switch(BrowserMenuKind::Window),
         ),
         (
             MenubarTrigger {
                 label: tr(lang, "menu-help"),
-                active: state.active_menu == Some(ActiveMenu::BrowserHelp),
-                on_press: Message::ToggleMenu(ActiveMenu::BrowserHelp),
+                active: state.active_menu == Some(BrowserMenuKind::Help),
+                on_press: BrowserMessage::ToggleMenu(BrowserMenuKind::Help),
             },
-            hover_switch(ActiveMenu::BrowserHelp),
+            hover_switch(BrowserMenuKind::Help),
         ),
     ]);
 
     let left = menubar;
 
-    let switcher = workspace_switcher_compact(
+    let switcher = workspace_switcher_responsive(
         vec![
             WorkspaceTab::new(
                 tr(lang, "workspace-browser"),
                 Icon::Browser,
                 true,
-                Message::Dispatch(Command::SetWorkspace {
+                BrowserMessage::Dispatch(Command::SetWorkspace {
                     workspace: Workspace::Browser,
                 }),
             )
@@ -127,7 +254,7 @@ pub(crate) fn build_browser_toolbar(state: &PhotonGui) -> Element<'_, Message> {
                 tr(lang, "workspace-viewer"),
                 Icon::Viewer,
                 false,
-                Message::Dispatch(Command::SetWorkspace {
+                BrowserMessage::Dispatch(Command::SetWorkspace {
                     workspace: Workspace::Viewer,
                 }),
             )
@@ -136,23 +263,27 @@ pub(crate) fn build_browser_toolbar(state: &PhotonGui) -> Element<'_, Message> {
                 tr(lang, "workspace-editor"),
                 Icon::Editor,
                 false,
-                Message::Dispatch(Command::SetWorkspace {
+                BrowserMessage::Dispatch(Command::SetWorkspace {
                     workspace: Workspace::Editor,
                 }),
             )
             .tooltip(tr(lang, "tooltip-workspace-editor")),
         ],
-        state.window_size.width < 1120.0,
+        workspace_switcher_mode(state.window_size.width),
+        state.active_menu == Some(BrowserMenuKind::WorkspaceSwitcher),
+        Some(BrowserMessage::ToggleMenu(
+            BrowserMenuKind::WorkspaceSwitcher,
+        )),
     );
 
-    let right = row![switcher, toolbar_divider(), toolbar_right_utilities(state)]
+    let right = row![switcher, toolbar_divider(), right_utilities]
         .spacing(8)
         .align_y(Alignment::Center);
 
     toolbar(left, right)
 }
 
-pub(crate) fn build_browser_view(state: &PhotonGui) -> Element<'_, Message> {
+pub fn build_browser_view<'a>(state: BrowserViewState<'a>) -> Element<'a, BrowserMessage> {
     let lang = state.snapshot.meta.language;
 
     let left_w = state
@@ -164,7 +295,7 @@ pub(crate) fn build_browser_view(state: &PhotonGui) -> Element<'_, Message> {
     let filtered = sorted_filtered_entries(state);
     let regex_err = is_browser_filter_regex_invalid(state);
 
-    let content: Element<'_, Message> = if state.snapshot.entries.is_empty() {
+    let content: Element<'_, BrowserMessage> = if state.snapshot.entries.is_empty() {
         container(
             column![
                 photon_ui::icons::render(Icon::FolderOpen, 36.0, None),
@@ -262,8 +393,8 @@ pub(crate) fn build_browser_view(state: &PhotonGui) -> Element<'_, Message> {
             160.0,
             520.0,
             240.0,
-            Message::BrowserSplitterDrag,
-            Message::BrowserSplitterRelease,
+            BrowserMessage::BrowserSplitterDrag,
+            BrowserMessage::BrowserSplitterRelease,
         ));
     }
     layout_row = layout_row.push(center_col);
@@ -280,15 +411,18 @@ pub(crate) fn build_browser_view(state: &PhotonGui) -> Element<'_, Message> {
                 200.0,
                 600.0,
                 290.0,
-                Message::BrowserRightSplitterDrag,
-                Message::BrowserRightSplitterRelease,
+                BrowserMessage::BrowserRightSplitterDrag,
+                BrowserMessage::BrowserRightSplitterRelease,
             ))
             .push(right_dock);
     }
     layout_row.into()
 }
 
-fn build_browser_left_sidebar(state: &PhotonGui, left_w: f32) -> Element<'_, Message> {
+fn build_browser_left_sidebar(
+    state: BrowserViewState<'_>,
+    left_w: f32,
+) -> Element<'_, BrowserMessage> {
     let lang = state.snapshot.meta.language;
     let show_quick_access = state.browser_quick_access_open;
     let show_explorer = state.browser_explorer_open;
@@ -339,12 +473,12 @@ fn build_browser_left_sidebar(state: &PhotonGui, left_w: f32) -> Element<'_, Mes
             .swap_tooltip(tr(lang, "tooltip-panel-drag-reorder"))
             .collapse_tooltip(tr(lang, "tooltip-panel-collapse"))
             .close_tooltip(tr(lang, "tooltip-panel-close"))
-            .on_drag_start(Message::BeginDragBrowserPanel(panel))
-            .on_drag_hover(dragging_any.then_some(Message::HoverBrowserPanelDrop(panel)))
-            .on_drag_end(dragging_any.then_some(Message::DropBrowserPanel(panel)))
-            .on_swap(can_swap.then_some(Message::SwapBrowserLeftPanels))
-            .on_toggle_collapse(Message::ToggleBrowserLeftPanelCollapse(panel))
-            .on_close(Some(Message::CloseBrowserLeftPanel(panel)));
+            .on_drag_start(BrowserMessage::BeginDragBrowserPanel(panel))
+            .on_drag_hover(dragging_any.then_some(BrowserMessage::HoverBrowserPanelDrop(panel)))
+            .on_drag_end(dragging_any.then_some(BrowserMessage::DropBrowserPanel(panel)))
+            .on_swap(can_swap.then_some(BrowserMessage::SwapBrowserLeftPanels))
+            .on_toggle_collapse(BrowserMessage::ToggleBrowserLeftPanelCollapse(panel))
+            .on_close(Some(BrowserMessage::CloseBrowserLeftPanel(panel)));
 
         stacked = stacked.push(sidebar_panel(
             PanelFrameSpec::new(header)
@@ -352,8 +486,8 @@ fn build_browser_left_sidebar(state: &PhotonGui, left_w: f32) -> Element<'_, Mes
                 .fill_height(fill_height)
                 .body_padding([2, 2])
                 .drop_indicator(state.browser_left_panels.drop_indicator(panel))
-                .on_drop_hover(dragging_any.then_some(Message::HoverBrowserPanelDrop(panel)))
-                .on_drop_release(dragging_any.then_some(Message::DropBrowserPanel(panel))),
+                .on_drop_hover(dragging_any.then_some(BrowserMessage::HoverBrowserPanelDrop(panel)))
+                .on_drop_release(dragging_any.then_some(BrowserMessage::DropBrowserPanel(panel))),
         ));
     }
 
@@ -364,7 +498,7 @@ fn build_browser_left_sidebar(state: &PhotonGui, left_w: f32) -> Element<'_, Mes
     sidebar_dock(left_w, stacked)
 }
 
-fn build_quick_access_body(state: &PhotonGui) -> Element<'_, Message> {
+fn build_quick_access_body(state: BrowserViewState<'_>) -> Element<'_, BrowserMessage> {
     let lang = state.snapshot.meta.language;
     let current = state.snapshot.meta.current_folder.as_deref();
     let cursor_pt = state.last_cursor.unwrap_or(iced::Point::new(140.0, 220.0));
@@ -385,7 +519,7 @@ fn build_quick_access_body(state: &PhotonGui) -> Element<'_, Message> {
                 label,
                 None,
                 active,
-                Some(Message::Dispatch(Command::OpenFolder {
+                Some(BrowserMessage::Dispatch(Command::OpenFolder {
                     path: fav_path.clone(),
                 })),
             ),
@@ -393,7 +527,7 @@ fn build_quick_access_body(state: &PhotonGui) -> Element<'_, Message> {
                 Icon::ArrowUp,
                 ButtonVariant::Ghost,
                 (idx > 0).then(|| {
-                    Message::Dispatch(Command::MoveFavorite {
+                    BrowserMessage::Dispatch(Command::MoveFavorite {
                         path: fav_path.clone(),
                         direction: MoveDirection::Up,
                     })
@@ -404,7 +538,7 @@ fn build_quick_access_body(state: &PhotonGui) -> Element<'_, Message> {
                 Icon::ArrowDown,
                 ButtonVariant::Ghost,
                 (idx + 1 < fav_len).then(|| {
-                    Message::Dispatch(Command::MoveFavorite {
+                    BrowserMessage::Dispatch(Command::MoveFavorite {
                         path: fav_path.clone(),
                         direction: MoveDirection::Down,
                     })
@@ -414,7 +548,7 @@ fn build_quick_access_body(state: &PhotonGui) -> Element<'_, Message> {
             button::compact_icon_tipped(
                 Icon::Trash,
                 ButtonVariant::Ghost,
-                Some(Message::Dispatch(Command::RemoveFavorite {
+                Some(BrowserMessage::Dispatch(Command::RemoveFavorite {
                     path: fav_path.clone(),
                 })),
                 tr(lang, "action-unpin-quick-access"),
@@ -425,7 +559,7 @@ fn build_quick_access_body(state: &PhotonGui) -> Element<'_, Message> {
         .align_y(Alignment::Center);
 
         quick_col = quick_col.push(mouse_area(row_btn).on_right_press(
-            Message::OpenQuickAccessContextMenu {
+            BrowserMessage::OpenQuickAccessContextMenu {
                 path: fav_path.clone(),
                 x: cursor_pt.x,
                 y: cursor_pt.y,
@@ -442,7 +576,7 @@ fn build_quick_access_body(state: &PhotonGui) -> Element<'_, Message> {
 fn build_batch_banner<'a>(
     lang: photon_protocol::Language,
     batch: &'a photon_protocol::BatchState,
-) -> Element<'a, Message> {
+) -> Element<'a, BrowserMessage> {
     let pct = if batch.total > 0 {
         ((batch.done + batch.failed) as f32 / batch.total as f32).clamp(0.0, 1.0)
     } else {
@@ -495,7 +629,7 @@ fn build_batch_banner<'a>(
             tr(lang, "batch-cancel"),
             Some(Icon::Close),
             ButtonVariant::Danger,
-            Some(Message::Dispatch(Command::BatchCancel)),
+            Some(BrowserMessage::Dispatch(Command::BatchCancel)),
         ));
     }
 
@@ -511,7 +645,7 @@ fn build_batch_banner<'a>(
     .into()
 }
 
-fn build_browser_header(state: &PhotonGui) -> Element<'_, Message> {
+fn build_browser_header(state: BrowserViewState<'_>) -> Element<'_, BrowserMessage> {
     let lang = state.snapshot.meta.language;
     let layout = &state.snapshot.meta.layout;
     let crumbs = &state.snapshot.meta.breadcrumbs;
@@ -524,7 +658,7 @@ fn build_browser_header(state: &PhotonGui) -> Element<'_, Message> {
             ButtonVariant::Tab {
                 active: view_mode == BrowserViewMode::Grid,
             },
-            Some(Message::SetBrowserViewMode(BrowserViewMode::Grid)),
+            Some(BrowserMessage::SetBrowserViewMode(BrowserViewMode::Grid)),
             tr(lang, "tooltip-browser-view-grid"),
         ),
         button::icon_only_tipped(
@@ -532,7 +666,7 @@ fn build_browser_header(state: &PhotonGui) -> Element<'_, Message> {
             ButtonVariant::Tab {
                 active: view_mode == BrowserViewMode::List,
             },
-            Some(Message::SetBrowserViewMode(BrowserViewMode::List)),
+            Some(BrowserMessage::SetBrowserViewMode(BrowserViewMode::List)),
             tr(lang, "tooltip-browser-view-list"),
         ),
         button::icon_only_tipped(
@@ -540,7 +674,7 @@ fn build_browser_header(state: &PhotonGui) -> Element<'_, Message> {
             ButtonVariant::Tab {
                 active: view_mode == BrowserViewMode::Details,
             },
-            Some(Message::SetBrowserViewMode(BrowserViewMode::Details)),
+            Some(BrowserMessage::SetBrowserViewMode(BrowserViewMode::Details)),
             tr(lang, "tooltip-browser-view-details"),
         ),
     ]
@@ -561,12 +695,12 @@ fn build_browser_header(state: &PhotonGui) -> Element<'_, Message> {
         button::labeled_tipped(
             format!("{}: {sort_field_label}", tr(lang, "label-sort")),
             None,
-            if state.active_menu == Some(ActiveMenu::BrowserSort) {
+            if state.active_menu == Some(BrowserMenuKind::Sort) {
                 ButtonVariant::Secondary
             } else {
                 ButtonVariant::Ghost
             },
-            Some(Message::ToggleMenu(ActiveMenu::BrowserSort)),
+            Some(BrowserMessage::ToggleMenu(BrowserMenuKind::Sort)),
             tr(lang, "tooltip-browser-sort"),
         ),
         button::icon_only_tipped(
@@ -576,7 +710,7 @@ fn build_browser_header(state: &PhotonGui) -> Element<'_, Message> {
                 Icon::SortDesc
             },
             ButtonVariant::Secondary,
-            Some(Message::SetBrowserSortOrder(next_order)),
+            Some(BrowserMessage::SetBrowserSortOrder(next_order)),
             tr(lang, "tooltip-browser-sort"),
         ),
     ]
@@ -588,7 +722,7 @@ fn build_browser_header(state: &PhotonGui) -> Element<'_, Message> {
         button::compact_icon_tipped(
             Icon::ZoomOut,
             ButtonVariant::Ghost,
-            step_thumb_size(thumb_size, -1).map(Message::SetBrowserThumbSize),
+            step_thumb_size(thumb_size, -1).map(BrowserMessage::SetBrowserThumbSize),
             tr(lang, "tooltip-viewer-zoom-out"),
         ),
         text(thumb_size_label(thumb_size))
@@ -602,18 +736,18 @@ fn build_browser_header(state: &PhotonGui) -> Element<'_, Message> {
         button::compact_icon_tipped(
             Icon::ZoomIn,
             ButtonVariant::Ghost,
-            step_thumb_size(thumb_size, 1).map(Message::SetBrowserThumbSize),
+            step_thumb_size(thumb_size, 1).map(BrowserMessage::SetBrowserThumbSize),
             tr(lang, "tooltip-viewer-zoom-in"),
         ),
     ]
     .spacing(3)
     .align_y(Alignment::Center);
 
-    let nav_left: Element<'_, Message> = if state.path_editing || crumbs.is_empty() {
+    let nav_left: Element<'_, BrowserMessage> = if state.path_editing || crumbs.is_empty() {
         row![
-            text_input("/path/to/folder", &state.folder_input)
-                .on_input(Message::FolderInputChanged)
-                .on_submit(Message::SubmitFolderInput)
+            text_input("/path/to/folder", state.folder_input)
+                .on_input(BrowserMessage::FolderInputChanged)
+                .on_submit(BrowserMessage::SubmitFolderInput)
                 .padding([6, 10])
                 .size(TEXT_SIZE_CONTROL)
                 .style(input_style)
@@ -621,13 +755,13 @@ fn build_browser_header(state: &PhotonGui) -> Element<'_, Message> {
             button::icon_only_tipped(
                 Icon::Check,
                 ButtonVariant::Primary,
-                Some(Message::SubmitFolderInput),
+                Some(BrowserMessage::SubmitFolderInput),
                 tr(lang, "action-open-folder"),
             ),
             button::icon_only_tipped(
                 Icon::Close,
                 ButtonVariant::Ghost,
-                (!crumbs.is_empty()).then_some(Message::TogglePathEdit(false)),
+                (!crumbs.is_empty()).then_some(BrowserMessage::TogglePathEdit(false)),
                 tr(lang, "action-cancel"),
             ),
         ]
@@ -636,13 +770,13 @@ fn build_browser_header(state: &PhotonGui) -> Element<'_, Message> {
         .width(Fill)
         .into()
     } else {
-        let crumb_items: Vec<BreadcrumbItem<Message>> = crumbs
+        let crumb_items: Vec<BreadcrumbItem<BrowserMessage>> = crumbs
             .iter()
             .enumerate()
             .map(|(i, c)| BreadcrumbItem {
                 label: c.name.clone(),
                 active: i + 1 == crumb_len,
-                on_press: Message::Dispatch(Command::Navigate {
+                on_press: BrowserMessage::Dispatch(Command::Navigate {
                     path: c.path.clone(),
                 }),
             })
@@ -652,13 +786,13 @@ fn build_browser_header(state: &PhotonGui) -> Element<'_, Message> {
             button::icon_only_tipped(
                 Icon::FolderOpen,
                 ButtonVariant::Ghost,
-                Some(Message::TogglePathEdit(true)),
+                Some(BrowserMessage::TogglePathEdit(true)),
                 tr(lang, "action-edit-path"),
             ),
             button::icon_only_tipped(
                 Icon::Refresh,
                 ButtonVariant::Ghost,
-                Some(Message::Dispatch(Command::Refresh)),
+                Some(BrowserMessage::Dispatch(Command::Refresh)),
                 tr(lang, "tooltip-browser-refresh"),
             ),
         ]
@@ -674,7 +808,7 @@ fn build_browser_header(state: &PhotonGui) -> Element<'_, Message> {
         ButtonVariant::Tab {
             active: filter_active,
         },
-        Some(Message::ToggleBrowserFilterBar),
+        Some(BrowserMessage::ToggleBrowserFilterBar),
         tr(lang, "tooltip-browser-filter-toggle"),
     );
 
@@ -699,20 +833,20 @@ fn build_browser_header(state: &PhotonGui) -> Element<'_, Message> {
         .into()
 }
 
-pub(crate) fn browser_filter_input_id() -> Id {
+pub fn browser_filter_input_id() -> Id {
     Id::new("browser-filter-input")
 }
 
 fn build_browser_filter_bar(
-    state: &PhotonGui,
+    state: BrowserViewState<'_>,
     shown_count: usize,
     total_count: usize,
     regex_err: bool,
-) -> Element<'_, Message> {
+) -> Element<'_, BrowserMessage> {
     let lang = state.snapshot.meta.language;
-    let input = text_input(&tr(lang, "label-search-placeholder"), &state.browser_filter)
+    let input = text_input(&tr(lang, "label-search-placeholder"), state.browser_filter)
         .id(browser_filter_input_id())
-        .on_input(Message::BrowserFilterChanged)
+        .on_input(BrowserMessage::BrowserFilterChanged)
         .padding([5, 10])
         .size(TEXT_SIZE_CONTROL)
         .style(input_style)
@@ -725,7 +859,7 @@ fn build_browser_filter_bar(
             ButtonVariant::Tab {
                 active: state.browser_filter_case_sensitive,
             },
-            Some(Message::ToggleBrowserFilterCaseSensitive),
+            Some(BrowserMessage::ToggleBrowserFilterCaseSensitive),
         )
         .padding([4, 8]),
         tr(lang, "tooltip-filter-case-sensitive"),
@@ -739,7 +873,7 @@ fn build_browser_filter_bar(
             ButtonVariant::Tab {
                 active: state.browser_filter_regex,
             },
-            Some(Message::ToggleBrowserFilterRegex),
+            Some(BrowserMessage::ToggleBrowserFilterRegex),
         )
         .padding([4, 8]),
         tr(lang, "tooltip-filter-regex"),
@@ -763,7 +897,7 @@ fn build_browser_filter_bar(
     let clear_or_close = button::compact_icon_tipped(
         Icon::Close,
         ButtonVariant::Ghost,
-        Some(Message::ClearBrowserFilter),
+        Some(BrowserMessage::ClearBrowserFilter),
         tr(
             lang,
             if state.browser_filter.is_empty() {
@@ -792,9 +926,12 @@ fn build_browser_filter_bar(
     .into()
 }
 
-fn build_browser_grid<'a>(state: &PhotonGui, entries: &[&Entry]) -> Element<'a, Message> {
+fn build_browser_grid<'a>(
+    state: BrowserViewState<'_>,
+    entries: &[&Entry],
+) -> Element<'a, BrowserMessage> {
     let cursor_pt = state.last_cursor.unwrap_or(iced::Point::new(360.0, 260.0));
-    let cards: Vec<(String, GridCardSpec<Message>)> = entries
+    let cards: Vec<(String, GridCardSpec<BrowserMessage>)> = entries
         .iter()
         .map(|entry| {
             let ic = entry_icon(entry);
@@ -811,7 +948,7 @@ fn build_browser_grid<'a>(state: &PhotonGui, entries: &[&Entry]) -> Element<'a, 
                     thumbnail: state.thumbnails.get(&entry.path).cloned(),
                     fallback_icon: ic,
                     selected: state.snapshot.meta.selection.contains(&entry.path),
-                    on_press: Message::BrowserEntryActivated {
+                    on_press: BrowserMessage::BrowserEntryActivated {
                         path: entry.path.clone(),
                         is_dir: entry.is_dir,
                         is_image: entry.is_image,
@@ -834,13 +971,13 @@ fn build_browser_grid<'a>(state: &PhotonGui, entries: &[&Entry]) -> Element<'a, 
             let mut r = row![].spacing(gap).align_y(Alignment::Start);
             for (path, spec) in chunk {
                 let card = thumbnail_card(spec.clone(), card_width);
-                r = r.push(
-                    mouse_area(card).on_right_press(Message::OpenBrowserContextMenu {
+                r = r.push(mouse_area(card).on_right_press(
+                    BrowserMessage::OpenBrowserContextMenu {
                         path: path.clone(),
                         x: cursor_pt.x,
                         y: cursor_pt.y,
-                    }),
-                );
+                    },
+                ));
             }
             grid_col = grid_col.push(r);
         }
@@ -854,7 +991,10 @@ fn build_browser_grid<'a>(state: &PhotonGui, entries: &[&Entry]) -> Element<'a, 
     .into()
 }
 
-fn build_browser_list<'a>(state: &PhotonGui, entries: &[&Entry]) -> Element<'a, Message> {
+fn build_browser_list<'a>(
+    state: BrowserViewState<'_>,
+    entries: &[&Entry],
+) -> Element<'a, BrowserMessage> {
     let cursor_pt = state.last_cursor.unwrap_or(iced::Point::new(360.0, 260.0));
     let mut col = column![].spacing(3).padding([8, 12]);
     for entry in entries {
@@ -870,39 +1010,42 @@ fn build_browser_list<'a>(state: &PhotonGui, entries: &[&Entry]) -> Element<'a, 
             &entry.name,
             trailing,
             active,
-            Some(Message::BrowserEntryActivated {
+            Some(BrowserMessage::BrowserEntryActivated {
                 path: entry.path.clone(),
                 is_dir: entry.is_dir,
                 is_image: entry.is_image,
             }),
         );
-        col = col.push(
-            mouse_area(row_btn).on_right_press(Message::OpenBrowserContextMenu {
+        col = col.push(mouse_area(row_btn).on_right_press(
+            BrowserMessage::OpenBrowserContextMenu {
                 path: entry.path.clone(),
                 x: cursor_pt.x,
                 y: cursor_pt.y,
-            }),
-        );
+            },
+        ));
     }
     scrollable(col).height(Fill).into()
 }
 
-fn build_browser_details<'a>(state: &PhotonGui, entries: &[&Entry]) -> Element<'a, Message> {
+fn build_browser_details<'a>(
+    state: BrowserViewState<'_>,
+    entries: &[&Entry],
+) -> Element<'a, BrowserMessage> {
     let lang = state.snapshot.meta.language;
     let layout = &state.snapshot.meta.layout;
     let active_field = layout.browser_sort_field;
     let is_asc = layout.browser_sort_order == SortOrder::Asc;
     let cursor_pt = state.last_cursor.unwrap_or(iced::Point::new(360.0, 260.0));
 
-    let sort_msg = |field: BrowserSortField| -> Message {
+    let sort_msg = |field: BrowserSortField| -> BrowserMessage {
         if active_field == field {
-            Message::SetBrowserSortOrder(if is_asc {
+            BrowserMessage::SetBrowserSortOrder(if is_asc {
                 SortOrder::Desc
             } else {
                 SortOrder::Asc
             })
         } else {
-            Message::SetBrowserSortField(field)
+            BrowserMessage::SetBrowserSortField(field)
         }
     };
 
@@ -956,14 +1099,14 @@ fn build_browser_details<'a>(state: &PhotonGui, entries: &[&Entry]) -> Element<'
             ],
             32.0,
             active,
-            Message::BrowserEntryActivated {
+            BrowserMessage::BrowserEntryActivated {
                 path: entry.path.clone(),
                 is_dir: entry.is_dir,
                 is_image: entry.is_image,
             },
         );
         rows_col = rows_col.push(mouse_area(row_el).on_right_press(
-            Message::OpenBrowserContextMenu {
+            BrowserMessage::OpenBrowserContextMenu {
                 path: entry.path.clone(),
                 x: cursor_pt.x,
                 y: cursor_pt.y,
@@ -977,7 +1120,7 @@ fn build_browser_details<'a>(state: &PhotonGui, entries: &[&Entry]) -> Element<'
         .into()
 }
 
-fn browser_right_panel_is_open(state: &PhotonGui, panel: BrowserRightPanel) -> bool {
+fn browser_right_panel_is_open(state: BrowserViewState<'_>, panel: BrowserRightPanel) -> bool {
     match panel {
         BrowserRightPanel::Preview => state.browser_preview_open,
         BrowserRightPanel::Info => state.browser_info_open,
@@ -985,10 +1128,10 @@ fn browser_right_panel_is_open(state: &PhotonGui, panel: BrowserRightPanel) -> b
 }
 
 fn build_browser_right_sidebar<'a>(
-    state: &'a PhotonGui,
+    state: BrowserViewState<'a>,
     right_w: f32,
     open_panels: &[BrowserRightPanel],
-) -> Element<'a, Message> {
+) -> Element<'a, BrowserMessage> {
     let lang = state.snapshot.meta.language;
     let dragging_any = state.browser_right_panels.is_dragging();
     let can_swap = open_panels.len() >= 2;
@@ -1036,12 +1179,14 @@ fn build_browser_right_sidebar<'a>(
             .swap_tooltip(tr(lang, "tooltip-panel-drag-reorder"))
             .collapse_tooltip(tr(lang, "tooltip-panel-collapse"))
             .close_tooltip(tr(lang, "tooltip-panel-close"))
-            .on_drag_start(Message::BeginDragBrowserRightPanel(panel_kind))
-            .on_drag_hover(dragging_any.then_some(Message::HoverBrowserRightPanelDrop(panel_kind)))
-            .on_drag_end(dragging_any.then_some(Message::DropBrowserRightPanel(panel_kind)))
-            .on_swap(can_swap.then_some(Message::SwapBrowserRightPanels))
-            .on_toggle_collapse(Message::ToggleBrowserRightPanelCollapse(panel_kind))
-            .on_close(Some(Message::CloseBrowserRightPanel(panel_kind)));
+            .on_drag_start(BrowserMessage::BeginDragBrowserRightPanel(panel_kind))
+            .on_drag_hover(
+                dragging_any.then_some(BrowserMessage::HoverBrowserRightPanelDrop(panel_kind)),
+            )
+            .on_drag_end(dragging_any.then_some(BrowserMessage::DropBrowserRightPanel(panel_kind)))
+            .on_swap(can_swap.then_some(BrowserMessage::SwapBrowserRightPanels))
+            .on_toggle_collapse(BrowserMessage::ToggleBrowserRightPanelCollapse(panel_kind))
+            .on_close(Some(BrowserMessage::CloseBrowserRightPanel(panel_kind)));
 
         let panel_el = sidebar_panel(
             PanelFrameSpec::new(header)
@@ -1050,10 +1195,10 @@ fn build_browser_right_sidebar<'a>(
                 .body_padding(Padding::from([4, 4]))
                 .drop_indicator(state.browser_right_panels.drop_indicator(panel_kind))
                 .on_drop_hover(
-                    dragging_any.then_some(Message::HoverBrowserRightPanelDrop(panel_kind)),
+                    dragging_any.then_some(BrowserMessage::HoverBrowserRightPanelDrop(panel_kind)),
                 )
                 .on_drop_release(
-                    dragging_any.then_some(Message::DropBrowserRightPanel(panel_kind)),
+                    dragging_any.then_some(BrowserMessage::DropBrowserRightPanel(panel_kind)),
                 ),
         );
 
@@ -1075,8 +1220,8 @@ fn build_browser_right_sidebar<'a>(
                 22.0,
                 82.0,
                 55.0,
-                |_| Message::Noop,
-                |_| Message::Noop,
+                |_| BrowserMessage::Noop,
+                |_| BrowserMessage::Noop,
             ));
         }
     }
@@ -1088,7 +1233,7 @@ fn build_browser_right_sidebar<'a>(
     sidebar_dock(right_w, stacked)
 }
 
-fn build_browser_preview_body(state: &PhotonGui) -> Element<'_, Message> {
+fn build_browser_preview_body(state: BrowserViewState<'_>) -> Element<'_, BrowserMessage> {
     let lang = state.snapshot.meta.language;
     let Some(sel) = state.snapshot.meta.selection_info.as_ref() else {
         return container(
@@ -1114,7 +1259,7 @@ fn build_browser_preview_body(state: &PhotonGui) -> Element<'_, Message> {
 
     let mut preview_col = column![].spacing(10).width(Fill);
     if sel.is_image {
-        let media: Element<'_, Message> =
+        let media: Element<'_, BrowserMessage> =
             if let Some(handle) = state.thumbnails.get(&sel.path).cloned() {
                 iced_image(handle)
                     .width(Fill)
@@ -1182,7 +1327,7 @@ fn build_browser_preview_body(state: &PhotonGui) -> Element<'_, Message> {
                         tr(lang, "action-view"),
                         Some(Icon::Viewer),
                         ButtonVariant::Primary,
-                        Some(Message::Dispatch(Command::ViewerOpen {
+                        Some(BrowserMessage::Dispatch(Command::ViewerOpen {
                             path: sel.path.clone(),
                         })),
                     )
@@ -1194,7 +1339,7 @@ fn build_browser_preview_body(state: &PhotonGui) -> Element<'_, Message> {
                         tr(lang, "action-edit"),
                         Some(Icon::Editor),
                         ButtonVariant::Secondary,
-                        Some(Message::Dispatch(Command::EditorOpen {
+                        Some(BrowserMessage::Dispatch(Command::EditorOpen {
                             path: sel.path.clone(),
                         })),
                     ),
@@ -1209,7 +1354,7 @@ fn build_browser_preview_body(state: &PhotonGui) -> Element<'_, Message> {
                 tr(lang, "action-open-folder"),
                 Some(Icon::FolderOpen),
                 ButtonVariant::Primary,
-                Some(Message::Dispatch(Command::Navigate {
+                Some(BrowserMessage::Dispatch(Command::Navigate {
                     path: sel.path.clone(),
                 })),
             )
@@ -1221,7 +1366,7 @@ fn build_browser_preview_body(state: &PhotonGui) -> Element<'_, Message> {
     scrollable(preview_col).height(Fill).into()
 }
 
-fn build_browser_info_body(state: &PhotonGui) -> Element<'_, Message> {
+fn build_browser_info_body(state: BrowserViewState<'_>) -> Element<'_, BrowserMessage> {
     let lang = state.snapshot.meta.language;
     let Some(sel) = state.snapshot.meta.selection_info.as_ref() else {
         return container(
@@ -1278,7 +1423,7 @@ fn build_browser_info_body(state: &PhotonGui) -> Element<'_, Message> {
                 ),
                 Some(if is_fav { Icon::PinOff } else { Icon::Star }),
                 ButtonVariant::Secondary,
-                Some(Message::Dispatch(if is_fav {
+                Some(BrowserMessage::Dispatch(if is_fav {
                     Command::RemoveFavorite {
                         path: sel.path.clone(),
                     }
@@ -1303,7 +1448,7 @@ fn build_browser_info_body(state: &PhotonGui) -> Element<'_, Message> {
     scrollable(info_col).height(Fill).into()
 }
 
-fn build_explorer_tree(state: &PhotonGui) -> Element<'_, Message> {
+fn build_explorer_tree(state: BrowserViewState<'_>) -> Element<'_, BrowserMessage> {
     let lang = state.snapshot.meta.language;
     let Some(root) = &state.snapshot.meta.root_folder else {
         return container(
@@ -1327,17 +1472,17 @@ fn build_explorer_tree(state: &PhotonGui) -> Element<'_, Message> {
         .unwrap_or(root.as_str())
         .to_owned();
 
-    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    let mut rows: Vec<Element<'_, BrowserMessage>> = Vec::new();
     collect_tree_rows(state, root, &root_name, 0, &mut rows);
     scrollable(column(rows).spacing(2)).height(Fill).into()
 }
 
 fn collect_tree_rows<'a>(
-    state: &'a PhotonGui,
+    state: BrowserViewState<'a>,
     path: &str,
     name: &str,
     depth: usize,
-    out: &mut Vec<Element<'a, Message>>,
+    out: &mut Vec<Element<'a, BrowserMessage>>,
 ) {
     if depth > 32 {
         return;
@@ -1358,7 +1503,7 @@ fn collect_tree_rows<'a>(
                 button::compact_icon_tipped(
                     chevron,
                     ButtonVariant::Ghost,
-                    Some(Message::ToggleFolderExpand(path.to_owned())),
+                    Some(BrowserMessage::ToggleFolderExpand(path.to_owned())),
                     tr(lang, "tooltip-panel-collapse"),
                 ),
                 button::list_row(
@@ -1370,7 +1515,7 @@ fn collect_tree_rows<'a>(
                     name.to_owned(),
                     None,
                     active,
-                    Some(Message::Dispatch(Command::Navigate {
+                    Some(BrowserMessage::Dispatch(Command::Navigate {
                         path: path.to_owned(),
                     })),
                 ),
@@ -1378,7 +1523,7 @@ fn collect_tree_rows<'a>(
             .spacing(2)
             .align_y(Alignment::Center),
         )
-        .on_right_press(Message::OpenQuickAccessContextMenu {
+        .on_right_press(BrowserMessage::OpenQuickAccessContextMenu {
             path: path.to_owned(),
             x: cursor_pt.x,
             y: cursor_pt.y,
@@ -1399,57 +1544,60 @@ fn collect_tree_rows<'a>(
     }
 }
 
-pub(crate) fn build_browser_sort_menu(state: &PhotonGui) -> Element<'_, Message> {
+pub fn build_browser_sort_menu<'a>(state: BrowserViewState<'a>) -> Element<'a, BrowserMessage> {
     let lang = state.snapshot.meta.language;
     let layout = &state.snapshot.meta.layout;
     let entries = vec![
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "col-name"),
-                Message::SetBrowserSortField(BrowserSortField::Name),
+                BrowserMessage::SetBrowserSortField(BrowserSortField::Name),
             )
             .checked(layout.browser_sort_field == BrowserSortField::Name),
         ),
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "col-modified"),
-                Message::SetBrowserSortField(BrowserSortField::Modified),
+                BrowserMessage::SetBrowserSortField(BrowserSortField::Modified),
             )
             .checked(layout.browser_sort_field == BrowserSortField::Modified),
         ),
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "col-size"),
-                Message::SetBrowserSortField(BrowserSortField::Size),
+                BrowserMessage::SetBrowserSortField(BrowserSortField::Size),
             )
             .checked(layout.browser_sort_field == BrowserSortField::Size),
         ),
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "col-type"),
-                Message::SetBrowserSortField(BrowserSortField::Kind),
+                BrowserMessage::SetBrowserSortField(BrowserSortField::Kind),
             )
             .checked(layout.browser_sort_field == BrowserSortField::Kind),
         ),
         MenuEntry::Separator,
         MenuEntry::Item(
-            MenuItem::new("A → Z", Message::SetBrowserSortOrder(SortOrder::Asc))
+            MenuItem::new("A → Z", BrowserMessage::SetBrowserSortOrder(SortOrder::Asc))
                 .icon(Icon::SortAsc)
                 .checked(layout.browser_sort_order == SortOrder::Asc),
         ),
         MenuEntry::Item(
-            MenuItem::new("Z → A", Message::SetBrowserSortOrder(SortOrder::Desc))
-                .icon(Icon::SortDesc)
-                .checked(layout.browser_sort_order == SortOrder::Desc),
+            MenuItem::new(
+                "Z → A",
+                BrowserMessage::SetBrowserSortOrder(SortOrder::Desc),
+            )
+            .icon(Icon::SortDesc)
+            .checked(layout.browser_sort_order == SortOrder::Desc),
         ),
     ];
     menu_panel_entries(entries, 195.0)
 }
 
-pub(crate) fn build_browser_context_menu_entries<'a>(
-    state: &'a PhotonGui,
+pub fn build_browser_context_menu_entries<'a>(
+    state: BrowserViewState<'a>,
     entry_path: &str,
-) -> Element<'a, Message> {
+) -> Element<'a, BrowserMessage> {
     let lang = state.snapshot.meta.language;
     let entry = state.snapshot.entries.iter().find(|e| e.path == entry_path);
     let is_dir = entry
@@ -1481,7 +1629,7 @@ pub(crate) fn build_browser_context_menu_entries<'a>(
         entries.push(MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-open-folder"),
-                Message::ContextMenuDispatch(Command::Navigate {
+                BrowserMessage::ContextMenuDispatch(Command::Navigate {
                     path: entry_path.to_owned(),
                 }),
             )
@@ -1497,7 +1645,7 @@ pub(crate) fn build_browser_context_menu_entries<'a>(
                         "action-pin-quick-access"
                     },
                 ),
-                Message::ContextMenuDispatch(if is_fav {
+                BrowserMessage::ContextMenuDispatch(if is_fav {
                     Command::RemoveFavorite {
                         path: entry_path.to_owned(),
                     }
@@ -1513,7 +1661,7 @@ pub(crate) fn build_browser_context_menu_entries<'a>(
         entries.push(MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-view"),
-                Message::ContextMenuDispatch(Command::ViewerOpen {
+                BrowserMessage::ContextMenuDispatch(Command::ViewerOpen {
                     path: entry_path.to_owned(),
                 }),
             )
@@ -1523,7 +1671,7 @@ pub(crate) fn build_browser_context_menu_entries<'a>(
         entries.push(MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-edit"),
-                Message::ContextMenuDispatch(Command::EditorOpen {
+                BrowserMessage::ContextMenuDispatch(Command::EditorOpen {
                     path: entry_path.to_owned(),
                 }),
             )
@@ -1536,7 +1684,7 @@ pub(crate) fn build_browser_context_menu_entries<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-batch"),
-                Message::OpenBatchDialog(BatchDialogKind::Resize),
+                BrowserMessage::OpenBatchDialog(BatchDialogKind::Resize),
             )
             .icon(Icon::Batch),
         ),
@@ -1544,7 +1692,7 @@ pub(crate) fn build_browser_context_menu_entries<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-copy-image"),
-                Message::CopyImageToClipboard(Some(entry_path.to_owned())),
+                BrowserMessage::CopyImageToClipboard(Some(entry_path.to_owned())),
             )
             .icon(Icon::Copy)
             .enabled(is_image),
@@ -1552,14 +1700,14 @@ pub(crate) fn build_browser_context_menu_entries<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-copy-path"),
-                Message::BrowserCopyPath(entry_path.to_owned()),
+                BrowserMessage::BrowserCopyPath(entry_path.to_owned()),
             )
             .icon(Icon::Copy),
         ),
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-reveal-folder"),
-                Message::RevealInFolder(entry_path.to_owned()),
+                BrowserMessage::RevealInFolder(entry_path.to_owned()),
             )
             .icon(Icon::FolderOpen),
         ),
@@ -1567,7 +1715,7 @@ pub(crate) fn build_browser_context_menu_entries<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-rename"),
-                Message::BrowserStartRename(entry_path.to_owned()),
+                BrowserMessage::BrowserStartRename(entry_path.to_owned()),
             )
             .icon(Icon::Rename)
             .enabled(paths.len() == 1),
@@ -1575,14 +1723,14 @@ pub(crate) fn build_browser_context_menu_entries<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-copy-to"),
-                Message::BrowserCopyTo(paths.clone()),
+                BrowserMessage::BrowserCopyTo(paths.clone()),
             )
             .icon(Icon::Copy),
         ),
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-move-to"),
-                Message::BrowserMoveTo(paths.clone()),
+                BrowserMessage::BrowserMoveTo(paths.clone()),
             )
             .icon(Icon::FolderPlus),
         ),
@@ -1590,7 +1738,7 @@ pub(crate) fn build_browser_context_menu_entries<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-trash"),
-                Message::ContextMenuDispatch(Command::Trash {
+                BrowserMessage::ContextMenuDispatch(Command::Trash {
                     paths: paths.clone(),
                 }),
             )
@@ -1599,7 +1747,7 @@ pub(crate) fn build_browser_context_menu_entries<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-delete-permanently"),
-                Message::BrowserConfirmDeletePermanently(paths),
+                BrowserMessage::BrowserConfirmDeletePermanently(paths),
             )
             .icon(Icon::Trash),
         ),
@@ -1608,10 +1756,10 @@ pub(crate) fn build_browser_context_menu_entries<'a>(
     menu_panel_entries(entries, 225.0)
 }
 
-pub(crate) fn build_quick_access_context_menu<'a>(
-    state: &'a PhotonGui,
+pub fn build_quick_access_context_menu<'a>(
+    state: BrowserViewState<'a>,
     path: &str,
-) -> Element<'a, Message> {
+) -> Element<'a, BrowserMessage> {
     let lang = state.snapshot.meta.language;
     let fav_idx = state.snapshot.meta.favorites.iter().position(|p| p == path);
 
@@ -1619,7 +1767,7 @@ pub(crate) fn build_quick_access_context_menu<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-open-folder"),
-                Message::ContextMenuDispatch(Command::OpenFolder {
+                BrowserMessage::ContextMenuDispatch(Command::OpenFolder {
                     path: path.to_owned(),
                 }),
             )
@@ -1633,7 +1781,7 @@ pub(crate) fn build_quick_access_context_menu<'a>(
             MenuEntry::Item(
                 MenuItem::new(
                     tr(lang, "action-move-up"),
-                    Message::ContextMenuDispatch(Command::MoveFavorite {
+                    BrowserMessage::ContextMenuDispatch(Command::MoveFavorite {
                         path: path.to_owned(),
                         direction: MoveDirection::Up,
                     }),
@@ -1644,7 +1792,7 @@ pub(crate) fn build_quick_access_context_menu<'a>(
             MenuEntry::Item(
                 MenuItem::new(
                     tr(lang, "action-move-down"),
-                    Message::ContextMenuDispatch(Command::MoveFavorite {
+                    BrowserMessage::ContextMenuDispatch(Command::MoveFavorite {
                         path: path.to_owned(),
                         direction: MoveDirection::Down,
                     }),
@@ -1656,7 +1804,7 @@ pub(crate) fn build_quick_access_context_menu<'a>(
             MenuEntry::Item(
                 MenuItem::new(
                     tr(lang, "action-unpin-quick-access"),
-                    Message::ContextMenuDispatch(Command::RemoveFavorite {
+                    BrowserMessage::ContextMenuDispatch(Command::RemoveFavorite {
                         path: path.to_owned(),
                     }),
                 )
@@ -1667,7 +1815,7 @@ pub(crate) fn build_quick_access_context_menu<'a>(
         entries.push(MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-pin-quick-access"),
-                Message::ContextMenuDispatch(Command::AddFavorite {
+                BrowserMessage::ContextMenuDispatch(Command::AddFavorite {
                     path: path.to_owned(),
                 }),
             )
@@ -1679,13 +1827,15 @@ pub(crate) fn build_quick_access_context_menu<'a>(
 }
 
 /// Reusable browser Window / Help menu entry builders for `app.rs::build_active_menu`.
-pub(crate) fn build_browser_window_menu_entries(state: &PhotonGui) -> Vec<MenuEntry<'_, Message>> {
+pub fn build_browser_window_menu_entries<'a>(
+    state: BrowserViewState<'a>,
+) -> Vec<MenuEntry<'a, BrowserMessage>> {
     let lang = state.snapshot.meta.language;
     vec![
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "panel-quick-access"),
-                Message::ToggleBrowserPanelVisible(BrowserLeftPanel::QuickAccess),
+                BrowserMessage::ToggleBrowserPanelVisible(BrowserLeftPanel::QuickAccess),
             )
             .icon(Icon::Star)
             .checked(state.browser_quick_access_open),
@@ -1693,7 +1843,7 @@ pub(crate) fn build_browser_window_menu_entries(state: &PhotonGui) -> Vec<MenuEn
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "panel-explorer"),
-                Message::ToggleBrowserPanelVisible(BrowserLeftPanel::Explorer),
+                BrowserMessage::ToggleBrowserPanelVisible(BrowserLeftPanel::Explorer),
             )
             .icon(Icon::Folder)
             .checked(state.browser_explorer_open),
@@ -1701,7 +1851,7 @@ pub(crate) fn build_browser_window_menu_entries(state: &PhotonGui) -> Vec<MenuEn
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "panel-preview"),
-                Message::ToggleBrowserRightPanelVisible(BrowserRightPanel::Preview),
+                BrowserMessage::ToggleBrowserRightPanelVisible(BrowserRightPanel::Preview),
             )
             .icon(Icon::Image)
             .checked(state.browser_preview_open),
@@ -1709,50 +1859,60 @@ pub(crate) fn build_browser_window_menu_entries(state: &PhotonGui) -> Vec<MenuEn
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "panel-info"),
-                Message::ToggleBrowserRightPanelVisible(BrowserRightPanel::Info),
+                BrowserMessage::ToggleBrowserRightPanelVisible(BrowserRightPanel::Info),
             )
             .icon(Icon::Info)
             .checked(state.browser_info_open),
         ),
         MenuEntry::Separator,
         MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-fullscreen"), Message::ToggleFullscreen)
-                .icon(if state.is_fullscreen {
-                    Icon::FullscreenExit
-                } else {
-                    Icon::Fullscreen
-                })
-                .shortcut("F11")
-                .checked(state.is_fullscreen),
+            MenuItem::new(
+                tr(lang, "action-fullscreen"),
+                BrowserMessage::ToggleFullscreen,
+            )
+            .icon(if state.is_fullscreen {
+                Icon::FullscreenExit
+            } else {
+                Icon::Fullscreen
+            })
+            .shortcut("F11")
+            .checked(state.is_fullscreen),
         ),
         MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-reset-layout"), Message::RequestResetLayout)
-                .icon(Icon::Reset),
+            MenuItem::new(
+                tr(lang, "action-reset-layout"),
+                BrowserMessage::RequestResetLayout,
+            )
+            .icon(Icon::Reset),
         ),
         MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-settings"), Message::OpenSettings)
+            MenuItem::new(tr(lang, "action-settings"), BrowserMessage::OpenSettings)
                 .icon(Icon::Settings)
                 .shortcut("Ctrl+,"),
         ),
     ]
 }
 
-pub(crate) fn build_browser_help_menu_entries(
+pub fn build_browser_help_menu_entries(
     lang: photon_protocol::Language,
-) -> Vec<MenuEntry<'static, Message>> {
+) -> Vec<MenuEntry<'static, BrowserMessage>> {
     vec![
         MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-shortcuts"), Message::OpenShortcutsDialog)
-                .icon(Icon::Info)
-                .shortcut("?"),
+            MenuItem::new(
+                tr(lang, "action-shortcuts"),
+                BrowserMessage::OpenShortcutsDialog,
+            )
+            .icon(Icon::Info)
+            .shortcut("?"),
         ),
         MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-about"), Message::OpenAboutDialog).icon(Icon::Browser),
+            MenuItem::new(tr(lang, "action-about"), BrowserMessage::OpenAboutDialog)
+                .icon(Icon::Browser),
         ),
     ]
 }
 
-pub(crate) fn format_bytes(bytes: u64) -> String {
+pub fn format_bytes(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
     } else if bytes < 1024 * 1024 {
@@ -1762,7 +1922,7 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
     }
 }
 
-pub(crate) fn format_modified_ms(ms: u64) -> String {
+pub fn format_modified_ms(ms: u64) -> String {
     if ms == 0 {
         return "—".to_owned();
     }
@@ -1789,7 +1949,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (y + if m <= 2 { 1 } else { 0 }, m, d)
 }
 
-pub(crate) fn entry_kind_label(entry: &Entry) -> String {
+pub fn entry_kind_label(entry: &Entry) -> String {
     if !entry.kind.is_empty() {
         return entry.kind.clone();
     }
@@ -1813,7 +1973,7 @@ fn entry_icon(entry: &Entry) -> Icon {
     }
 }
 
-pub(crate) fn thumb_card_min_width(size: BrowserThumbSize) -> f32 {
+pub fn thumb_card_min_width(size: BrowserThumbSize) -> f32 {
     match size {
         BrowserThumbSize::Xs => 96.0,
         BrowserThumbSize::S => 125.0,
@@ -1861,14 +2021,14 @@ fn compile_browser_filter_regex(query: &str, case_sensitive: bool) -> Result<Opt
         .map_err(|_| ())
 }
 
-fn is_browser_filter_regex_invalid(state: &PhotonGui) -> bool {
+fn is_browser_filter_regex_invalid(state: BrowserViewState<'_>) -> bool {
     state.browser_filter_regex
         && !state.browser_filter.trim().is_empty()
-        && compile_browser_filter_regex(&state.browser_filter, state.browser_filter_case_sensitive)
+        && compile_browser_filter_regex(state.browser_filter, state.browser_filter_case_sensitive)
             .is_err()
 }
 
-pub(crate) fn entry_name_matches_filter(
+pub fn entry_name_matches_filter(
     name: &str,
     query: &str,
     case_sensitive: bool,
@@ -1892,10 +2052,10 @@ pub(crate) fn entry_name_matches_filter(
     }
 }
 
-fn sorted_filtered_entries(state: &PhotonGui) -> Vec<&Entry> {
+fn sorted_filtered_entries(state: BrowserViewState<'_>) -> Vec<&Entry> {
     let compiled_regex = if state.browser_filter_regex {
         match compile_browser_filter_regex(
-            &state.browser_filter,
+            state.browser_filter,
             state.browser_filter_case_sensitive,
         ) {
             Ok(opt) => opt,
@@ -1911,7 +2071,7 @@ fn sorted_filtered_entries(state: &PhotonGui) -> Vec<&Entry> {
         .filter(|e| {
             entry_name_matches_filter(
                 &e.name,
-                &state.browser_filter,
+                state.browser_filter,
                 state.browser_filter_case_sensitive,
                 state.browser_filter_regex,
                 compiled_regex.as_ref(),

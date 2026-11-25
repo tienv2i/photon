@@ -6,33 +6,119 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use iced::widget::{
-    Shader, column, container, image as iced_image, mouse_area, row, rule, scrollable, slider,
+    Shader, button as iced_button, column, container, image as iced_image, mouse_area, row, rule,
+    scrollable, slider, text,
 };
 use iced::{Alignment, ContentFit, Element, Fill, Length, Padding};
 use photon_i18n::tr;
 use photon_panels::{
-    DraggablePanelHeaderSpec, PanelFrameSpec, PanelSplitterEdge, kv_row, panel_splitter,
-    sidebar_dock, sidebar_panel, stacked_panel_heights, vertical_panel_splitter,
+    DraggablePanelHeaderSpec, PanelFrameSpec, PanelSplitterEdge, SidebarOrderState, kv_row,
+    panel_splitter, sidebar_dock, sidebar_panel, stacked_panel_heights, vertical_panel_splitter,
 };
 use photon_protocol::{
-    Command, Language, Theme, ViewerRightPanel, ViewerViewMode, WebtoonFitMode, Workspace,
+    ColorAdjustments, Command, Language, Theme, UiStateSnapshot, ViewerRightPanel, ViewerViewMode,
+    WebtoonFitMode, Workspace,
 };
-use photon_ui::button::{self, ButtonVariant, IconButton};
+use photon_ui::button::{self, ButtonVariant, TOOLBAR_CONTROL_HEIGHT};
 use photon_ui::grid::{FilmstripItem, filmstrip_bar};
 use photon_ui::icons::Icon;
 use photon_ui::menu::{MenuEntry, MenuItem, menu_panel_entries};
 use photon_ui::theme::{
-    canvas_backdrop_style, hairline_rule_style, slider_style, surface_panel_style,
+    TEXT_SIZE_CONTROL, canvas_backdrop_style, hairline_rule_style, slider_style,
+    surface_panel_style,
 };
-use photon_ui::toolbar::{WorkspaceTab, toolbar, toolbar_button_group, workspace_switcher_compact};
+use photon_ui::toolbar::{
+    WorkspaceSwitcherMode, WorkspaceTab, toolbar, toolbar_button_group, workspace_switcher_mode,
+    workspace_switcher_responsive,
+};
 use photon_ui::tooltip::{TooltipPosition, with_tooltip, with_tooltip_pos};
 
-use crate::app::{
-    ActiveMenu, Message, PhotonGui, WindowRole, toolbar_divider, toolbar_right_utilities,
-};
-use crate::shader_canvas::{CanvasEvent, CanvasTool, CpuImageFrame, ImageCanvasProgram};
+use photon_canvas::{CanvasEvent, CanvasTool, CpuImageFrame, ImageCanvasProgram};
 
-pub(crate) type DualSpreadSlots<'a> = (Option<(usize, &'a str)>, Option<(usize, &'a str)>);
+pub type DualSpreadSlots<'a> = (Option<(usize, &'a str)>, Option<(usize, &'a str)>);
+
+/// Borrowed state slice required to render and compute layout for the Viewer workspace.
+#[derive(Clone, Copy)]
+pub struct ViewerViewState<'a> {
+    pub snapshot: &'a UiStateSnapshot,
+    pub viewer_mode: ViewerViewMode,
+    pub viewer_frame: Option<&'a CpuImageFrame>,
+    pub viewer_pair_frame: Option<&'a CpuImageFrame>,
+    pub image_sizes: &'a HashMap<String, (u32, u32)>,
+    pub thumbnails: &'a HashMap<String, iced_image::Handle>,
+    pub viewer_adj: ColorAdjustments,
+    pub viewer_quarter_turns: u8,
+    pub zoom: f32,
+    pub pan_x: f32,
+    pub pan_y: f32,
+    pub webtoon_zoom: f32,
+    pub webtoon_visible_index: Option<usize>,
+    pub webtoon_pages: &'a HashMap<String, iced_image::Handle>,
+    pub viewer_manga_rtl: bool,
+    pub viewer_manga_cover_separate: bool,
+    pub viewer_manga_page_gap: u16,
+    pub viewer_webtoon_fit_mode: WebtoonFitMode,
+    pub viewer_adjustments_open: bool,
+    pub viewer_info_open: bool,
+    pub viewer_filmstrip_open: bool,
+    pub viewer_right_panels: &'a SidebarOrderState<ViewerRightPanel>,
+    pub viewer_right_width_preview: Option<f32>,
+    pub viewer_right_split_preview: Option<f32>,
+    pub is_fullscreen: bool,
+    pub window_size: iced::Size,
+    pub is_main_window: bool,
+    pub reader_options_open: bool,
+    pub workspace_switcher_open: bool,
+}
+
+/// Messages emitted by the Viewer workspace UI.
+#[derive(Debug, Clone)]
+pub enum ViewerMessage {
+    Noop,
+    Dispatch(Command),
+    ContextMenuDispatch(Command),
+    PickImagesDialog,
+    DualStepSpread(isize),
+    ZoomStep(f32),
+    Canvas(CanvasEvent),
+    ViewerCanvas(Option<String>, CanvasEvent),
+    ViewerZoomActual,
+    ViewerRotatePreview(i8),
+    ToggleFullscreen,
+    SetViewerViewMode(ViewerViewMode),
+    ToggleReaderOptions,
+    ToggleWorkspaceSwitcher,
+    ToggleWorkspacePanels,
+    OpenViewerContextMenu {
+        path: Option<String>,
+        pos: Option<[f32; 2]>,
+    },
+    CopyImageToClipboard(Option<String>),
+    CopyViewerPath,
+    RevealInFolder(String),
+    ToggleFilmstrip,
+    CloseFilmstrip,
+    ToggleViewerInspector,
+    ToggleViewerColorPopover,
+    CloseViewerPanel(ViewerRightPanel),
+    ToggleViewerPanelCollapse(ViewerRightPanel),
+    BeginDragViewerPanel(ViewerRightPanel),
+    HoverViewerPanelDrop(ViewerRightPanel),
+    DropViewerPanel(ViewerRightPanel),
+    SwapViewerRightPanels,
+    ViewerSplitterDrag(f32),
+    ViewerSplitterRelease(f32),
+    SetViewerAdjExposure(f32),
+    SetViewerAdjGamma(f32),
+    SetViewerAdjBrightness(f32),
+    SetViewerAdjContrast(f32),
+    SetViewerAdjSaturation(f32),
+    SetViewerAdjHighlights(f32),
+    SetViewerAdjShadows(f32),
+    ResetViewerAdj,
+    ViewerAdjOpenInEditor,
+    WebtoonScrolled(scrollable::Viewport),
+}
 
 const VIEWER_RIGHT_MIN_W: f32 = 200.0;
 const VIEWER_RIGHT_MAX_W: f32 = 600.0;
@@ -41,14 +127,14 @@ const VIEWER_SPLIT_DEFAULT_PCT: f32 = 58.0;
 const VIEWER_SPLIT_MIN_PCT: f32 = 20.0;
 const VIEWER_SPLIT_MAX_PCT: f32 = 80.0;
 
-fn viewer_right_width(state: &PhotonGui) -> f32 {
+fn viewer_right_width(state: ViewerViewState<'_>) -> f32 {
     state
         .viewer_right_width_preview
         .unwrap_or(state.snapshot.meta.layout.right_width as f32)
         .clamp(VIEWER_RIGHT_MIN_W, VIEWER_RIGHT_MAX_W)
 }
 
-fn viewer_panel_is_open(state: &PhotonGui, panel: ViewerRightPanel) -> bool {
+fn viewer_panel_is_open(state: ViewerViewState<'_>, panel: ViewerRightPanel) -> bool {
     match panel {
         ViewerRightPanel::ViewAdjustment => {
             state.viewer_adjustments_open && state.viewer_mode != ViewerViewMode::Webtoon
@@ -68,7 +154,7 @@ fn format_viewer_bytes(bytes: u64) -> String {
 }
 
 /// Image position counter shown in the Viewer status bar (`1 / 5` or `2·3 / 5`).
-pub(crate) fn viewer_counter_summary(state: &PhotonGui) -> Option<String> {
+pub fn viewer_counter_summary(state: ViewerViewState<'_>) -> Option<String> {
     let meta = &state.snapshot.meta;
     let total = meta.viewer_count;
     if total == 0 {
@@ -99,7 +185,7 @@ pub(crate) fn viewer_counter_summary(state: &PhotonGui) -> Option<String> {
 }
 
 /// Summary text shown on the left side of the bottom status bar while in Viewer workspace.
-pub(crate) fn viewer_status_summary(state: &PhotonGui, lang: Language) -> String {
+pub fn viewer_status_summary(state: ViewerViewState<'_>, lang: Language) -> String {
     let meta = &state.snapshot.meta;
     let viewer_mode = state.viewer_mode;
     let idx = meta.viewer_index.unwrap_or(0);
@@ -138,7 +224,7 @@ pub(crate) fn viewer_status_summary(state: &PhotonGui, lang: Language) -> String
         }
         ViewerViewMode::Double => {
             let (left_slot, right_slot) = dual_spread_slots(state);
-            let dims_str = |path: &str, frame: &Option<CpuImageFrame>| -> Option<String> {
+            let dims_str = |path: &str, frame: Option<&CpuImageFrame>| -> Option<String> {
                 if let Some(f) = frame {
                     Some(format!("{}×{}", f.width, f.height))
                 } else {
@@ -153,17 +239,17 @@ pub(crate) fn viewer_status_summary(state: &PhotonGui, lang: Language) -> String
                     let rname = right_slot
                         .and_then(|(ri, _)| name_at(ri))
                         .unwrap_or_default();
-                    let ldims = dims_str(lp, &state.viewer_frame)
+                    let ldims = dims_str(lp, state.viewer_frame)
                         .map(|d| format!(" ({d})"))
                         .unwrap_or_default();
-                    let rdims = dims_str(rp, &state.viewer_pair_frame)
+                    let rdims = dims_str(rp, state.viewer_pair_frame)
                         .map(|d| format!(" ({d})"))
                         .unwrap_or_default();
                     format!("{lname}{ldims}  |  {rname}{rdims}")
                 }
                 (Some((li, lp)), None) => {
                     let lname = name_at(li).unwrap_or_default();
-                    if let Some(d) = dims_str(lp, &state.viewer_frame) {
+                    if let Some(d) = dims_str(lp, state.viewer_frame) {
                         format!("{lname} · {d}")
                     } else {
                         lname
@@ -180,21 +266,27 @@ pub(crate) fn viewer_status_summary(state: &PhotonGui, lang: Language) -> String
     }
 }
 
-pub(crate) fn viewer_reader_options_right_offset(state: &PhotonGui, role: WindowRole) -> f32 {
+pub fn viewer_reader_options_right_offset(state: ViewerViewState<'_>) -> f32 {
     let utilities_w = 12.0 + 32.0; // right padding + single Panels&Settings button
-    if role != WindowRole::Main {
-        return utilities_w + 8.0;
+    if !state.is_main_window {
+        return utilities_w + 4.0;
     }
-    let compact = state.window_size.width < 1120.0;
-    let switcher_w = if compact { 112.0 } else { 252.0 };
-    // utilities_w + gap(8) + divider(1) + gap(8) + switcher_w + gap(8) + divider(1) + gap(8)
-    utilities_w + 8.0 + 1.0 + 8.0 + switcher_w + 8.0 + 1.0 + 8.0
+    let switcher_w = match workspace_switcher_mode(state.window_size.width) {
+        WorkspaceSwitcherMode::Full => 252.0,
+        WorkspaceSwitcherMode::CompactIcons => 112.0,
+        WorkspaceSwitcherMode::Dropdown => 56.0,
+    };
+    // utilities_w + gap(3) + switcher_w + gap(3)
+    utilities_w + 3.0 + switcher_w + 3.0
 }
 
 /// Top toolbar for the Viewer workspace:
 /// Left: Navigation + Zoom/Fit/1:1 + Rotate + Fullscreen.
 /// Right: View Mode Switcher (`Single`/`Double`/`Manhwa`) + Reader Options + Workspace Switcher + Panels & Settings.
-pub(crate) fn build_viewer_toolbar(state: &PhotonGui, role: WindowRole) -> Element<'_, Message> {
+pub fn build_viewer_toolbar<'a>(
+    state: ViewerViewState<'a>,
+    right_utilities: Element<'a, ViewerMessage>,
+) -> Element<'a, ViewerMessage> {
     let lang = state.snapshot.meta.language;
     let meta = &state.snapshot.meta;
     let has_nav = meta.viewer_count > 1;
@@ -202,139 +294,155 @@ pub(crate) fn build_viewer_toolbar(state: &PhotonGui, role: WindowRole) -> Eleme
     let viewer_mode = state.viewer_mode;
     let is_webtoon = viewer_mode == ViewerViewMode::Webtoon;
     let is_double = viewer_mode == ViewerViewMode::Double;
-    let compact_switcher = state.window_size.width < 1120.0;
 
     // Navigation (Prev / Next)
-    let prev_msg = has_nav.then(|| {
+    let prev_msg = has_nav.then_some({
         if is_double {
-            Message::DualStepSpread(-1)
+            ViewerMessage::DualStepSpread(-1)
         } else {
-            Message::Dispatch(Command::ViewerPrevious)
+            ViewerMessage::Dispatch(Command::ViewerPrevious)
         }
     });
-    let next_msg = has_nav.then(|| {
+    let next_msg = has_nav.then_some({
         if is_double {
-            Message::DualStepSpread(1)
+            ViewerMessage::DualStepSpread(1)
         } else {
-            Message::Dispatch(Command::ViewerNext)
+            ViewerMessage::Dispatch(Command::ViewerNext)
         }
     });
 
-    let mut left = row![
+    let nav_group = toolbar_button_group(vec![
         button::toolbar_icon(
-            Icon::FolderOpen,
+            Icon::Prev,
             false,
-            Some(Message::PickImagesDialog),
-            Some(tr(lang, "action-open-file-dialog")),
+            prev_msg,
+            Some(tr(lang, "tooltip-viewer-prev")),
         ),
-        toolbar_divider(),
-        IconButton::new(Icon::Prev)
-            .toolbar()
-            .variant(ButtonVariant::Secondary)
-            .maybe_on_press(prev_msg)
-            .tooltip(tr(lang, "tooltip-viewer-prev")),
-        IconButton::new(Icon::Next)
-            .toolbar()
-            .variant(ButtonVariant::Secondary)
-            .maybe_on_press(next_msg)
-            .tooltip(tr(lang, "tooltip-viewer-next")),
-        toolbar_divider(),
+        button::toolbar_icon(
+            Icon::Next,
+            false,
+            next_msg,
+            Some(tr(lang, "tooltip-viewer-next")),
+        ),
+    ]);
+
+    let mut actual_btn = iced_button(
+        container(text(tr(lang, "action-actual-ratio")).size(TEXT_SIZE_CONTROL))
+            .height(Length::Fill)
+            .align_y(Alignment::Center),
+    )
+    .height(Length::Fixed(TOOLBAR_CONTROL_HEIGHT))
+    .padding([0, 6])
+    .style(button::style_for(ButtonVariant::Ghost));
+    if let Some(msg) = (has_image && !is_webtoon).then_some(ViewerMessage::ViewerZoomActual) {
+        actual_btn = actual_btn.on_press(msg);
+    }
+    let actual_ratio_btn = with_tooltip_pos(
+        actual_btn,
+        tr(lang, "tooltip-viewer-actual-size"),
+        TooltipPosition::Bottom,
+    );
+
+    let zoom_group = toolbar_button_group(vec![
         button::toolbar_icon(
             Icon::ZoomOut,
             false,
-            has_image.then_some(Message::ZoomStep(0.8)),
+            has_image.then_some(ViewerMessage::ZoomStep(0.8)),
             Some(tr(lang, "tooltip-viewer-zoom-out")),
         ),
         button::toolbar_icon(
             Icon::ZoomIn,
             false,
-            has_image.then_some(Message::ZoomStep(1.25)),
+            has_image.then_some(ViewerMessage::ZoomStep(1.25)),
             Some(tr(lang, "tooltip-viewer-zoom-in")),
         ),
-        IconButton::new(Icon::Fit)
-            .toolbar()
-            .variant(ButtonVariant::Secondary)
-            .maybe_on_press(has_image.then_some(Message::Canvas(CanvasEvent::ResetFit)))
-            .tooltip(tr(lang, "tooltip-viewer-fit"))
-            .into_element(),
-        button::toolbar_labeled(
-            tr(lang, "action-actual-ratio"),
-            None,
-            ButtonVariant::Ghost,
-            (has_image && !is_webtoon).then_some(Message::ViewerZoomActual),
-            Some(tr(lang, "tooltip-viewer-actual-size")),
+        button::toolbar_icon(
+            Icon::Fit,
+            false,
+            has_image.then_some(ViewerMessage::Canvas(CanvasEvent::ResetFit)),
+            Some(tr(lang, "tooltip-viewer-fit")),
         ),
+        actual_ratio_btn,
+    ]);
+
+    let mut left = row![
+        button::toolbar_icon(
+            Icon::FolderOpen,
+            false,
+            Some(ViewerMessage::PickImagesDialog),
+            Some(tr(lang, "action-open-file-dialog")),
+        ),
+        nav_group,
+        zoom_group,
     ]
-    .spacing(4)
+    .spacing(3)
     .align_y(Alignment::Center);
 
     if !is_webtoon {
-        left = left
-            .push(toolbar_divider())
-            .push(button::toolbar_icon(
+        let rotate_group = toolbar_button_group(vec![
+            button::toolbar_icon(
                 Icon::RotateLeft,
                 false,
-                has_image.then_some(Message::ViewerRotatePreview(-1)),
+                has_image.then_some(ViewerMessage::ViewerRotatePreview(-1)),
                 Some(tr(lang, "tooltip-viewer-rotate-left")),
-            ))
-            .push(button::toolbar_icon(
+            ),
+            button::toolbar_icon(
                 Icon::RotateRight,
                 false,
-                has_image.then_some(Message::ViewerRotatePreview(1)),
+                has_image.then_some(ViewerMessage::ViewerRotatePreview(1)),
                 Some(tr(lang, "tooltip-viewer-rotate-right")),
-            ));
+            ),
+        ]);
+        left = left.push(rotate_group);
     }
 
-    left = left.push(toolbar_divider()).push(button::toolbar_icon(
+    left = left.push(button::toolbar_icon(
         if state.is_fullscreen {
             Icon::FullscreenExit
         } else {
             Icon::Fullscreen
         },
         state.is_fullscreen,
-        Some(Message::ToggleFullscreen),
+        Some(ViewerMessage::ToggleFullscreen),
         Some(tr(lang, "tooltip-viewer-fullscreen")),
     ));
 
-    // Right side: View Mode Switcher (Single | Double | Webtoon) + Reader Options + Workspace Switcher + Panels & Settings
-    let mode_switcher = toolbar_button_group(vec![
+    // Right side: View Mode Switcher (Single | Double | Webtoon | Reader Options) + Workspace Switcher + Panels & Settings
+    let view_mode_group = toolbar_button_group(vec![
         button::toolbar_icon(
             Icon::ViewSingle,
             viewer_mode == ViewerViewMode::Single,
-            Some(Message::SetViewerViewMode(ViewerViewMode::Single)),
+            Some(ViewerMessage::SetViewerViewMode(ViewerViewMode::Single)),
             Some(format!("{} (S)", tr(lang, "action-viewer-single"))),
         ),
         button::toolbar_icon(
             Icon::ViewDouble,
             viewer_mode == ViewerViewMode::Double,
-            Some(Message::SetViewerViewMode(ViewerViewMode::Double)),
+            Some(ViewerMessage::SetViewerViewMode(ViewerViewMode::Double)),
             Some(format!("{} (D)", tr(lang, "action-viewer-double"))),
         ),
         button::toolbar_icon(
             Icon::ViewManhwa,
             viewer_mode == ViewerViewMode::Webtoon,
-            Some(Message::SetViewerViewMode(ViewerViewMode::Webtoon)),
+            Some(ViewerMessage::SetViewerViewMode(ViewerViewMode::Webtoon)),
             Some(format!("{} (M)", tr(lang, "action-viewer-manhwa"))),
         ),
+        button::toolbar_icon(
+            Icon::Sliders,
+            state.reader_options_open,
+            Some(ViewerMessage::ToggleReaderOptions),
+            Some(tr(lang, "action-reader-options")),
+        ),
     ]);
-    let reader_opts_btn = button::toolbar_icon(
-        Icon::Sliders,
-        state.active_menu == Some(ActiveMenu::ReaderOptions),
-        Some(Message::ToggleMenu(ActiveMenu::ReaderOptions)),
-        Some(tr(lang, "action-reader-options")),
-    );
-    let view_mode_group = row![mode_switcher, reader_opts_btn]
-        .spacing(4)
-        .align_y(Alignment::Center);
 
-    let right: Element<'_, Message> = if role == WindowRole::Main {
-        let switcher = workspace_switcher_compact(
+    let right: Element<'a, ViewerMessage> = if state.is_main_window {
+        let switcher = workspace_switcher_responsive(
             vec![
                 WorkspaceTab::new(
                     tr(lang, "workspace-browser"),
                     Icon::Browser,
                     false,
-                    Message::Dispatch(Command::SetWorkspace {
+                    ViewerMessage::Dispatch(Command::SetWorkspace {
                         workspace: Workspace::Browser,
                     }),
                 )
@@ -343,7 +451,7 @@ pub(crate) fn build_viewer_toolbar(state: &PhotonGui, role: WindowRole) -> Eleme
                     tr(lang, "workspace-viewer"),
                     Icon::Viewer,
                     true,
-                    Message::Dispatch(Command::SetWorkspace {
+                    ViewerMessage::Dispatch(Command::SetWorkspace {
                         workspace: Workspace::Viewer,
                     }),
                 )
@@ -352,33 +460,25 @@ pub(crate) fn build_viewer_toolbar(state: &PhotonGui, role: WindowRole) -> Eleme
                     tr(lang, "workspace-editor"),
                     Icon::Editor,
                     false,
-                    Message::Dispatch(Command::SetWorkspace {
+                    ViewerMessage::Dispatch(Command::SetWorkspace {
                         workspace: Workspace::Editor,
                     }),
                 )
                 .tooltip(tr(lang, "tooltip-workspace-editor")),
             ],
-            compact_switcher,
+            workspace_switcher_mode(state.window_size.width),
+            state.workspace_switcher_open,
+            Some(ViewerMessage::ToggleWorkspaceSwitcher),
         );
-        row![
-            view_mode_group,
-            toolbar_divider(),
-            switcher,
-            toolbar_divider(),
-            toolbar_right_utilities(state)
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .into()
+        row![view_mode_group, switcher, right_utilities]
+            .spacing(3)
+            .align_y(Alignment::Center)
+            .into()
     } else {
-        row![
-            view_mode_group,
-            toolbar_divider(),
-            toolbar_right_utilities(state)
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .into()
+        row![view_mode_group, right_utilities]
+            .spacing(3)
+            .align_y(Alignment::Center)
+            .into()
     };
 
     toolbar(left, right)
@@ -386,16 +486,16 @@ pub(crate) fn build_viewer_toolbar(state: &PhotonGui, role: WindowRole) -> Eleme
 
 /// Main Viewer workspace view: Single/Double/Manhwa viewport,
 /// unified resizable/reorderable right sidebar (`ViewAdjustment` & `Info`), and bottom Filmstrip bar.
-pub(crate) fn build_viewer_view(state: &PhotonGui) -> Element<'_, Message> {
+pub fn build_viewer_view<'a>(state: ViewerViewState<'a>) -> Element<'a, ViewerMessage> {
     let lang = state.snapshot.meta.language;
     let dark = state.snapshot.meta.theme == Theme::Dark;
     let viewer_mode = state.viewer_mode;
 
-    let viewport: Element<'_, Message> = match viewer_mode {
+    let viewport: Element<'_, ViewerMessage> = match viewer_mode {
         ViewerViewMode::Single => {
-            let canvas: Element<'_, Message> = Element::from(
+            let canvas: Element<'_, ViewerMessage> = Element::from(
                 Shader::new(ImageCanvasProgram {
-                    frame: state.viewer_frame.clone(),
+                    frame: state.viewer_frame.cloned(),
                     pair_frame: None,
                     dual_gap_px: 0.0,
                     compare_frame: None,
@@ -415,11 +515,17 @@ pub(crate) fn build_viewer_view(state: &PhotonGui) -> Element<'_, Message> {
                     compare_mode: 0,
                     compare_split_x: 0.5,
                     brush_radius_px: 0.0,
+                    selection_mask: None,
+                    has_selection: false,
+                    quick_mask_active: false,
+                    marching_ants_phase: 0.0,
+                    restrict_pan_to_hand: false,
+                    stabilizer_radius: 0.0,
                 })
                 .width(Fill)
                 .height(Fill),
             )
-            .map(|ev| Message::ViewerCanvas(None, ev));
+            .map(|ev| ViewerMessage::ViewerCanvas(None, ev));
 
             container(canvas)
                 .width(Fill)
@@ -439,7 +545,7 @@ pub(crate) fn build_viewer_view(state: &PhotonGui) -> Element<'_, Message> {
         .filter(|&p| viewer_panel_is_open(state, p))
         .collect();
 
-    let main_area: Element<'_, Message> = if !open_panels.is_empty() {
+    let main_area: Element<'_, ViewerMessage> = if !open_panels.is_empty() {
         let right_w = viewer_right_width(state);
         let splitter = panel_splitter(
             right_w,
@@ -447,8 +553,8 @@ pub(crate) fn build_viewer_view(state: &PhotonGui) -> Element<'_, Message> {
             VIEWER_RIGHT_MIN_W,
             VIEWER_RIGHT_MAX_W,
             VIEWER_RIGHT_DEFAULT_W,
-            Message::ViewerSplitterDrag,
-            Message::ViewerSplitterRelease,
+            ViewerMessage::ViewerSplitterDrag,
+            ViewerMessage::ViewerSplitterRelease,
         );
 
         let right_dock = build_viewer_right_sidebar(state, lang, right_w, &open_panels);
@@ -471,21 +577,21 @@ pub(crate) fn build_viewer_view(state: &PhotonGui) -> Element<'_, Message> {
         && state.viewer_filmstrip_open
     {
         let active_path = state.snapshot.meta.viewer_path.as_deref();
-        let items: Vec<FilmstripItem<Message>> = state
+        let items: Vec<FilmstripItem<ViewerMessage>> = state
             .snapshot
             .viewer_images
             .iter()
             .map(|path| FilmstripItem {
                 thumbnail: state.thumbnails.get(path).cloned(),
                 active: active_path == Some(path.as_str()),
-                on_press: Message::Dispatch(Command::ViewerOpen { path: path.clone() }),
+                on_press: ViewerMessage::Dispatch(Command::ViewerOpen { path: path.clone() }),
             })
             .collect();
         let close_btn = with_tooltip_pos(
             button::compact_icon(
                 Icon::Close,
                 ButtonVariant::Ghost,
-                Some(Message::CloseFilmstrip),
+                Some(ViewerMessage::CloseFilmstrip),
             ),
             tr(lang, "tooltip-panel-close"),
             TooltipPosition::Left,
@@ -514,11 +620,11 @@ pub(crate) fn build_viewer_view(state: &PhotonGui) -> Element<'_, Message> {
 }
 
 fn build_viewer_right_sidebar<'a>(
-    state: &'a PhotonGui,
+    state: ViewerViewState<'a>,
     lang: Language,
     right_w: f32,
     open_panels: &[ViewerRightPanel],
-) -> Element<'a, Message> {
+) -> Element<'a, ViewerMessage> {
     let dragging_any = state.viewer_right_panels.is_dragging();
     let can_swap = open_panels.len() >= 2;
     let (top_h, bottom_h) = stacked_panel_heights(
@@ -552,12 +658,12 @@ fn build_viewer_right_sidebar<'a>(
             .swap_tooltip(tr(lang, "tooltip-panel-drag-reorder"))
             .collapse_tooltip(tr(lang, "tooltip-panel-collapse"))
             .close_tooltip(tr(lang, "tooltip-panel-close"))
-            .on_drag_start(Message::BeginDragViewerPanel(panel_kind))
-            .on_drag_hover(dragging_any.then_some(Message::HoverViewerPanelDrop(panel_kind)))
-            .on_drag_end(dragging_any.then_some(Message::DropViewerPanel(panel_kind)))
-            .on_swap(can_swap.then_some(Message::SwapViewerRightPanels))
-            .on_toggle_collapse(Message::ToggleViewerPanelCollapse(panel_kind))
-            .on_close(Some(Message::CloseViewerPanel(panel_kind)));
+            .on_drag_start(ViewerMessage::BeginDragViewerPanel(panel_kind))
+            .on_drag_hover(dragging_any.then_some(ViewerMessage::HoverViewerPanelDrop(panel_kind)))
+            .on_drag_end(dragging_any.then_some(ViewerMessage::DropViewerPanel(panel_kind)))
+            .on_swap(can_swap.then_some(ViewerMessage::SwapViewerRightPanels))
+            .on_toggle_collapse(ViewerMessage::ToggleViewerPanelCollapse(panel_kind))
+            .on_close(Some(ViewerMessage::CloseViewerPanel(panel_kind)));
 
         let panel_el = sidebar_panel(
             PanelFrameSpec::new(header)
@@ -565,8 +671,12 @@ fn build_viewer_right_sidebar<'a>(
                 .fill_height(true)
                 .body_padding(Padding::from([2, 2]))
                 .drop_indicator(state.viewer_right_panels.drop_indicator(panel_kind))
-                .on_drop_hover(dragging_any.then_some(Message::HoverViewerPanelDrop(panel_kind)))
-                .on_drop_release(dragging_any.then_some(Message::DropViewerPanel(panel_kind))),
+                .on_drop_hover(
+                    dragging_any.then_some(ViewerMessage::HoverViewerPanelDrop(panel_kind)),
+                )
+                .on_drop_release(
+                    dragging_any.then_some(ViewerMessage::DropViewerPanel(panel_kind)),
+                ),
         );
 
         let slot_height = if can_swap {
@@ -585,8 +695,8 @@ fn build_viewer_right_sidebar<'a>(
                 VIEWER_SPLIT_MIN_PCT,
                 VIEWER_SPLIT_MAX_PCT,
                 VIEWER_SPLIT_DEFAULT_PCT,
-                |_| Message::Noop,
-                |_| Message::Noop,
+                |_| ViewerMessage::Noop,
+                |_| ViewerMessage::Noop,
             ));
         }
     }
@@ -594,7 +704,10 @@ fn build_viewer_right_sidebar<'a>(
     sidebar_dock(right_w, stacked)
 }
 
-fn build_viewer_info_body<'a>(state: &'a PhotonGui, lang: Language) -> Element<'a, Message> {
+fn build_viewer_info_body<'a>(
+    state: ViewerViewState<'a>,
+    lang: Language,
+) -> Element<'a, ViewerMessage> {
     let meta = &state.snapshot.meta;
     let viewer_file = meta.viewer_path.as_deref().map(Path::new);
     let format_str = viewer_file
@@ -631,7 +744,9 @@ fn build_viewer_info_body<'a>(state: &'a PhotonGui, lang: Language) -> Element<'
                     tr(lang, "action-copy-path"),
                     Some(Icon::Copy),
                     ButtonVariant::Secondary,
-                    meta.viewer_path.as_ref().map(|_| Message::CopyViewerPath),
+                    meta.viewer_path
+                        .as_ref()
+                        .map(|_| ViewerMessage::CopyViewerPath),
                 )
                 .width(Fill),
                 tr(lang, "action-copy-path"),
@@ -650,8 +765,8 @@ fn adj_slider_row<'a>(
     value: f32,
     range: std::ops::RangeInclusive<f32>,
     step: f32,
-    on_change: impl Fn(f32) -> Message + 'a,
-) -> Element<'a, Message> {
+    on_change: impl Fn(f32) -> ViewerMessage + 'a,
+) -> Element<'a, ViewerMessage> {
     column![
         kv_row(label, format!("{value:.2}")),
         slider(range, value, on_change)
@@ -663,10 +778,10 @@ fn adj_slider_row<'a>(
 }
 
 fn build_viewer_adjustments_body<'a>(
-    state: &'a PhotonGui,
+    state: ViewerViewState<'a>,
     lang: Language,
     right_w: f32,
-) -> Element<'a, Message> {
+) -> Element<'a, ViewerMessage> {
     let adj = &state.viewer_adj;
     let has_image = state.snapshot.meta.viewer_path.is_some();
 
@@ -676,61 +791,61 @@ fn build_viewer_adjustments_body<'a>(
             adj.exposure,
             -2.0..=2.0,
             0.05,
-            Message::SetViewerAdjExposure,
+            ViewerMessage::SetViewerAdjExposure,
         ),
         adj_slider_row(
             tr(lang, "label-gamma"),
             adj.gamma,
             0.2..=3.0,
             0.05,
-            Message::SetViewerAdjGamma,
+            ViewerMessage::SetViewerAdjGamma,
         ),
         adj_slider_row(
             tr(lang, "label-highlights"),
             adj.highlights,
             -1.0..=1.0,
             0.05,
-            Message::SetViewerAdjHighlights,
+            ViewerMessage::SetViewerAdjHighlights,
         ),
         adj_slider_row(
             tr(lang, "label-shadows"),
             adj.shadows,
             -1.0..=1.0,
             0.05,
-            Message::SetViewerAdjShadows,
+            ViewerMessage::SetViewerAdjShadows,
         ),
         adj_slider_row(
             tr(lang, "label-brightness"),
             adj.brightness,
             -0.5..=0.5,
             0.02,
-            Message::SetViewerAdjBrightness,
+            ViewerMessage::SetViewerAdjBrightness,
         ),
         adj_slider_row(
             tr(lang, "label-contrast"),
             adj.contrast,
             -0.5..=0.5,
             0.02,
-            Message::SetViewerAdjContrast,
+            ViewerMessage::SetViewerAdjContrast,
         ),
         adj_slider_row(
             tr(lang, "label-saturation"),
             adj.saturation,
             -1.0..=1.0,
             0.05,
-            Message::SetViewerAdjSaturation,
+            ViewerMessage::SetViewerAdjSaturation,
         ),
     ]
     .spacing(6)
     .width(Fill);
 
-    let actions: Element<'_, Message> = if right_w >= 340.0 {
+    let actions: Element<'_, ViewerMessage> = if right_w >= 340.0 {
         row![
             button::labeled_tipped(
                 tr(lang, "action-reset-adjustments"),
                 Some(Icon::Reset),
                 ButtonVariant::Ghost,
-                Some(Message::ResetViewerAdj),
+                Some(ViewerMessage::ResetViewerAdj),
                 tr(lang, "action-reset-adjustments"),
             ),
             iced::widget::space::horizontal(),
@@ -738,7 +853,7 @@ fn build_viewer_adjustments_body<'a>(
                 tr(lang, "action-open-with-adjustments"),
                 Some(Icon::Editor),
                 ButtonVariant::Primary,
-                has_image.then_some(Message::ViewerAdjOpenInEditor),
+                has_image.then_some(ViewerMessage::ViewerAdjOpenInEditor),
                 tr(lang, "tooltip-viewer-edit"),
             ),
         ]
@@ -752,7 +867,7 @@ fn build_viewer_adjustments_body<'a>(
                     tr(lang, "action-reset-adjustments"),
                     Some(Icon::Reset),
                     ButtonVariant::Ghost,
-                    Some(Message::ResetViewerAdj),
+                    Some(ViewerMessage::ResetViewerAdj),
                 )
                 .width(Fill),
                 tr(lang, "action-reset-adjustments"),
@@ -762,7 +877,7 @@ fn build_viewer_adjustments_body<'a>(
                     tr(lang, "action-open-with-adjustments"),
                     Some(Icon::Editor),
                     ButtonVariant::Primary,
-                    has_image.then_some(Message::ViewerAdjOpenInEditor),
+                    has_image.then_some(ViewerMessage::ViewerAdjOpenInEditor),
                 )
                 .width(Fill),
                 tr(lang, "tooltip-viewer-edit"),
@@ -784,20 +899,20 @@ fn build_viewer_adjustments_body<'a>(
     .into()
 }
 
-fn build_viewer_double_panes(
-    state: &PhotonGui,
+fn build_viewer_double_panes<'a>(
+    state: ViewerViewState<'a>,
     _lang: Language,
     dark: bool,
-) -> Element<'_, Message> {
+) -> Element<'a, ViewerMessage> {
     let gap = f32::from(state.viewer_manga_page_gap);
     let (left_slot, right_slot) = dual_spread_slots(state);
     let left_path = left_slot.map(|(_, p)| p.to_owned());
     let right_path = right_slot.map(|(_, p)| p.to_owned());
 
-    let canvas: Element<'_, Message> = Element::from(
+    let canvas: Element<'_, ViewerMessage> = Element::from(
         Shader::new(ImageCanvasProgram {
-            frame: state.viewer_frame.clone(),
-            pair_frame: state.viewer_pair_frame.clone(),
+            frame: state.viewer_frame.cloned(),
+            pair_frame: state.viewer_pair_frame.cloned(),
             dual_gap_px: gap,
             compare_frame: None,
             zoom: state.zoom,
@@ -816,6 +931,12 @@ fn build_viewer_double_panes(
             compare_mode: 0,
             compare_split_x: 0.5,
             brush_radius_px: 0.0,
+            selection_mask: None,
+            has_selection: false,
+            quick_mask_active: false,
+            marching_ants_phase: 0.0,
+            restrict_pan_to_hand: false,
+            stabilizer_radius: 0.0,
         })
         .width(Fill)
         .height(Fill),
@@ -827,9 +948,9 @@ fn build_viewer_double_panes(
             } else {
                 left_path.clone()
             };
-            Message::ViewerCanvas(target, ev)
+            ViewerMessage::ViewerCanvas(target, ev)
         }
-        other => Message::ViewerCanvas(None, other),
+        other => ViewerMessage::ViewerCanvas(None, other),
     });
 
     container(canvas)
@@ -839,11 +960,11 @@ fn build_viewer_double_panes(
         .into()
 }
 
-pub(crate) fn webtoon_scroll_id() -> iced::widget::Id {
+pub fn webtoon_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("viewer_webtoon_strip")
 }
 
-pub(crate) fn compute_webtoon_layout(state: &PhotonGui) -> (f32, Vec<(String, f32, f32)>) {
+pub fn compute_webtoon_layout(state: ViewerViewState<'_>) -> (f32, Vec<(String, f32, f32)>) {
     let right_open = ViewerRightPanel::ALL
         .iter()
         .any(|&p| viewer_panel_is_open(state, p));
@@ -914,7 +1035,7 @@ pub(crate) fn compute_webtoon_layout(state: &PhotonGui) -> (f32, Vec<(String, f3
     (col_w, pages)
 }
 
-pub(crate) fn webtoon_offset_for_index(state: &PhotonGui, target: usize) -> Option<f32> {
+pub fn webtoon_offset_for_index(state: ViewerViewState<'_>, target: usize) -> Option<f32> {
     let (_, pages) = compute_webtoon_layout(state);
     if target >= pages.len() {
         return None;
@@ -924,7 +1045,7 @@ pub(crate) fn webtoon_offset_for_index(state: &PhotonGui, target: usize) -> Opti
     Some(y)
 }
 
-pub(crate) fn webtoon_index_at_scroll(state: &PhotonGui, center_y: f32) -> Option<usize> {
+pub fn webtoon_index_at_scroll(state: ViewerViewState<'_>, center_y: f32) -> Option<usize> {
     let (_, pages) = compute_webtoon_layout(state);
     let gap = f32::from(state.viewer_manga_page_gap);
     let mut y = 0.0f32;
@@ -938,7 +1059,7 @@ pub(crate) fn webtoon_index_at_scroll(state: &PhotonGui, center_y: f32) -> Optio
     None
 }
 
-fn build_viewer_webtoon_strip(state: &PhotonGui) -> Element<'_, Message> {
+fn build_viewer_webtoon_strip<'a>(state: ViewerViewState<'a>) -> Element<'a, ViewerMessage> {
     let gap = f32::from(state.viewer_manga_page_gap);
     let (_, pages) = compute_webtoon_layout(state);
     let mut col = column![]
@@ -952,7 +1073,7 @@ fn build_viewer_webtoon_strip(state: &PhotonGui) -> Element<'_, Message> {
             .get(&path)
             .cloned()
             .or_else(|| state.thumbnails.get(&path).cloned());
-        let page_el: Element<'_, Message> = if let Some(hnd) = handle {
+        let page_el: Element<'_, ViewerMessage> = if let Some(hnd) = handle {
             container(
                 iced_image(hnd)
                     .width(Length::Fixed(w))
@@ -973,10 +1094,11 @@ fn build_viewer_webtoon_strip(state: &PhotonGui) -> Element<'_, Message> {
                 .style(surface_panel_style)
                 .into()
         };
-        let wrapped_page = mouse_area(page_el).on_right_press(Message::OpenViewerContextMenu {
-            path: Some(path),
-            pos: None,
-        });
+        let wrapped_page =
+            mouse_area(page_el).on_right_press(ViewerMessage::OpenViewerContextMenu {
+                path: Some(path),
+                pos: None,
+            });
         col = col.push(wrapped_page);
     }
 
@@ -984,7 +1106,7 @@ fn build_viewer_webtoon_strip(state: &PhotonGui) -> Element<'_, Message> {
         container(
             scrollable(container(col).padding([8, 0]).width(Fill))
                 .id(webtoon_scroll_id())
-                .on_scroll(Message::WebtoonScrolled)
+                .on_scroll(ViewerMessage::WebtoonScrolled)
                 .width(Fill)
                 .height(Fill),
         )
@@ -992,14 +1114,14 @@ fn build_viewer_webtoon_strip(state: &PhotonGui) -> Element<'_, Message> {
         .height(Fill)
         .style(canvas_backdrop_style),
     )
-    .on_right_press(Message::OpenViewerContextMenu {
+    .on_right_press(ViewerMessage::OpenViewerContextMenu {
         path: None,
         pos: None,
     })
     .into()
 }
 
-pub(crate) fn compute_dual_spreads(
+pub fn compute_dual_spreads(
     images: &[String],
     sizes: &HashMap<String, (u32, u32)>,
     separate_cover: bool,
@@ -1032,7 +1154,7 @@ pub(crate) fn compute_dual_spreads(
     spreads
 }
 
-pub(crate) fn dual_spread_slots_for<'a>(
+pub fn dual_spread_slots_for<'a>(
     images: &'a [String],
     sizes: &HashMap<String, (u32, u32)>,
     current_index: Option<usize>,
@@ -1063,23 +1185,20 @@ pub(crate) fn dual_spread_slots_for<'a>(
     )
 }
 
-pub(crate) fn dual_spread_slots(state: &PhotonGui) -> DualSpreadSlots<'_> {
+pub fn dual_spread_slots<'a>(state: ViewerViewState<'a>) -> DualSpreadSlots<'a> {
     dual_spread_slots_for(
         &state.snapshot.viewer_images,
-        &state.image_sizes,
+        state.image_sizes,
         state.snapshot.meta.viewer_index,
         state.viewer_manga_cover_separate,
         state.viewer_manga_rtl,
     )
 }
 
-pub(crate) fn step_dual_spread(state: &PhotonGui, delta: isize) -> Option<String> {
+pub fn step_dual_spread(state: ViewerViewState<'_>, delta: isize) -> Option<String> {
     let images = &state.snapshot.viewer_images;
-    let spreads = compute_dual_spreads(
-        images,
-        &state.image_sizes,
-        state.viewer_manga_cover_separate,
-    );
+    let spreads =
+        compute_dual_spreads(images, state.image_sizes, state.viewer_manga_cover_separate);
     if spreads.is_empty() {
         return None;
     }
@@ -1094,10 +1213,10 @@ pub(crate) fn step_dual_spread(state: &PhotonGui, delta: isize) -> Option<String
 }
 
 /// Right-click context menu for Viewer canvas & pages.
-pub(crate) fn build_viewer_context_menu<'a>(
-    state: &'a PhotonGui,
+pub fn build_viewer_context_menu<'a>(
+    state: ViewerViewState<'a>,
     target_path: Option<&str>,
-) -> Element<'a, Message> {
+) -> Element<'a, ViewerMessage> {
     let lang = state.snapshot.meta.language;
     let resolved_path = target_path
         .map(str::to_owned)
@@ -1108,19 +1227,19 @@ pub(crate) fn build_viewer_context_menu<'a>(
 
     let edit_msg = resolved_path
         .as_ref()
-        .map(|p| Message::ContextMenuDispatch(Command::EditorOpen { path: p.clone() }))
-        .unwrap_or(Message::Noop);
+        .map(|p| ViewerMessage::ContextMenuDispatch(Command::EditorOpen { path: p.clone() }))
+        .unwrap_or(ViewerMessage::Noop);
     let copy_img_msg = resolved_path
         .as_ref()
-        .map(|p| Message::CopyImageToClipboard(Some(p.clone())))
-        .unwrap_or(Message::Noop);
+        .map(|p| ViewerMessage::CopyImageToClipboard(Some(p.clone())))
+        .unwrap_or(ViewerMessage::Noop);
     let copy_path_msg = resolved_path
         .as_ref()
-        .map(|_| Message::CopyViewerPath)
-        .unwrap_or(Message::Noop);
+        .map(|_| ViewerMessage::CopyViewerPath)
+        .unwrap_or(ViewerMessage::Noop);
     let reveal_msg = resolved_path
-        .map(Message::RevealInFolder)
-        .unwrap_or(Message::Noop);
+        .map(ViewerMessage::RevealInFolder)
+        .unwrap_or(ViewerMessage::Noop);
 
     let entries = vec![
         MenuEntry::Item(
@@ -1149,26 +1268,29 @@ pub(crate) fn build_viewer_context_menu<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-fit"),
-                Message::Canvas(CanvasEvent::ResetFit),
+                ViewerMessage::Canvas(CanvasEvent::ResetFit),
             )
             .icon(Icon::Fit)
             .shortcut("F")
             .enabled(has_path),
         ),
         MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-actual-size"), Message::ViewerZoomActual)
-                .icon(Icon::ZoomIn)
-                .shortcut("1")
-                .enabled(has_path),
+            MenuItem::new(
+                tr(lang, "action-actual-size"),
+                ViewerMessage::ViewerZoomActual,
+            )
+            .icon(Icon::ZoomIn)
+            .shortcut("1")
+            .enabled(has_path),
         ),
         MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-zoom-in"), Message::ZoomStep(1.25))
+            MenuItem::new(tr(lang, "action-zoom-in"), ViewerMessage::ZoomStep(1.25))
                 .icon(Icon::ZoomIn)
                 .shortcut("+")
                 .enabled(has_path),
         ),
         MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-zoom-out"), Message::ZoomStep(0.8))
+            MenuItem::new(tr(lang, "action-zoom-out"), ViewerMessage::ZoomStep(0.8))
                 .icon(Icon::ZoomOut)
                 .shortcut("-")
                 .enabled(has_path),
@@ -1177,7 +1299,7 @@ pub(crate) fn build_viewer_context_menu<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-rotate-left"),
-                Message::ViewerRotatePreview(-1),
+                ViewerMessage::ViewerRotatePreview(-1),
             )
             .icon(Icon::RotateLeft)
             .shortcut("Shift+R")
@@ -1186,7 +1308,7 @@ pub(crate) fn build_viewer_context_menu<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-rotate-right"),
-                Message::ViewerRotatePreview(1),
+                ViewerMessage::ViewerRotatePreview(1),
             )
             .icon(Icon::RotateRight)
             .shortcut("R")
@@ -1196,7 +1318,7 @@ pub(crate) fn build_viewer_context_menu<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-viewer-single"),
-                Message::SetViewerViewMode(ViewerViewMode::Single),
+                ViewerMessage::SetViewerViewMode(ViewerViewMode::Single),
             )
             .icon(Icon::ViewSingle)
             .shortcut("S")
@@ -1205,7 +1327,7 @@ pub(crate) fn build_viewer_context_menu<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-viewer-double"),
-                Message::SetViewerViewMode(ViewerViewMode::Double),
+                ViewerMessage::SetViewerViewMode(ViewerViewMode::Double),
             )
             .icon(Icon::ViewDouble)
             .shortcut("D")
@@ -1214,7 +1336,7 @@ pub(crate) fn build_viewer_context_menu<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-viewer-manhwa"),
-                Message::SetViewerViewMode(ViewerViewMode::Webtoon),
+                ViewerMessage::SetViewerViewMode(ViewerViewMode::Webtoon),
             )
             .icon(Icon::ViewManhwa)
             .shortcut("M")
@@ -1224,33 +1346,39 @@ pub(crate) fn build_viewer_context_menu<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-viewer-color"),
-                Message::ToggleViewerColorPopover,
+                ViewerMessage::ToggleViewerColorPopover,
             )
             .icon(Icon::Palette)
             .checked(state.viewer_adjustments_open)
             .enabled(has_path && !is_webtoon),
         ),
         MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-filmstrip"), Message::ToggleFilmstrip)
+            MenuItem::new(tr(lang, "action-filmstrip"), ViewerMessage::ToggleFilmstrip)
                 .icon(Icon::Filmstrip)
                 .checked(state.viewer_filmstrip_open),
         ),
         MenuEntry::Separator,
         MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-fullscreen"), Message::ToggleFullscreen)
-                .icon(if state.is_fullscreen {
-                    Icon::FullscreenExit
-                } else {
-                    Icon::Fullscreen
-                })
-                .shortcut("F11")
-                .checked(state.is_fullscreen),
+            MenuItem::new(
+                tr(lang, "action-fullscreen"),
+                ViewerMessage::ToggleFullscreen,
+            )
+            .icon(if state.is_fullscreen {
+                Icon::FullscreenExit
+            } else {
+                Icon::Fullscreen
+            })
+            .shortcut("F11")
+            .checked(state.is_fullscreen),
         ),
         MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-info"), Message::ToggleViewerInspector)
-                .icon(Icon::Info)
-                .shortcut("I")
-                .checked(state.viewer_info_open),
+            MenuItem::new(
+                tr(lang, "action-info"),
+                ViewerMessage::ToggleViewerInspector,
+            )
+            .icon(Icon::Info)
+            .shortcut("I")
+            .checked(state.viewer_info_open),
         ),
     ];
 

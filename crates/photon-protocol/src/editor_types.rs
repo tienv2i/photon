@@ -29,6 +29,10 @@ fn default_brush_spacing() -> f32 {
     0.15
 }
 
+fn default_stabilizer_distance() -> f32 {
+    24.0
+}
+
 /// How `EditorResize` relates the source's aspect ratio to the target dimensions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -194,6 +198,21 @@ impl BrushTip {
     ];
 }
 
+/// Stroke smoothing mode for brush and path strokes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BrushSmoothingMode {
+    #[default]
+    None,
+    Basic,
+    Weighted,
+    Stabilizer,
+}
+
+impl BrushSmoothingMode {
+    pub const ALL: [Self; 4] = [Self::None, Self::Basic, Self::Weighted, Self::Stabilizer];
+}
+
 /// Brush dynamics attached to a paint or erase stroke.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct BrushSettings {
@@ -209,6 +228,10 @@ pub struct BrushSettings {
     pub angle: f32,
     #[serde(default)]
     pub scatter: f32,
+    #[serde(default)]
+    pub smoothing_mode: BrushSmoothingMode,
+    #[serde(default = "default_stabilizer_distance")]
+    pub stabilizer_distance: f32,
 }
 
 impl Default for BrushSettings {
@@ -220,8 +243,63 @@ impl Default for BrushSettings {
             spacing: default_brush_spacing(),
             angle: 0.0,
             scatter: 0.0,
+            smoothing_mode: BrushSmoothingMode::None,
+            stabilizer_distance: default_stabilizer_distance(),
         }
     }
+}
+
+/// Cubic Bezier anchor and optional control handles for vector/bezier paths.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct VectorPathNode {
+    pub anchor: [f32; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle_in: Option<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle_out: Option<[f32; 2]>,
+}
+
+/// Shape kind for `EditorDrawShape`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DrawShapeKind {
+    #[default]
+    Line,
+    Rect,
+    Ellipse,
+    Polygon,
+    Polyline,
+    BezierPath,
+}
+
+/// Stroke/fill mode for `EditorDrawShape`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ShapeFillMode {
+    #[default]
+    Stroke,
+    Fill,
+    StrokeAndFill,
+}
+
+/// Gradient geometry for `EditorDrawGradient`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GradientKind {
+    #[default]
+    Linear,
+    Radial,
+    Conical,
+    Reflected,
+}
+
+/// Gradient color ramp mode for `EditorDrawGradient`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GradientColorMode {
+    #[default]
+    FgToBg,
+    FgToTransparent,
 }
 
 /// Liquify warp brush mode.
@@ -396,4 +474,91 @@ pub struct LayerSummary {
     pub mask_linked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect: Option<LayerEffect>,
+}
+
+/// Boolean combination mode for pixel selections (Photoshop + Krita).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionBooleanOp {
+    #[default]
+    Replace,
+    Add,
+    Subtract,
+    Intersect,
+    SymmetricDiff,
+}
+
+/// Geometric, path, or color-guided pixel selection input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SelectionShape {
+    Rect {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        #[serde(default)]
+        feather: f32,
+        #[serde(default = "default_true")]
+        anti_alias: bool,
+    },
+    Ellipse {
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        #[serde(default)]
+        feather: f32,
+        #[serde(default = "default_true")]
+        anti_alias: bool,
+    },
+    SingleRow {
+        y: u32,
+    },
+    SingleCol {
+        x: u32,
+    },
+    Polygon {
+        points: Vec<[f32; 2]>,
+        #[serde(default)]
+        feather: f32,
+        #[serde(default = "default_true")]
+        anti_alias: bool,
+    },
+    MagicWand {
+        x: u32,
+        y: u32,
+        tolerance: u8,
+        #[serde(default = "default_true")]
+        contiguous: bool,
+        #[serde(default)]
+        sample_all_layers: bool,
+        #[serde(default = "default_true")]
+        anti_alias: bool,
+    },
+    ColorRange {
+        rgb: [u8; 3],
+        fuzziness: u8,
+        #[serde(default = "default_true")]
+        sample_all_layers: bool,
+    },
+    QuickSelectStroke {
+        points: Vec<[f64; 2]>,
+        radius: f32,
+        #[serde(default = "default_true")]
+        sample_all_layers: bool,
+    },
+}
+
+/// Morphological or color-expansion modification on the active selection.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum SelectionModifyOp {
+    Feather(f32),
+    Expand(u32),
+    Contract(u32),
+    Border(u32),
+    Smooth(u32),
+    Grow(u8),
+    Similar(u8),
 }

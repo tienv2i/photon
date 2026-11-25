@@ -1,0 +1,740 @@
+//! Command envelope, typed commands, queries, events, UI text, and errors.
+
+use std::collections::BTreeMap;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    ApplyTarget, BatchOperation, BatchOutput, BatchSource, BlendMode, BrushSettings, CanvasAnchor,
+    ClientKind, Language, LayerEffect, LayoutState, LiquifyMode, LiveStrokeKind, MoveDirection,
+    PROTOCOL_VERSION, ResizeMode, Theme, TranslateSettings, TranslationBlock, Workspace,
+    default_half_f32, default_one_f32, default_opaque_alpha,
+};
+
+fn default_protocol() -> u32 {
+    PROTOCOL_VERSION
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// A command envelope. `id` is echoed in the response, recorded in the journal,
+/// and propagated into `tracing` spans for end-to-end `trace --request-id`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Envelope {
+    pub id: String,
+    #[serde(default = "default_protocol")]
+    pub protocol: u32,
+    #[serde(default)]
+    pub source: ClientKind,
+    /// Optional optimistic concurrency check. If provided and != current state revision,
+    /// the gateway rejects the command with `revision_conflict`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
+    /// Optional idempotency key to prevent duplicate execution on retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    pub command: Command,
+}
+
+impl Envelope {
+    pub fn new(id: impl Into<String>, source: ClientKind, command: Command) -> Self {
+        Self {
+            id: id.into(),
+            protocol: PROTOCOL_VERSION,
+            source,
+            expected_revision: None,
+            idempotency_key: None,
+            command,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FlipAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResizeFilter {
+    #[default]
+    Lanczos3,
+    Nearest,
+    Triangle,
+    CatmullRom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Command {
+    OpenFiles {
+        paths: Vec<String>,
+    },
+    OpenFolder {
+        path: String,
+    },
+    Navigate {
+        path: String,
+    },
+    Refresh,
+    Select {
+        paths: Vec<String>,
+    },
+    SetWorkspace {
+        workspace: Workspace,
+    },
+    WorkspaceBack,
+    SetTheme {
+        theme: Theme,
+    },
+    ToggleTheme,
+    SetLanguage {
+        language: Language,
+    },
+    SetLayout {
+        layout: LayoutState,
+    },
+    ToggleLeftPanel,
+    ToggleRightPanel {
+        #[serde(default)]
+        workspace: Option<Workspace>,
+    },
+    SetSettings {
+        theme: Theme,
+        language: Language,
+        remember_last_folder: bool,
+        hardware_acceleration: bool,
+    },
+    NewFolder {
+        parent: String,
+        name: String,
+    },
+    ViewerNext,
+    ViewerPrevious,
+    ViewerOpen {
+        path: String,
+    },
+    EditorOpen {
+        path: String,
+    },
+    EditorResize {
+        width: u32,
+        height: u32,
+        #[serde(default)]
+        filter: ResizeFilter,
+        #[serde(default)]
+        mode: ResizeMode,
+        #[serde(default)]
+        fill: Option<[u8; 3]>,
+        #[serde(default = "default_opaque_alpha")]
+        fill_alpha: u8,
+    },
+    EditorCrop {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        #[serde(default)]
+        fill: Option<[u8; 3]>,
+        #[serde(default = "default_opaque_alpha")]
+        fill_alpha: u8,
+    },
+    EditorRotate {
+        /// Degrees: 90, 180, 270, or -90.
+        degrees: i32,
+        #[serde(default)]
+        target: ApplyTarget,
+    },
+    EditorFlip {
+        axis: FlipAxis,
+        #[serde(default)]
+        target: ApplyTarget,
+    },
+    EditorAdjustColor {
+        /// -1.0 ..= 1.0
+        #[serde(default)]
+        brightness: f32,
+        /// -1.0 ..= 1.0
+        #[serde(default)]
+        contrast: f32,
+        /// -1.0 ..= 1.0
+        #[serde(default)]
+        saturation: f32,
+        /// -2.0 ..= 2.0
+        #[serde(default)]
+        exposure: f32,
+        /// -1.0 ..= 1.0
+        #[serde(default)]
+        highlights: f32,
+        /// -1.0 ..= 1.0
+        #[serde(default)]
+        shadows: f32,
+        /// 0.2 ..= 3.0
+        #[serde(default = "default_one_f32")]
+        gamma: f32,
+        #[serde(default)]
+        target: ApplyTarget,
+    },
+    EditorCanvasSize {
+        width: u32,
+        height: u32,
+        #[serde(default)]
+        anchor: CanvasAnchor,
+        #[serde(default)]
+        fill: Option<[u8; 3]>,
+        #[serde(default = "default_opaque_alpha")]
+        fill_alpha: u8,
+    },
+    EditorRotateAngle {
+        degrees: f64,
+        #[serde(default)]
+        fill: Option<[u8; 3]>,
+        #[serde(default = "default_opaque_alpha")]
+        fill_alpha: u8,
+        #[serde(default)]
+        target: ApplyTarget,
+    },
+    EditorAdjustHsv {
+        #[serde(default)]
+        hue: f32,
+        #[serde(default)]
+        saturation: f32,
+        #[serde(default)]
+        value: f32,
+        #[serde(default)]
+        target: ApplyTarget,
+    },
+    EditorColorBalance {
+        #[serde(default)]
+        shadows: [f32; 3],
+        #[serde(default)]
+        midtones: [f32; 3],
+        #[serde(default)]
+        highlights: [f32; 3],
+        #[serde(default = "default_true")]
+        preserve_luminosity: bool,
+        #[serde(default)]
+        target: ApplyTarget,
+    },
+    EditorAdjustCurves {
+        #[serde(default)]
+        rgb: Vec<[f32; 2]>,
+        #[serde(default)]
+        red: Vec<[f32; 2]>,
+        #[serde(default)]
+        green: Vec<[f32; 2]>,
+        #[serde(default)]
+        blue: Vec<[f32; 2]>,
+        #[serde(default)]
+        target: ApplyTarget,
+    },
+    EditorPaintStroke {
+        points: Vec<[f64; 2]>,
+        color: [u8; 3],
+        radius: f32,
+        #[serde(default = "default_one_f32")]
+        opacity: f32,
+        #[serde(default)]
+        erase: bool,
+        #[serde(flatten, default)]
+        brush: BrushSettings,
+    },
+    EditorLiveStrokeBegin {
+        #[serde(flatten)]
+        stroke: LiveStrokeKind,
+        x: f64,
+        y: f64,
+    },
+    EditorLiveStrokeStep {
+        points: Vec<[f64; 2]>,
+    },
+    EditorLiveStrokeEnd {
+        #[serde(default = "default_true")]
+        commit: bool,
+    },
+    EditorLayerAdd {
+        #[serde(default)]
+        name: String,
+    },
+    EditorLayerAddEffect {
+        #[serde(default)]
+        name: String,
+        effect: LayerEffect,
+    },
+    EditorLayerUpdateEffect {
+        id: u64,
+        effect: LayerEffect,
+    },
+    EditorLayerDuplicate {
+        id: u64,
+    },
+    EditorLayerDelete {
+        id: u64,
+    },
+    EditorLayerSelect {
+        id: u64,
+    },
+    EditorLayerReorder {
+        id: u64,
+        new_index: usize,
+    },
+    EditorLayerSetProps {
+        id: u64,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        visible: Option<bool>,
+        #[serde(default)]
+        locked: Option<bool>,
+        #[serde(default)]
+        opacity: Option<f32>,
+        #[serde(default)]
+        blend_mode: Option<BlendMode>,
+        #[serde(default)]
+        offset_x: Option<i32>,
+        #[serde(default)]
+        offset_y: Option<i32>,
+    },
+    EditorLayerMergeDown {
+        id: u64,
+    },
+    EditorLayerFlatten,
+    EditorSetCanvasBackground {
+        #[serde(default)]
+        color: Option<[u8; 3]>,
+        #[serde(default)]
+        transparent: bool,
+    },
+    EditorHistoryJump {
+        target_index: usize,
+    },
+    EditorExport {
+        path: String,
+        #[serde(default)]
+        quality: Option<u8>,
+        #[serde(default)]
+        metadata: bool,
+        #[serde(default)]
+        max_edge: Option<u32>,
+    },
+    EditorLayerMaskAdd {
+        id: u64,
+        #[serde(default = "default_true")]
+        reveal_all: bool,
+    },
+    EditorLayerMaskDelete {
+        id: u64,
+    },
+    EditorLayerMaskApply {
+        id: u64,
+    },
+    EditorLayerMaskInvert {
+        id: u64,
+    },
+    EditorLayerMaskSetEnabled {
+        id: u64,
+        enabled: bool,
+    },
+    EditorLayerMaskSetEditing {
+        id: u64,
+        editing: bool,
+    },
+    EditorLayerMaskSetLinked {
+        id: u64,
+        linked: bool,
+    },
+    EditorLiquifyStroke {
+        points: Vec<[f64; 2]>,
+        #[serde(default)]
+        mode: LiquifyMode,
+        radius: f32,
+        #[serde(default = "default_half_f32")]
+        strength: f32,
+    },
+    BatchRun {
+        operation: BatchOperation,
+        source: BatchSource,
+        #[serde(default)]
+        output: BatchOutput,
+    },
+    BatchCancel,
+    AddFavorite {
+        path: String,
+    },
+    RemoveFavorite {
+        path: String,
+    },
+    MoveFavorite {
+        path: String,
+        direction: MoveDirection,
+    },
+    RenamePath {
+        path: String,
+        new_name: String,
+    },
+    CopyTo {
+        paths: Vec<String>,
+        destination: String,
+    },
+    MoveTo {
+        paths: Vec<String>,
+        destination: String,
+    },
+    Trash {
+        paths: Vec<String>,
+    },
+    DeletePermanently {
+        paths: Vec<String>,
+    },
+    ViewerTranslate {
+        path: String,
+        #[serde(default)]
+        source_lang: String,
+        #[serde(default)]
+        target_lang: String,
+        #[serde(default)]
+        region: Option<[i32; 4]>,
+    },
+    ViewerSaveTranslation {
+        path: String,
+        blocks: Vec<TranslationBlock>,
+        #[serde(default)]
+        source_lang: String,
+        #[serde(default)]
+        target_lang: String,
+    },
+    ViewerDeleteTranslation {
+        path: String,
+    },
+    SetTranslateSettings {
+        settings: TranslateSettings,
+    },
+    EditorUndo,
+    EditorRedo,
+    EditorReset,
+    EditorSave,
+    EditorSaveAs {
+        path: String,
+    },
+    EditorClose,
+    CancelTask {
+        task_id: String,
+    },
+    ResetConfig {
+        #[serde(default = "default_true")]
+        reset_layout: bool,
+        #[serde(default = "default_true")]
+        reset_settings: bool,
+    },
+    /// Request the attached GUI adapter to capture a framebuffer screenshot.
+    DebugScreenshot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_path: Option<String>,
+    },
+    /// Trigger a registered UI presentation action by semantic widget ID.
+    DebugUiAction {
+        target_id: String,
+        action: String,
+    },
+}
+
+impl Command {
+    /// Stable snake_case name used in journal, logs, and metrics.
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::OpenFiles { .. } => "open_files",
+            Self::OpenFolder { .. } => "open_folder",
+            Self::Navigate { .. } => "navigate",
+            Self::Refresh => "refresh",
+            Self::Select { .. } => "select",
+            Self::SetWorkspace { .. } => "set_workspace",
+            Self::WorkspaceBack => "workspace_back",
+            Self::SetTheme { .. } => "set_theme",
+            Self::ToggleTheme => "toggle_theme",
+            Self::SetLanguage { .. } => "set_language",
+            Self::SetLayout { .. } => "set_layout",
+            Self::ToggleLeftPanel => "toggle_left_panel",
+            Self::ToggleRightPanel { .. } => "toggle_right_panel",
+            Self::SetSettings { .. } => "set_settings",
+            Self::NewFolder { .. } => "new_folder",
+            Self::ViewerNext => "viewer_next",
+            Self::ViewerPrevious => "viewer_previous",
+            Self::ViewerOpen { .. } => "viewer_open",
+            Self::EditorOpen { .. } => "editor_open",
+            Self::EditorResize { .. } => "editor_resize",
+            Self::EditorCrop { .. } => "editor_crop",
+            Self::EditorRotate { .. } => "editor_rotate",
+            Self::EditorFlip { .. } => "editor_flip",
+            Self::EditorAdjustColor { .. } => "editor_adjust_color",
+            Self::EditorCanvasSize { .. } => "editor_canvas_size",
+            Self::EditorRotateAngle { .. } => "editor_rotate_angle",
+            Self::EditorAdjustHsv { .. } => "editor_adjust_hsv",
+            Self::EditorColorBalance { .. } => "editor_color_balance",
+            Self::EditorAdjustCurves { .. } => "editor_adjust_curves",
+            Self::EditorPaintStroke { .. } => "editor_paint_stroke",
+            Self::EditorLiveStrokeBegin { .. } => "editor_live_stroke_begin",
+            Self::EditorLiveStrokeStep { .. } => "editor_live_stroke_step",
+            Self::EditorLiveStrokeEnd { .. } => "editor_live_stroke_end",
+            Self::EditorLayerAdd { .. } => "editor_layer_add",
+            Self::EditorLayerAddEffect { .. } => "editor_layer_add_effect",
+            Self::EditorLayerUpdateEffect { .. } => "editor_layer_update_effect",
+            Self::EditorLayerDuplicate { .. } => "editor_layer_duplicate",
+            Self::EditorLayerDelete { .. } => "editor_layer_delete",
+            Self::EditorLayerSelect { .. } => "editor_layer_select",
+            Self::EditorLayerReorder { .. } => "editor_layer_reorder",
+            Self::EditorLayerSetProps { .. } => "editor_layer_set_props",
+            Self::EditorLayerMergeDown { .. } => "editor_layer_merge_down",
+            Self::EditorLayerFlatten => "editor_layer_flatten",
+            Self::EditorSetCanvasBackground { .. } => "editor_set_canvas_background",
+            Self::EditorHistoryJump { .. } => "editor_history_jump",
+            Self::EditorExport { .. } => "editor_export",
+            Self::EditorLayerMaskAdd { .. } => "editor_layer_mask_add",
+            Self::EditorLayerMaskDelete { .. } => "editor_layer_mask_delete",
+            Self::EditorLayerMaskApply { .. } => "editor_layer_mask_apply",
+            Self::EditorLayerMaskInvert { .. } => "editor_layer_mask_invert",
+            Self::EditorLayerMaskSetEnabled { .. } => "editor_layer_mask_set_enabled",
+            Self::EditorLayerMaskSetEditing { .. } => "editor_layer_mask_set_editing",
+            Self::EditorLayerMaskSetLinked { .. } => "editor_layer_mask_set_linked",
+            Self::EditorLiquifyStroke { .. } => "editor_liquify_stroke",
+            Self::BatchRun { .. } => "batch_run",
+            Self::BatchCancel => "batch_cancel",
+            Self::AddFavorite { .. } => "add_favorite",
+            Self::RemoveFavorite { .. } => "remove_favorite",
+            Self::MoveFavorite { .. } => "move_favorite",
+            Self::RenamePath { .. } => "rename_path",
+            Self::CopyTo { .. } => "copy_to",
+            Self::MoveTo { .. } => "move_to",
+            Self::Trash { .. } => "trash",
+            Self::DeletePermanently { .. } => "delete_permanently",
+            Self::ViewerTranslate { .. } => "viewer_translate",
+            Self::ViewerSaveTranslation { .. } => "viewer_save_translation",
+            Self::ViewerDeleteTranslation { .. } => "viewer_delete_translation",
+            Self::SetTranslateSettings { .. } => "set_translate_settings",
+            Self::EditorUndo => "editor_undo",
+            Self::EditorRedo => "editor_redo",
+            Self::EditorReset => "editor_reset",
+            Self::EditorSave => "editor_save",
+            Self::EditorSaveAs { .. } => "editor_save_as",
+            Self::EditorClose => "editor_close",
+            Self::CancelTask { .. } => "cancel_task",
+            Self::ResetConfig { .. } => "reset_config",
+            Self::DebugScreenshot { .. } => "debug_screenshot",
+            Self::DebugUiAction { .. } => "debug_ui_action",
+        }
+    }
+
+    /// Whether this command can be replayed deterministically in sandbox mode.
+    pub const fn is_replayable(&self) -> bool {
+        !matches!(
+            self,
+            Self::DebugScreenshot { .. }
+                | Self::DebugUiAction { .. }
+                | Self::CancelTask { .. }
+                | Self::BatchCancel
+        )
+    }
+}
+
+/// Read-only query surface. Queries never mutate domain state.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Query {
+    State,
+    Meta,
+    Status,
+    ListFolders { path: String },
+    Tasks,
+    UiTree,
+    Schema,
+}
+
+/// Outcome of submitting an `Envelope` to the gateway.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CommandResponse {
+    pub id: String,
+    pub ok: bool,
+    pub status: CommandStatus,
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<UiText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ProtocolError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandStatus {
+    Completed,
+    Accepted,
+    Failed,
+}
+
+/// Sequenced event emitted on Core's event bus for GUI, CLI `--follow`, and MCP.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Event {
+    pub seq_id: u64,
+    pub timestamp_ms: u64,
+    pub revision: u64,
+    #[serde(flatten)]
+    pub kind: EventKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum EventKind {
+    StateChanged {
+        workspace: Workspace,
+        listing_epoch: u64,
+    },
+    CommandExecuted {
+        request_id: String,
+        command: String,
+        ok: bool,
+    },
+    TaskStarted {
+        task_id: String,
+        kind: String,
+    },
+    TaskProgress {
+        task_id: String,
+        percent: u8,
+        stage: String,
+    },
+    TaskFinished {
+        task_id: String,
+        ok: bool,
+        message: String,
+    },
+    ScreenshotRequested {
+        request_id: String,
+        output_path: Option<String>,
+    },
+    ScreenshotCaptured {
+        request_id: String,
+        path: String,
+        width: u32,
+        height: u32,
+    },
+    UiActionRequested {
+        request_id: String,
+        target_id: String,
+        action: String,
+    },
+}
+
+/// Translatable message emitted by Core without pulling i18n dependencies into Core.
+///
+/// Core knows *what* happened (`code` + named `args`); the presentation edge
+/// (GUI or localized CLI) renders it via Fluent `.ftl`, while logs and the
+/// journal always record `UiText::english()`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UiText {
+    pub code: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub args: BTreeMap<String, String>,
+}
+
+impl UiText {
+    pub fn new(code: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            args: BTreeMap::new(),
+        }
+    }
+
+    pub fn with(
+        code: impl Into<String>,
+        args: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            args: args
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self::new("")
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.code.is_empty()
+    }
+
+    /// Mechanical English fallback for journals, tracing logs, and headless CLI.
+    pub fn english(&self) -> String {
+        if self.code.is_empty() {
+            return String::new();
+        }
+        let mut out = self.code.replace(['_', '-'], " ");
+        if !self.args.is_empty() {
+            let formatted: Vec<String> =
+                self.args.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            out.push_str(": ");
+            out.push_str(&formatted.join(", "));
+        }
+        out
+    }
+}
+
+/// Structured command/query rejection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProtocolError {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<UiText>,
+}
+
+impl ProtocolError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            ui: None,
+        }
+    }
+
+    pub fn line(code: impl Into<String>, ui: UiText) -> Self {
+        let message = ui.english();
+        Self {
+            code: code.into(),
+            message,
+            ui: Some(ui),
+        }
+    }
+
+    pub fn with_line(code: impl Into<String>, message: impl Into<String>, ui: UiText) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            ui: Some(ui),
+        }
+    }
+}
+
+/// Generate JSON Schema bundle for the entire Photon protocol (used by agents & MCP).
+pub fn protocol_schemas() -> serde_json::Value {
+    serde_json::json!({
+        "protocol_version": PROTOCOL_VERSION,
+        "envelope": schemars::schema_for!(Envelope),
+        "command": schemars::schema_for!(Command),
+        "query": schemars::schema_for!(Query),
+        "response": schemars::schema_for!(CommandResponse),
+        "event": schemars::schema_for!(Event),
+    })
+}

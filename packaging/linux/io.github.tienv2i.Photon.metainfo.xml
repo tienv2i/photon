@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.tienv2i.Photon</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>Photon</name>
+  <summary>Fast photo browser, viewer, and non-destructive editor</summary>
+
+  <description>
+    <p>
+      Photon is a pure-Rust photo browser, viewer, manga/manhwa reader, and
+      non-destructive image editor built with iced and wgpu.
+    </p>
+    <p>
+      It offers Single View, smart Double Page book/manga spreads, continuous
+      Manhwa vertical strip scrolling, and non-destructive image editing.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.tienv2i.Photon.desktop</launchable>
+
+  <provides>
+    <binary>photon</binary>
+    <binary>photonctl</binary>
+  </provides>
+
+  <categories>
+    <category>Graphics</category>
+    <category>Viewer</category>
+    <category>Photography</category>
+  </categories>
+
+  <keywords>
+    <keyword>photo</keyword>
+    <keyword>image</keyword>
+    <keyword>viewer</keyword>
+    <keyword>editor</keyword>
+    <keyword>manga</keyword>
+    <keyword>manhwa</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/tienv2i/photon</url>
+  <url type="bugtracker">https://github.com/tienv2i/photon/issues</url>
+
+  <developer id="io.github.tienv2i">
+    <name>Photon Contributors</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-11-25"/>
+  </releases>
+</component>

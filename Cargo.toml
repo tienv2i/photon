@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/photon-protocol",
+    "crates/photon-storage",
+    "crates/photon-i18n",
+    "crates/photon-image",
+    "crates/photon-core",
+    "crates/photon-dialogs",
+    "crates/photon-ipc",
+    "crates/photon-ui",
+    "crates/photon-panels",
+    "crates/photon-cli",
+    "crates/photon-desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.88"
+
+[workspace.dependencies]
+photon-protocol = { path = "crates/photon-protocol" }
+photon-storage = { path = "crates/photon-storage" }
+photon-i18n = { path = "crates/photon-i18n" }
+photon-image = { path = "crates/photon-image" }
+photon-core = { path = "crates/photon-core" }
+photon-dialogs = { path = "crates/photon-dialogs" }
+photon-ipc = { path = "crates/photon-ipc" }
+photon-ui = { path = "crates/photon-ui" }
+photon-panels = { path = "crates/photon-panels" }
+
+clap = { version = "4", features = ["derive", "env"] }
+fluent-templates = "0.15"
+iced = { version = "0.14", features = ["wgpu", "tiny-skia", "tokio", "image", "svg", "advanced"] }
+image = "0.25"
+rayon = "1.10"
+rfd = "0.18"
+schemars = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+unic-langid = "0.9"
+
+[profile.release]
+strip = "symbols"
+lto = "thin"

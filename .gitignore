@@ -1,0 +1,7 @@
+/target
+/build
+**/*.rs.bk
+*.swp
+.DS_Store
+/tmp
+/docs/evidence/*.tmp.png

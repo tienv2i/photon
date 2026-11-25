@@ -1,0 +1,10 @@
+[package]
+name = "photon-dialogs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+iced = { workspace = true, features = ["canvas"] }
+rfd = { workspace = true }

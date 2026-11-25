@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Photon
+Name[vi]=Photon
+GenericName=Image Viewer
+GenericName[vi]=Trình xem ảnh
+Comment=Fast photo browser, viewer, and manga/manhwa reader
+Comment[vi]=Duyệt, xem ảnh và đọc manga/manhwa nhanh gọn
+Exec=@BINDIR@/photon view %F
+TryExec=@BINDIR@/photon
+Icon=io.github.tienv2i.Photon
+Terminal=false
+Categories=Graphics;Viewer;Photography;
+Keywords=photo;image;picture;viewer;manga;manhwa;browse;
+MimeType=@MIMETYPES@
+StartupWMClass=photon
+StartupNotify=true

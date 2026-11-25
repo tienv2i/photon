@@ -1,47 +1,37 @@
 # Photon Project State
 
-Verified snapshot of the `/home/huynhat/Projects/photon` workspace.
+Verified snapshot of the `/home/huynhat/Projects/photon` workspace (commit `f6f0c2e` on `main`).
 
 ## Workspace Inventory
 
-- **Workspace members**: 11 crates (`edition = "2024"`, `rust-version = "1.88"`):
+- **Workspace members**: 15 crates (`edition = "2024"`, `rust-version = "1.88"`):
   - Core & automation: `photon-protocol`, `photon-storage`, `photon-i18n`, `photon-image`, `photon-core`, `photon-ipc`, `photon-cli`
-  - UI & desktop: `photon-dialogs`, `photon-ui`, `photon-panels`, `photon-desktop`
+  - UI, GPU canvas & workspaces: `photon-dialogs`, `photon-ui`, `photon-panels`, `photon-canvas`, `photon-browser`, `photon-viewer`, `photon-editor`, `photon-desktop`
 - **Binaries**: `photon` (`crates/photon-desktop`) and `photonctl` (`crates/photon-cli`)
 
 ## Verified Checks (Current Tree)
 
-All checks below were executed against the current workspace and passed:
+All checks below were executed against the workspace after the final edit and passed:
 
 | Check | Command | Result |
 |---|---|---|
-| Formatting | `just fmt-check` (`cargo fmt --all -- --check`) | Passed |
-| Workspace tests | `just test` (`cargo test --workspace`) | **76 passed, 0 failed** |
-| Lints (strict) | `cargo clippy --workspace --all-targets -- -D warnings` | Passed (0 warnings) |
-| Release build | `just build-release` (`cargo build --workspace --release`) | Passed |
+| Formatting | `cargo fmt --all -- --check && just fmt-check` | Passed |
+| Lints (strict) | `just clippy` (`cargo clippy --workspace --all-targets -- -D warnings`) | Passed (0 warnings) |
+| Workspace tests | `just test` (`cargo test --workspace`) | **98 passed, 0 failed** |
+| Live GPU X11 | `photon` + `photonctl` (`wgpu`/Vulkan Intel Iris Xe) | Passed (Select menu, Tool Rail, Tool Options) |
 
-### Test Breakdown (`just test`)
+## Implemented Feature Milestones
 
-- `photon-cli` (unit): 1 passed (`clap_cli_has_no_arg_collisions`)
-- `photon-core` (unit): 15 passed (batch, protocol schemas, disabled translate, file ops, sidecar/TSV, startup/layout/guards, layer masks/liquify/editor/export)
-- `photon-core` (`tests/automation_e2e.rs`): 2 passed (i18n coverage of all Core/Image `UiText` codes, IPC dispatch/conflict/idempotency/sandbox replay)
-- `photon-desktop` (unit): 7 passed (crop UV, thumb stepper, hex parsing, formatting, dimension inputs, batch commands)
-- `photon-dialogs` (unit): 11 passed (`DialogManager`, 8-way resize, viewport clamping, `CutoutStrips` partitioning, native filter helpers)
-- `photon-i18n` (unit): 3 passed (`en-US`/`vi-VN` key & variable parity, Core/Editor `UiText` rendering)
-- `photon-image` (unit): 7 passed (layers, masks, liquify, non-destructive undo/redo/reset, adjustments, canvas/crop/resize, bounded history & `.bak` save)
-- `photon-ipc` (unit): 0 tests
-- `photon-panels` (unit): 11 passed (`SidebarOrderState` DnD/normalization/swaps, `PanelSplitter` portions/collapse heights, panel/header builders)
-- `photon-protocol` (unit): 4 passed (`LayoutState` defaults, legacy deserialization, order sanitization, visibility overrides)
-- `photon-storage` (unit): 5 passed (profile identity isolation, legacy config deserialization, journal roundtrip, corruption backup/repair, bounds sanitization)
-- `photon-ui` (unit): 10 passed (unit conversions, splitters, dialog theme bridge, menu clamping/height estimation, splines, tooltips, workspace switcher)
+1. **Workspace Crate Extraction**: Extracted `photon-canvas`, `photon-browser`, `photon-viewer`, and `photon-editor` from `photon-desktop`.
+2. **Photoshop + Krita Selection Suite**:
+   - `SelectionMask` CoW mask (`photon-image/src/selection.rs`), boolean ops, morphological/color modifiers, Quick Mask (`Q`), animated GPU marching ants shader, `Select` menu + `SelectionModify` numeric input dialog, and `SelectionMask` clipping across paint/draw/adjustment ops.
+   - GPU Vector Overlay sub-pipeline (`wgpu` `LineList` / `TriangleList`), Krita-style `PolygonLasso` controls, and Sobel + 8-connected Dijkstra `magnetic_snap` for `MagneticLasso`.
+3. **Standardized Editor Navigation**:
+   - `restrict_pan_to_hand: true` in Editor (`false` in Viewer), `clamp_editor_pan` against viewport bounds, scroll-to-zoom at cursor, global spring-loaded `Space + Drag` panning (preserving in-progress Polygon/Bézier nodes), and global `Alt + Click` color sampling for paint/draw tools.
+4. **Krita-style Drawing & Bézier Curve Toolset**:
+   - `BrushSmoothingMode` (`None`, `Basic`, `Weighted`, `Stabilizer`), `Shape` tools (`Line`, `Rect`, `Ellipse`, `Polygon`, `Polyline` — `U`), interactive `Bézier Pen` (`P`, `Enter` stroke/fill, `Ctrl+Enter` Path → Selection), `Paint Bucket` (`F`), and `Gradient` (`G`: `Linear`, `Radial`, `Conical`, `Reflected`).
 
 ## Verification Scope Notes
 
-- Automated `just test` validates domain logic, protocol schemas, IPC, replay, image processing, i18n parity, and `photon-ui`/`photon-dialogs`/`photon-panels` widget builders/math without opening an OS window.
-- Live GPU/window rendering (`wgpu` / `iced::daemon` / OS `rfd` pickers) is verified interactively using Tier 3 workflow (`photon` + `photonctl debug ui-tree` + `photonctl debug screenshot`).
-
-## Architecture & Refactoring Notes
-
-- **Completed crate extractions**: Reusable dialog geometry/overlays live in `photon-dialogs`, and unified sidebar dock/header/DnD/splitter primitives live in `photon-panels`, shared across Browser, Viewer, and Editor.
-- **Disabled feature policy**: AI translation (`ViewerTranslate` et al.) and Plugins are disabled at runtime while keeping protocol/config serde compatibility for existing configs and journal replay.
-- **Future cleanup candidate**: `crates/photon-desktop/src/app.rs` (~7,091 lines) centralizes `PhotonGui` state, `Message` handling, menus, settings, and dialog wiring; splitting `Message` handlers by workspace/concern is the primary maintainability opportunity if desktop UI grows further.
+- Automated `just test` validates domain logic, protocol schemas, IPC, replay, image processing (`selection`, `drawing`), i18n parity, and UI/canvas math (`magnetic_snap`, `clamp_editor_pan`).
+- Live GPU/window rendering (`wgpu` / `iced::daemon`) is verified interactively using `photon` + `photonctl debug ui-tree` + `photonctl debug screenshot`. (`SelectionModify` dialog range validation is covered by `photon-desktop` unit tests.)

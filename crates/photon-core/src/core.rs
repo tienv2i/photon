@@ -442,6 +442,7 @@ impl Core {
             remember_last_folder: self.config.remember_last_folder,
             save_ui_state_on_exit: self.config.save_ui_state_on_exit,
             hardware_acceleration: self.config.hardware_acceleration,
+            backup_method: self.config.backup_method,
             viewer_index: self.viewer_index,
             viewer_path,
             viewer_count: self.viewer_images.len(),
@@ -902,6 +903,11 @@ impl Core {
                     Some(UiText::with("theme_set", [("theme", theme.as_str())])),
                     None,
                 ))
+            }
+            Command::SetBackupMethod { method } => {
+                self.config.backup_method = *method;
+                self.persist_config();
+                Ok((None, None))
             }
             Command::ToggleTheme => {
                 let next = self.config.theme.toggled();
@@ -2499,8 +2505,30 @@ impl Core {
 
     pub(crate) fn refresh_after_file_op(&mut self) {
         self.tree_revision += 1;
+        let prev_viewer_path = self
+            .viewer_index
+            .and_then(|idx| self.viewer_images.get(idx).cloned());
+        let prev_selection = self.selection.clone();
         if let Some(dir) = self.current_folder.clone() {
             let _ = self.open_folder(&dir);
+        }
+        if let Some(vp) = prev_viewer_path
+            && let Some(idx) = self.viewer_images.iter().position(|p| p == &vp)
+        {
+            self.viewer_index = Some(idx);
+            self.viewer_saved_translation = translate::load_saved_translation(Path::new(&vp));
+        }
+        if !prev_selection.is_empty() {
+            let kept: Vec<String> = prev_selection
+                .into_iter()
+                .filter(|p| self.entries.iter().any(|e| e.path == *p))
+                .collect();
+            if !kept.is_empty() {
+                self.selection_info = kept
+                    .first()
+                    .and_then(|p| build_selection_info(Path::new(p)));
+                self.selection = kept;
+            }
         }
     }
 

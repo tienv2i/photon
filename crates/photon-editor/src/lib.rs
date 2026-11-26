@@ -2199,7 +2199,15 @@ fn build_tool_options_history_panel<'a>(
         EditorToolTab::History => build_history_panel(ed, lang),
     };
 
-    scrollable(tab_body).height(Fill).width(Fill).into()
+    scrollable(container(tab_body).padding(iced::Padding {
+        top: 0.0,
+        right: 10.0,
+        bottom: 0.0,
+        left: 0.0,
+    }))
+    .height(Fill)
+    .width(Fill)
+    .into()
 }
 
 fn build_tool_options_card<'a>(
@@ -3556,12 +3564,10 @@ fn build_gradient_tool_options<'a>(
         text(tr(lang, "label-gradient-repeat")).size(11),
         repeat_row,
         row![
-            text(tr(lang, "label-gradient-blend"))
-                .size(11)
-                .width(Length::Fixed(52.0)),
+            text(tr(lang, "label-gradient-blend")).size(11),
             blend_picker,
         ]
-        .spacing(6)
+        .spacing(8)
         .align_y(Alignment::Center),
         kv_row(
             tr(lang, "label-opacity"),
@@ -4410,61 +4416,68 @@ fn build_layers_panel<'a>(
             .find(|c| c.mode == layer.blend_mode)
             .cloned();
 
-        let blend_picker = with_tooltip_pos(
-            pick_list(blend_options, selected_blend, move |choice: BlendChoice| {
-                EditorMessage::Dispatch(Command::EditorLayerSetProps {
-                    id: layer_id,
-                    name: None,
-                    visible: None,
-                    locked: None,
-                    opacity: None,
-                    blend_mode: Some(choice.mode),
-                    offset_x: None,
-                    offset_y: None,
-                })
+        let blend_picker = pick_list(blend_options, selected_blend, move |choice: BlendChoice| {
+            EditorMessage::Dispatch(Command::EditorLayerSetProps {
+                id: layer_id,
+                name: None,
+                visible: None,
+                locked: None,
+                opacity: None,
+                blend_mode: Some(choice.mode),
+                offset_x: None,
+                offset_y: None,
             })
-            .width(Length::Fixed(108.0))
-            .text_size(TEXT_SIZE_CONTROL)
-            .padding([4, 8])
-            .style(|theme, status| {
+        })
+        .width(Fill)
+        .text_size(TEXT_SIZE_CONTROL)
+        .padding([4, 8])
+        .style(|theme, status| {
+            let t = PaletteTokens::for_theme(theme);
+            let active = matches!(
+                status,
+                pick_list::Status::Hovered | pick_list::Status::Opened { .. }
+            );
+            pick_list::Style {
+                text_color: t.text_primary,
+                placeholder_color: t.text_muted,
+                handle_color: t.text_muted,
+                background: if active { t.bg_hover } else { t.bg_app }.into(),
+                border: Border {
+                    color: if active { t.accent } else { t.border },
+                    width: 1.0,
+                    radius: RADIUS_SM.into(),
+                },
+            }
+        })
+        .menu_style(|theme| {
+            let t = PaletteTokens::for_theme(theme);
+            iced_menu::Style {
+                background: t.bg_elevated.into(),
+                border: Border {
+                    color: t.border_strong,
+                    width: 1.0,
+                    radius: RADIUS_SM.into(),
+                },
+                text_color: t.text_primary,
+                selected_text_color: Color::WHITE,
+                selected_background: t.accent.into(),
+                shadow: Shadow::default(),
+            }
+        });
+
+        let blend_row = row![
+            text(tr(lang, "label-blend-mode")).size(11).style(|theme| {
                 let t = PaletteTokens::for_theme(theme);
-                let active = matches!(
-                    status,
-                    pick_list::Status::Hovered | pick_list::Status::Opened { .. }
-                );
-                pick_list::Style {
-                    text_color: t.text_primary,
-                    placeholder_color: t.text_muted,
-                    handle_color: t.text_muted,
-                    background: if active { t.bg_hover } else { t.bg_app }.into(),
-                    border: Border {
-                        color: if active { t.accent } else { t.border },
-                        width: 1.0,
-                        radius: RADIUS_SM.into(),
-                    },
-                }
-            })
-            .menu_style(|theme| {
-                let t = PaletteTokens::for_theme(theme);
-                iced_menu::Style {
-                    background: t.bg_elevated.into(),
-                    border: Border {
-                        color: t.border_strong,
-                        width: 1.0,
-                        radius: RADIUS_SM.into(),
-                    },
-                    text_color: t.text_primary,
-                    selected_text_color: Color::WHITE,
-                    selected_background: t.accent.into(),
-                    shadow: Shadow::default(),
+                text::Style {
+                    color: Some(t.text_muted),
                 }
             }),
-            tr(lang, "label-blend-mode"),
-            TooltipPosition::Top,
-        );
+            blend_picker,
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
 
         let opacity_row = row![
-            blend_picker,
             with_tooltip_pos(
                 slider(0.0..=1.0, layer.opacity, move |v| {
                     EditorMessage::Dispatch(Command::EditorLayerSetProps {
@@ -4497,32 +4510,23 @@ fn build_layers_panel<'a>(
         .spacing(6)
         .align_y(Alignment::Center);
 
-        props_col = props_col.push(opacity_row);
+        props_col = props_col.push(blend_row).push(opacity_row);
 
         if let Some(effect) = &layer.effect {
             let effect_ctrl: Option<Element<'_, EditorMessage>> = match effect {
-                LayerEffect::Blur { radius } => Some(
-                    row![
-                        text(tr(lang, "label-radius"))
-                            .size(11)
-                            .style(|theme| text::Style {
-                                color: Some(PaletteTokens::for_theme(theme).text_muted),
-                            }),
-                        slider(1.0..=24.0, *radius, move |v| {
-                            EditorMessage::Dispatch(Command::EditorLayerUpdateEffect {
-                                id: layer_id,
-                                effect: LayerEffect::Blur { radius: v },
-                            })
+                LayerEffect::Blur { radius } => Some(photon_ui::panel::slider_control_row(
+                    tr(lang, "label-radius"),
+                    *radius,
+                    1.0..=24.0,
+                    0.5_f32,
+                    format!("{radius:.0} px"),
+                    move |v| {
+                        EditorMessage::Dispatch(Command::EditorLayerUpdateEffect {
+                            id: layer_id,
+                            effect: LayerEffect::Blur { radius: v },
                         })
-                        .step(0.5_f32)
-                        .style(slider_style)
-                        .width(Fill),
-                        text(format!("{radius:.0} px")).size(11),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center)
-                    .into(),
-                ),
+                    },
+                )),
                 LayerEffect::Sharpen { amount } => Some(
                     row![
                         text(tr(lang, "label-strength"))
@@ -5018,7 +5022,14 @@ fn build_layers_panel<'a>(
 
     column![
         props_col,
-        scrollable(list_col).height(Fill).width(Fill),
+        scrollable(container(list_col).padding(iced::Padding {
+            top: 0.0,
+            right: 10.0,
+            bottom: 0.0,
+            left: 0.0,
+        }))
+        .height(Fill)
+        .width(Fill),
         canvas_bg_row,
         action_bar,
     ]
@@ -5344,7 +5355,7 @@ pub fn crop_uv_to_signed(uv: [f32; 4], img_w: u32, img_h: u32) -> (i32, i32, u32
 
 pub fn build_editor_canvas_context_menu<'a>(
     state: EditorViewState<'a>,
-) -> Option<Element<'a, EditorMessage>> {
+) -> Option<(f32, Element<'a, EditorMessage>)> {
     let ed = state.snapshot.meta.editor.as_ref()?;
     let lang = state.snapshot.meta.language;
     let entries = vec![
@@ -5535,13 +5546,14 @@ pub fn build_editor_canvas_context_menu<'a>(
             .enabled(ed.modified),
         ),
     ];
-    Some(menu_panel_entries(entries, 225.0))
+    let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+    Some((est_h, menu_panel_entries(entries, 225.0)))
 }
 
 pub fn build_editor_layer_context_menu<'a>(
     state: EditorViewState<'a>,
     layer_id: u64,
-) -> Option<Element<'a, EditorMessage>> {
+) -> Option<(f32, Element<'a, EditorMessage>)> {
     let ed = state.snapshot.meta.editor.as_ref()?;
     let stack_idx = ed.layers.iter().position(|l| l.id == layer_id)?;
     let layer = &ed.layers[stack_idx];
@@ -5765,10 +5777,13 @@ pub fn build_editor_layer_context_menu<'a>(
         ),
     ]);
 
-    Some(menu_panel_entries(entries, 220.0))
+    let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+    Some((est_h, menu_panel_entries(entries, 220.0)))
 }
 
-pub fn build_editor_add_layer_menu<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMessage> {
+pub fn build_editor_add_layer_menu<'a>(
+    state: EditorViewState<'a>,
+) -> (f32, Element<'a, EditorMessage>) {
     let lang = state.snapshot.meta.language;
     let next_idx = state
         .snapshot
@@ -5895,7 +5910,8 @@ pub fn build_editor_add_layer_menu<'a>(state: EditorViewState<'a>) -> Element<'a
         ),
     ];
 
-    menu_panel_entries(entries, 224.0)
+    let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+    (est_h, menu_panel_entries(entries, 224.0))
 }
 
 /// Reusable Editor Plugins menu entries for `photon-desktop`.

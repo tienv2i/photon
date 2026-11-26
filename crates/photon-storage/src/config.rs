@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use photon_protocol::{
-    AiSettings, AppLaunchWindowMode, Language, LayoutState, Theme, TranslateSettings,
+    AiSettings, AppLaunchWindowMode, BackupMethod, Language, LayoutState, Theme, TranslateSettings,
 };
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +45,8 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub save_ui_state_on_exit: bool,
     pub hardware_acceleration: bool,
+    #[serde(default)]
+    pub backup_method: BackupMethod,
     pub favorites: Vec<String>,
     /// Set to `true` after the first-launch default Quick Access items have been
     /// seeded into `favorites`.  Prevents them from reappearing after the user
@@ -69,6 +71,7 @@ impl Default for Config {
             remember_last_folder: true,
             save_ui_state_on_exit: true,
             hardware_acceleration: true,
+            backup_method: BackupMethod::default(),
             favorites: Vec::new(),
             favorites_initialized: false,
             translate: TranslateSettings::default(),

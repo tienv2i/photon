@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use image::RgbaImage;
 use photon_image::LayerOperation;
 use photon_plugins::{
-    AiWorkerEvent, LoadedPlugin, PluginRegistry, REMBG_ACTION, commit_browser_image_output,
-    delete_model_file, download_model, resolve_models_dir_for, resolve_plugins_dir,
-    run_jsonl_inference_streaming,
+    AiWorkerEvent, LoadedPlugin, PluginRegistry, REMBG_ACTION,
+    commit_browser_image_output_with_backup, delete_model_file, download_model,
+    resolve_models_dir_for, resolve_plugins_dir, run_jsonl_inference_streaming,
 };
 use photon_protocol::{
     AiDevice, AiMaskStroke, AiTaskState, ApplyTarget, PluginModelSpec, ProtocolError,
@@ -35,21 +35,7 @@ pub(crate) fn needs_translate_rasterize(path: &Path) -> bool {
         .map(|e| e.to_ascii_lowercase());
     !matches!(
         ext.as_deref(),
-        Some(
-            "png"
-                | "jpg"
-                | "jpeg"
-                | "jpe"
-                | "jfif"
-                | "bmp"
-                | "tif"
-                | "tiff"
-                | "webp"
-                | "pnm"
-                | "pbm"
-                | "pgm"
-                | "ppm"
-        )
+        Some("png" | "jpg" | "jpeg" | "jpe" | "jfif" | "bmp" | "tif" | "tiff" | "webp")
     )
 }
 
@@ -178,25 +164,22 @@ impl PendingAiJob {
                 ..
             } => {
                 let mut _temp_guard: Option<TempFileGuard> = None;
-                let effective_input = if matches!(
-                    action.as_str(),
-                    "viewer.translate" | "viewer.ai_ocr" | "viewer.ocr_copy"
-                ) && needs_translate_rasterize(&input_path)
-                {
-                    match rasterize_for_translate(&input_path) {
-                        Ok(guard) => {
-                            let path = guard.path().to_path_buf();
-                            _temp_guard = Some(guard);
-                            path
+                let effective_input =
+                    if input_path.is_file() && needs_translate_rasterize(&input_path) {
+                        match rasterize_for_translate(&input_path) {
+                            Ok(guard) => {
+                                let path = guard.path().to_path_buf();
+                                _temp_guard = Some(guard);
+                                path
+                            }
+                            Err(message) => {
+                                on_event(AiWorkerEvent::Failed { message });
+                                return;
+                            }
                         }
-                        Err(message) => {
-                            on_event(AiWorkerEvent::Failed { message });
-                            return;
-                        }
-                    }
-                } else {
-                    input_path
-                };
+                    } else {
+                        input_path
+                    };
                 run_jsonl_inference_streaming(
                     &plugin,
                     &action,
@@ -435,8 +418,13 @@ impl Core {
                 } else if let Some((plugin_id, action, src_path)) =
                     self.ai_quick_action_target.take()
                 {
-                    match commit_browser_image_output(&plugin_id, &action, &src_path, &output_path)
-                    {
+                    match commit_browser_image_output_with_backup(
+                        &plugin_id,
+                        &action,
+                        &src_path,
+                        &output_path,
+                        self.config.backup_method,
+                    ) {
                         Ok(dest) => {
                             let out_name = dest
                                 .file_name()
@@ -1456,6 +1444,7 @@ impl Core {
     ) -> Result<(Option<UiText>, Option<Value>), ProtocolError> {
         self.ensure_ai_idle()?;
         let src_path = PathBuf::from(path);
+        let _ = Self::ensure_archive_page_for_path(&self.archive_session, &src_path);
         if !src_path.is_file() {
             return Err(ProtocolError::new(
                 "not_found",
@@ -2070,11 +2059,17 @@ mod tests {
                 "expected needs_translate_rasterize=true for .{ext}"
             );
         }
+        for ext in ["pnm", "pbm", "pgm", "ppm"] {
+            let p = PathBuf::from(format!("/tmp/sample.{ext}"));
+            assert!(
+                needs_translate_rasterize(&p),
+                "expected needs_translate_rasterize=true for .{ext}"
+            );
+        }
         assert!(needs_translate_rasterize(Path::new("/tmp/no_extension")));
 
         for ext in [
-            "png", "jpg", "jpeg", "jpe", "jfif", "bmp", "tif", "tiff", "webp", "pnm", "pbm", "pgm",
-            "ppm", "PNG", "JPG", "WEBP",
+            "png", "jpg", "jpeg", "jpe", "jfif", "bmp", "tif", "tiff", "webp", "PNG", "JPG", "WEBP",
         ] {
             let p = PathBuf::from(format!("/tmp/sample.{ext}"));
             assert!(

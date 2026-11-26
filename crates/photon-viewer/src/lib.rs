@@ -5,20 +5,21 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use iced::widget::overlay::menu as iced_menu;
 use iced::widget::{
-    Shader, button as iced_button, column, container, image as iced_image, mouse_area, responsive,
-    row, rule, scrollable, slider, stack, text, text_input,
+    Shader, button as iced_button, column, container, image as iced_image, mouse_area, pick_list,
+    progress_bar, responsive, row, rule, scrollable, stack, text, text_input,
 };
-use iced::{Alignment, Border, ContentFit, Element, Fill, Length, Padding};
+use iced::{Alignment, Border, Color, ContentFit, Element, Fill, Length, Padding, Shadow};
 use photon_i18n::tr;
 use photon_panels::{
     DraggablePanelHeaderSpec, PanelFrameSpec, PanelSplitterEdge, SidebarOrderState, kv_row,
     panel_splitter, sidebar_dock, sidebar_panel, stacked_panel_heights, vertical_panel_splitter,
 };
 use photon_protocol::{
-    CanvasAntiAliasingMode, ColorAdjustments, Command, Language, Theme, TranslationBlock,
-    UiStateSnapshot, ViewerRightPanel, ViewerViewMode, ViewportDenoiseMode, WebtoonFitMode,
-    Workspace,
+    CanvasAntiAliasingMode, ColorAdjustments, Command, Language, Theme, TranslateProvider,
+    TranslationBlock, UiStateSnapshot, ViewerRightPanel, ViewerViewMode, ViewportDenoiseMode,
+    WebtoonFitMode, Workspace,
 };
 use photon_ui::button::{self, ButtonVariant, TOOLBAR_CONTROL_HEIGHT};
 use photon_ui::grid::{FilmstripItem, filmstrip_bar};
@@ -26,7 +27,7 @@ use photon_ui::icons::Icon;
 use photon_ui::menu::{MenuEntry, MenuItem, menu_panel_entries};
 use photon_ui::theme::{
     PaletteTokens, RADIUS_SM, TEXT_SIZE_CAPTION, TEXT_SIZE_CONTROL, canvas_backdrop_style,
-    hairline_rule_style, input_style, popover_style, slider_style, surface_panel_style,
+    card_style, hairline_rule_style, input_style, popover_style, surface_panel_style,
 };
 use photon_ui::toolbar::{
     WorkspaceSwitcherMode, WorkspaceTab, toolbar, toolbar_button_group,
@@ -56,12 +57,28 @@ pub enum ViewerOcrEngine {
 }
 
 impl ViewerOcrEngine {
+    pub const ALL: [Self; 3] = [Self::Tesseract, Self::MangaOcr, Self::RapidOcr];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Tesseract => "tesseract",
             Self::MangaOcr => "manga_ocr",
             Self::RapidOcr => "rapidocr",
         }
+    }
+
+    pub const fn display_label(self) -> &'static str {
+        match self {
+            Self::Tesseract => "Tesseract",
+            Self::MangaOcr => "Manga-OCR",
+            Self::RapidOcr => "RapidOCR",
+        }
+    }
+}
+
+impl std::fmt::Display for ViewerOcrEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.display_label())
     }
 }
 
@@ -203,6 +220,12 @@ pub enum ViewerMessage {
     FilmstripScrolled {
         offset: f32,
     },
+    /// Mouse wheel scroll over the filmstrip bar.
+    FilmstripWheelScroll(iced::mouse::ScrollDelta),
+    ToggleContextPluginsSubmenu,
+    OpenContextPluginsSubmenu,
+    ToggleContextPluginGroup(String),
+    OpenContextPluginGroup(String),
     ToggleViewerInspector,
     ToggleViewerColorPopover,
     CloseViewerPanel(ViewerRightPanel),
@@ -213,6 +236,8 @@ pub enum ViewerMessage {
     SwapViewerRightPanels,
     ViewerSplitterDrag(f32),
     ViewerSplitterRelease(f32),
+    ViewerRightSplitDrag(f32),
+    ViewerRightSplitRelease(f32),
     SetViewerAdjExposure(f32),
     SetViewerAdjGamma(f32),
     SetViewerAdjBrightness(f32),
@@ -228,6 +253,7 @@ pub enum ViewerMessage {
     ToggleTranslateOverlay,
     CloseTranslateOverlay,
     SetTranslateMode(ViewerTranslateMode),
+    SetTranslateProvider(TranslateProvider),
     SetTranslateOcrEngine(ViewerOcrEngine),
     SetTranslateSourceLang(String),
     SetTranslateTargetLang(String),
@@ -239,14 +265,17 @@ pub enum ViewerMessage {
     ToggleTranslateBlockOriginal(usize),
     SetTranslateFontScale(f32),
     SelectTranslateBlock(Option<usize>),
+    UpdateTranslateBlockOriginal(usize, String),
     UpdateTranslateBlockText(usize, String),
     MoveTranslateBlock(usize, i32, i32),
     RetryTranslateBlock(usize),
     RemoveTranslateBlock(usize),
+    ClearTranslateBlocks,
     SaveTranslationSidecar,
     DeleteTranslationSidecar,
     CopyTranslatedText,
     OpenTranslateSettings,
+    OpenPluginSettings,
     BeginDragTranslateBubble(usize),
     BeginDragTranslateTopBar,
     BeginDragTranslateResultCard,
@@ -293,6 +322,7 @@ fn viewer_panel_is_open(state: ViewerViewState<'_>, panel: ViewerRightPanel) -> 
             state.viewer_adjustments_open && state.viewer_mode != ViewerViewMode::Webtoon
         }
         ViewerRightPanel::Info => state.viewer_info_open,
+        ViewerRightPanel::Translate => state.translate.active,
     }
 }
 
@@ -439,12 +469,12 @@ pub fn viewer_toolbar_switcher_kind(
     }
 }
 
-/// Width below which the four Viewer utility toggles
-/// (Filmstrip, Fullscreen, View Adjustments, Info) collapse into one menu button.
+/// Width below which the four Viewer utility toggles would collapse.
+/// Kept for API compatibility; utility toggles stay expanded on the toolbar.
 pub const VIEWER_UTILITY_COLLAPSE_WIDTH: f32 = 720.0;
 
-pub fn viewer_utility_collapsed(window_width: f32) -> bool {
-    window_width < VIEWER_UTILITY_COLLAPSE_WIDTH
+pub fn viewer_utility_collapsed(_window_width: f32) -> bool {
+    false
 }
 
 /// Right-edge offset (from the window's right edge) of the collapsed utility
@@ -597,52 +627,6 @@ pub fn build_viewer_toolbar<'a>(
         left = left.push(rotate_group);
     }
 
-    left = left.push(button::toolbar_icon(
-        Icon::Translate,
-        state.translate.active,
-        has_image.then_some(ViewerMessage::ToggleTranslateOverlay),
-        Some(tr(lang, "menu-viewer-read-translate")),
-    ));
-
-    if let Some(arch) = &meta.viewer_archive {
-        let container_name = Path::new(&arch.container_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("Archive");
-        let kind_tag = match arch.kind.as_str() {
-            "pdf" => "PDF",
-            _ => "CBZ",
-        };
-        let page_num = meta
-            .viewer_index
-            .unwrap_or(0)
-            .min(arch.page_count.saturating_sub(1))
-            + 1;
-        left = left.push(
-            container(
-                text(format!(
-                    "{kind_tag} · {container_name} ({page_num}/{})",
-                    arch.page_count
-                ))
-                .size(TEXT_SIZE_CAPTION),
-            )
-            .padding([3, 8])
-            .style(|theme| {
-                let pal = PaletteTokens::for_theme(theme);
-                container::Style {
-                    background: Some(pal.bg_elevated.into()),
-                    text_color: Some(pal.text_secondary),
-                    border: Border {
-                        color: pal.border,
-                        width: 1.0,
-                        radius: RADIUS_SM.into(),
-                    },
-                    ..Default::default()
-                }
-            }),
-        );
-    }
-
     // Right side: View Mode Switcher (Single | Double | Webtoon | Reader Options) + Workspace Switcher + Panels & Settings
     let reader_options_btn = button::toolbar_icon(
         Icon::BookOpen,
@@ -742,47 +726,37 @@ pub fn build_viewer_toolbar<'a>(
             }
         }
     };
-    // Utility toggles: Filmstrip → Fullscreen → View Adjustments → Info.
-    // Below `VIEWER_UTILITY_COLLAPSE_WIDTH` they collapse into a single "More" menu.
-    let utility_group = if viewer_utility_collapsed(state.window_size.width) {
-        toolbar_button_group(vec![button::toolbar_icon(
-            Icon::More,
-            state.utilities_menu_open,
-            Some(ViewerMessage::ToggleViewerUtilities),
-            Some(tr(lang, "tooltip-viewer-more")),
-        )])
-    } else {
-        toolbar_button_group(vec![
-            button::toolbar_icon(
-                Icon::Filmstrip,
-                state.viewer_filmstrip_open,
-                Some(ViewerMessage::ToggleFilmstrip),
-                Some(tr(lang, "tooltip-viewer-filmstrip")),
-            ),
-            button::toolbar_icon(
-                if state.is_fullscreen {
-                    Icon::FullscreenExit
-                } else {
-                    Icon::Fullscreen
-                },
-                state.is_fullscreen,
-                Some(ViewerMessage::ToggleFullscreen),
-                Some(tr(lang, "tooltip-viewer-fullscreen")),
-            ),
-            button::toolbar_icon(
-                Icon::Palette,
-                state.viewer_adjustments_open,
-                Some(ViewerMessage::ToggleViewerColorPopover),
-                Some(tr(lang, "panel-view-adjustments")),
-            ),
-            button::toolbar_icon(
-                Icon::Info,
-                state.viewer_info_open,
-                Some(ViewerMessage::ToggleViewerInspector),
-                Some(tr(lang, "action-info")),
-            ),
-        ])
-    };
+    // Utility toggles: Filmstrip → Fullscreen → View Adjustments → Info (always expanded).
+    let utility_group = toolbar_button_group(vec![
+        button::toolbar_icon(
+            Icon::Filmstrip,
+            state.viewer_filmstrip_open,
+            Some(ViewerMessage::ToggleFilmstrip),
+            Some(tr(lang, "tooltip-viewer-filmstrip")),
+        ),
+        button::toolbar_icon(
+            if state.is_fullscreen {
+                Icon::FullscreenExit
+            } else {
+                Icon::Fullscreen
+            },
+            state.is_fullscreen,
+            Some(ViewerMessage::ToggleFullscreen),
+            Some(tr(lang, "tooltip-viewer-fullscreen")),
+        ),
+        button::toolbar_icon(
+            Icon::Palette,
+            state.viewer_adjustments_open,
+            Some(ViewerMessage::ToggleViewerColorPopover),
+            Some(tr(lang, "panel-view-adjustments")),
+        ),
+        button::toolbar_icon(
+            Icon::Info,
+            state.viewer_info_open,
+            Some(ViewerMessage::ToggleViewerInspector),
+            Some(tr(lang, "action-info")),
+        ),
+    ]);
 
     let right: Element<'a, ViewerMessage> = row![
         utility_group,
@@ -870,6 +844,96 @@ pub fn build_viewer_view<'a>(state: ViewerViewState<'a>) -> Element<'a, ViewerMe
 
     let viewport: Element<'_, ViewerMessage> = if state.translate.active {
         build_viewer_translate_overlay(viewport, state, lang)
+    } else {
+        viewport
+    };
+
+    let edge_nav_enabled = matches!(viewer_mode, ViewerViewMode::Single | ViewerViewMode::Double)
+        && state.snapshot.viewer_images.len() > 1
+        && !state.translate.space_pan_held
+        && !(state.translate.active
+            && (state.translate.picking_region
+                || matches!(
+                    state.translate.mode,
+                    ViewerTranslateMode::Pan
+                        | ViewerTranslateMode::Translate
+                        | ViewerTranslateMode::OcrOnly
+                )));
+
+    let viewport: Element<'_, ViewerMessage> = if edge_nav_enabled {
+        let (left_msg, right_msg) = match viewer_mode {
+            ViewerViewMode::Double => {
+                if state.viewer_manga_rtl {
+                    (
+                        ViewerMessage::DualStepSpread(1),
+                        ViewerMessage::DualStepSpread(-1),
+                    )
+                } else {
+                    (
+                        ViewerMessage::DualStepSpread(-1),
+                        ViewerMessage::DualStepSpread(1),
+                    )
+                }
+            }
+            _ => (
+                ViewerMessage::Dispatch(Command::ViewerPrevious),
+                ViewerMessage::Dispatch(Command::ViewerNext),
+            ),
+        };
+        let edge_btn = |icon: Icon, msg: ViewerMessage| -> Element<'_, ViewerMessage> {
+            iced_button(
+                container(photon_ui::icons::render(icon, 26.0, None))
+                    .width(Fill)
+                    .height(Fill)
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center),
+            )
+            .width(Length::Fixed(56.0))
+            .height(Fill)
+            .padding(0)
+            .on_press(msg)
+            .style(|theme, status| {
+                let pal = PaletteTokens::for_theme(theme);
+                match status {
+                    iced_button::Status::Hovered | iced_button::Status::Pressed => {
+                        iced_button::Style {
+                            background: Some(
+                                pal.bg_elevated
+                                    .scale_alpha(
+                                        if matches!(status, iced_button::Status::Pressed) {
+                                            0.7
+                                        } else {
+                                            0.45
+                                        },
+                                    )
+                                    .into(),
+                            ),
+                            text_color: pal.text_primary,
+                            border: Border::default(),
+                            ..Default::default()
+                        }
+                    }
+                    _ => iced_button::Style {
+                        background: None,
+                        text_color: iced::Color::TRANSPARENT,
+                        border: Border::default(),
+                        ..Default::default()
+                    },
+                }
+            })
+            .into()
+        };
+        let edge_overlay = row![
+            edge_btn(Icon::Prev, left_msg),
+            iced::widget::space::horizontal().width(Fill),
+            edge_btn(Icon::Next, right_msg),
+        ]
+        .width(Fill)
+        .height(Fill);
+        stack![viewport, edge_overlay]
+            .width(Fill)
+            .height(Fill)
+            .into()
     } else {
         viewport
     };
@@ -965,9 +1029,17 @@ pub fn build_viewer_view<'a>(state: ViewerViewState<'a>) -> Element<'a, ViewerMe
             Some(Box::new(move |viewport| ViewerMessage::FilmstripScrolled {
                 offset: viewport.absolute_offset().x,
             }));
+        let on_wheel: Option<Box<dyn Fn(iced::mouse::ScrollDelta) -> ViewerMessage>> =
+            Some(Box::new(ViewerMessage::FilmstripWheelScroll));
         filmstrip_col = filmstrip_col.push(
             row![
-                container(filmstrip_bar(items, filmstrip_scroll_id(), on_scroll)).width(Fill),
+                container(filmstrip_bar(
+                    items,
+                    filmstrip_scroll_id(),
+                    on_scroll,
+                    on_wheel
+                ))
+                .width(Fill),
                 container(close_btn).padding([4, 6]),
             ]
             .align_y(Alignment::Center)
@@ -996,11 +1068,15 @@ fn build_viewer_right_sidebar<'a>(
     open_panels: &[ViewerRightPanel],
 ) -> Element<'a, ViewerMessage> {
     let dragging_any = state.viewer_right_panels.is_dragging();
-    let can_swap = open_panels.len() >= 2;
+    let is_two = open_panels.len() == 2;
+    let is_multi = open_panels.len() >= 2;
+    let split_pct = state
+        .viewer_right_split_preview
+        .unwrap_or(state.snapshot.meta.layout.viewer_right_split_pct as f32);
     let (top_h, bottom_h) = stacked_panel_heights(
         false,
         false,
-        VIEWER_SPLIT_DEFAULT_PCT,
+        split_pct,
         VIEWER_SPLIT_MIN_PCT,
         VIEWER_SPLIT_MAX_PCT,
     );
@@ -1017,6 +1093,11 @@ fn build_viewer_right_sidebar<'a>(
                 tr(lang, "panel-info"),
                 Icon::Info,
                 build_viewer_info_body(state, lang),
+            ),
+            ViewerRightPanel::Translate => (
+                tr(lang, "panel-translate"),
+                Icon::Translate,
+                build_viewer_translate_panel_body(state, lang),
             ),
         };
 
@@ -1047,29 +1128,695 @@ fn build_viewer_right_sidebar<'a>(
                 ),
         );
 
-        let slot_height = if can_swap {
+        let slot_height = if is_two {
             if idx == 0 { top_h } else { bottom_h }
+        } else if is_multi {
+            Length::FillPortion(1)
         } else {
             Length::Fill
         };
 
-        stacked = stacked.push(container(panel_el).width(Fill).height(slot_height));
+        stacked = stacked.push(
+            container(panel_el)
+                .width(Fill)
+                .height(slot_height)
+                .clip(true),
+        );
 
-        if idx == 0 && can_swap {
+        if idx == 0 && is_two {
             let height_hint = (state.window_size.height - 120.0).max(260.0);
             stacked = stacked.push(vertical_panel_splitter(
-                VIEWER_SPLIT_DEFAULT_PCT,
+                split_pct,
                 height_hint,
                 VIEWER_SPLIT_MIN_PCT,
                 VIEWER_SPLIT_MAX_PCT,
                 VIEWER_SPLIT_DEFAULT_PCT,
-                |_| ViewerMessage::Noop,
-                |_| ViewerMessage::Noop,
+                ViewerMessage::ViewerRightSplitDrag,
+                ViewerMessage::ViewerRightSplitRelease,
             ));
         }
     }
 
     sidebar_dock(right_w, stacked)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TranslateProviderOption(TranslateProvider);
+
+impl TranslateProviderOption {
+    const ALL: [Self; 3] = [
+        Self(TranslateProvider::None),
+        Self(TranslateProvider::GoogleWeb),
+        Self(TranslateProvider::LibreTranslate),
+    ];
+}
+
+impl std::fmt::Display for TranslateProviderOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            TranslateProvider::None => f.write_str("Off (OCR only)"),
+            TranslateProvider::GoogleWeb => f.write_str("Google Web"),
+            TranslateProvider::LibreTranslate => f.write_str("LibreTranslate"),
+        }
+    }
+}
+
+const COMMON_OCR_LANGS: [&str; 8] = [
+    "eng", "jpn", "jpn_vert", "vie", "chi_sim", "chi_tra", "kor", "fra",
+];
+const COMMON_TARGET_LANGS: [&str; 8] = ["vi", "en", "ja", "ko", "zh-CN", "zh-TW", "fr", "de"];
+
+fn styled_pick_list<'a, T>(
+    options: &'a [T],
+    selected: Option<T>,
+    on_selected: impl Fn(T) -> ViewerMessage + 'a,
+) -> pick_list::PickList<'a, T, &'a [T], T, ViewerMessage>
+where
+    T: ToString + PartialEq + Clone + 'a,
+{
+    pick_list(options, selected, on_selected)
+        .text_size(TEXT_SIZE_CONTROL)
+        .padding([5, 8])
+        .style(|theme, status| {
+            let t = PaletteTokens::for_theme(theme);
+            let active = matches!(
+                status,
+                pick_list::Status::Hovered | pick_list::Status::Opened { .. }
+            );
+            pick_list::Style {
+                text_color: t.text_primary,
+                placeholder_color: t.text_muted,
+                handle_color: t.text_secondary,
+                background: if active { t.bg_hover } else { t.bg_surface }.into(),
+                border: Border {
+                    color: if active { t.accent } else { t.border_strong },
+                    width: 1.0,
+                    radius: RADIUS_SM.into(),
+                },
+            }
+        })
+        .menu_style(|theme| {
+            let t = PaletteTokens::for_theme(theme);
+            iced_menu::Style {
+                background: t.bg_elevated.into(),
+                border: Border {
+                    color: t.border_strong,
+                    width: 1.0,
+                    radius: RADIUS_SM.into(),
+                },
+                text_color: t.text_primary,
+                selected_text_color: Color::WHITE,
+                selected_background: t.accent.into(),
+                shadow: Shadow::default(),
+            }
+        })
+}
+
+fn lang_combo_field<'a>(
+    placeholder: &str,
+    value: &str,
+    presets: &'static [&'static str],
+    enabled: bool,
+    on_input: impl Fn(String) -> ViewerMessage + Clone + 'a,
+) -> Element<'a, ViewerMessage> {
+    if !enabled {
+        return text_input(placeholder, value)
+            .size(TEXT_SIZE_CAPTION)
+            .padding([5, 8])
+            .width(Length::FillPortion(1))
+            .style(|theme, _status| {
+                let pal = PaletteTokens::for_theme(theme);
+                iced::widget::text_input::Style {
+                    background: pal.bg_app.into(),
+                    border: Border {
+                        color: pal.border,
+                        width: 1.0,
+                        radius: RADIUS_SM.into(),
+                    },
+                    icon: pal.text_muted,
+                    placeholder: pal.text_muted,
+                    value: pal.text_muted,
+                    selection: pal.bg_selected,
+                }
+            })
+            .into();
+    }
+
+    let on_pick = on_input.clone();
+    let input = text_input(placeholder, value)
+        .on_input(on_input)
+        .size(TEXT_SIZE_CAPTION)
+        .padding([5, 8])
+        .style(input_style)
+        .width(Fill);
+
+    let quick_pick = styled_pick_list(presets, None::<&'static str>, move |chosen| {
+        on_pick(chosen.to_owned())
+    })
+    .placeholder("")
+    .width(Length::Fixed(24.0))
+    .padding([5, 4]);
+
+    row![input, quick_pick]
+        .spacing(2)
+        .align_y(Alignment::Center)
+        .width(Length::FillPortion(1))
+        .into()
+}
+
+fn build_viewer_translate_panel_body<'a>(
+    state: ViewerViewState<'a>,
+    lang: Language,
+) -> Element<'a, ViewerMessage> {
+    let tr_state = state.translate;
+    let has_path = state.snapshot.meta.viewer_path.is_some();
+    let has_blocks = !tr_state.blocks.is_empty();
+    let running_stage = state
+        .snapshot
+        .meta
+        .ai_task
+        .as_ref()
+        .filter(|t| t.running)
+        .map(|t| (t.percent, t.stage.clone()));
+
+    let is_ocr_only = tr_state.mode == ViewerTranslateMode::OcrOnly;
+    let is_pan_mode = tr_state.mode == ViewerTranslateMode::Pan;
+
+    // 1. Mode row: Translate / OCR
+    let mode_row = container(
+        row![
+            container(
+                button::labeled(
+                    tr(lang, "translate-mode-translate"),
+                    None,
+                    ButtonVariant::Tab {
+                        active: !is_ocr_only,
+                    },
+                    Some(ViewerMessage::SetTranslateMode(
+                        ViewerTranslateMode::Translate,
+                    )),
+                )
+                .width(Fill),
+            )
+            .width(Length::FillPortion(1)),
+            container(
+                button::labeled(
+                    tr(lang, "translate-mode-ocr"),
+                    None,
+                    ButtonVariant::Tab {
+                        active: is_ocr_only,
+                    },
+                    Some(ViewerMessage::SetTranslateMode(
+                        ViewerTranslateMode::OcrOnly,
+                    )),
+                )
+                .width(Fill),
+            )
+            .width(Length::FillPortion(1)),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .width(Fill),
+    )
+    .padding(3)
+    .width(Fill)
+    .style(|theme| {
+        let pal = PaletteTokens::for_theme(theme);
+        container::Style {
+            background: Some(pal.bg_app.into()),
+            border: Border {
+                color: pal.border,
+                width: 1.0,
+                radius: RADIUS_SM.into(),
+            },
+            ..Default::default()
+        }
+    });
+
+    // 2. OCR Model dropdown + Translate Provider dropdown (dimmed when OCR Only)
+    let current_provider = TranslateProviderOption(state.snapshot.meta.translate_settings.provider);
+    let provider_picker: Element<'a, ViewerMessage> = if is_ocr_only {
+        container(
+            row![
+                text(current_provider.to_string())
+                    .size(TEXT_SIZE_CONTROL)
+                    .style(|theme| text::Style {
+                        color: Some(PaletteTokens::for_theme(theme).text_muted),
+                    })
+                    .width(Fill),
+                text("▾")
+                    .size(TEXT_SIZE_CAPTION)
+                    .style(|theme| text::Style {
+                        color: Some(PaletteTokens::for_theme(theme).text_muted),
+                    }),
+            ]
+            .align_y(Alignment::Center),
+        )
+        .padding([5, 8])
+        .width(Length::FillPortion(1))
+        .style(|theme| {
+            let pal = PaletteTokens::for_theme(theme);
+            container::Style {
+                background: Some(pal.bg_app.into()),
+                border: Border {
+                    color: pal.border,
+                    width: 1.0,
+                    radius: RADIUS_SM.into(),
+                },
+                ..Default::default()
+            }
+        })
+        .into()
+    } else {
+        styled_pick_list(
+            &TranslateProviderOption::ALL[..],
+            Some(current_provider),
+            |opt| ViewerMessage::SetTranslateProvider(opt.0),
+        )
+        .width(Length::FillPortion(1))
+        .into()
+    };
+
+    let engine_picker = styled_pick_list(
+        &ViewerOcrEngine::ALL[..],
+        Some(tr_state.ocr_engine),
+        ViewerMessage::SetTranslateOcrEngine,
+    )
+    .width(Length::FillPortion(1));
+
+    let model_provider_row = row![engine_picker, provider_picker]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .width(Fill);
+
+    // 3. Languages row (combo-style dropdown + free input, smartly dimmed)
+    let src_enabled = match (is_ocr_only, tr_state.ocr_engine) {
+        (_, ViewerOcrEngine::MangaOcr) => false,
+        (true, ViewerOcrEngine::RapidOcr) => false,
+        _ => true,
+    };
+    let dst_enabled = !is_ocr_only;
+    let src_display = if tr_state.ocr_engine == ViewerOcrEngine::MangaOcr {
+        "jpn"
+    } else {
+        tr_state.source_lang.as_str()
+    };
+
+    let lang_row = row![
+        lang_combo_field(
+            "eng",
+            src_display,
+            &COMMON_OCR_LANGS,
+            src_enabled,
+            ViewerMessage::SetTranslateSourceLang,
+        ),
+        button::compact_icon(
+            Icon::Swap,
+            ButtonVariant::Ghost,
+            (src_enabled && dst_enabled).then_some(ViewerMessage::SwapTranslateLangs),
+        ),
+        lang_combo_field(
+            "vi",
+            &tr_state.target_lang,
+            &COMMON_TARGET_LANGS,
+            dst_enabled,
+            ViewerMessage::SetTranslateTargetLang,
+        ),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center)
+    .width(Fill);
+
+    // 4. Icon tool strip: Scan Area | Full Page | Hand | Bubbles | Clear | Save | Reload | Settings
+    let tools_row = container(
+        row![
+            button::compact_icon_tipped(
+                Icon::Crop,
+                ButtonVariant::Tab {
+                    active: !is_pan_mode,
+                },
+                Some(ViewerMessage::StartTranslateRegionPick),
+                tr(lang, "translate-drag-region"),
+            ),
+            button::compact_icon_tipped(
+                Icon::Fit,
+                ButtonVariant::Ghost,
+                has_path.then_some(ViewerMessage::ScanTranslatePage),
+                tr(lang, "translate-select-full"),
+            ),
+            button::compact_icon_tipped(
+                Icon::Hand,
+                ButtonVariant::Tab {
+                    active: is_pan_mode,
+                },
+                Some(ViewerMessage::SetTranslateMode(ViewerTranslateMode::Pan)),
+                tr(lang, "translate-mode-pan"),
+            ),
+            button::compact_icon_tipped(
+                if tr_state.show_bubbles {
+                    Icon::Eye
+                } else {
+                    Icon::EyeOff
+                },
+                ButtonVariant::Tab {
+                    active: tr_state.show_bubbles,
+                },
+                Some(ViewerMessage::ToggleTranslateBubbles),
+                tr(lang, "translate-show-bubbles"),
+            ),
+            iced::widget::space::horizontal(),
+            button::compact_icon_tipped(
+                Icon::Trash,
+                ButtonVariant::Ghost,
+                has_blocks.then_some(ViewerMessage::ClearTranslateBlocks),
+                tr(lang, "action-clear-translation"),
+            ),
+            button::compact_icon_tipped(
+                Icon::Save,
+                if tr_state.saved_sidecar {
+                    ButtonVariant::Tab { active: true }
+                } else {
+                    ButtonVariant::Ghost
+                },
+                (has_path && has_blocks).then_some(ViewerMessage::SaveTranslationSidecar),
+                tr(lang, "translate-save-sidecar"),
+            ),
+            button::compact_icon_tipped(
+                Icon::Refresh,
+                ButtonVariant::Ghost,
+                has_path.then_some(ViewerMessage::ScanTranslatePage),
+                tr(lang, "translate-scan-page"),
+            ),
+            button::compact_icon_tipped(
+                Icon::Settings,
+                ButtonVariant::Ghost,
+                Some(ViewerMessage::OpenTranslateSettings),
+                tr(lang, "action-translate-settings"),
+            ),
+        ]
+        .spacing(2)
+        .align_y(Alignment::Center)
+        .width(Fill),
+    )
+    .padding([4, 6])
+    .width(Fill)
+    .style(card_style);
+
+    // 5. Process / Progress bar
+    let (pct_val, status_label) = if let Some((pct, stage)) = running_stage {
+        (pct as f32, format!("{pct}% · {stage}"))
+    } else if has_blocks {
+        (
+            100.0,
+            format!(
+                "{} ({})",
+                tr(lang, "translate-result-title"),
+                tr_state.blocks.len()
+            ),
+        )
+    } else {
+        (0.0, tr(lang, "translate-drag-region"))
+    };
+    let process_bar = column![
+        progress_bar(0.0..=100.0, pct_val)
+            .length(Fill)
+            .girth(Length::Fixed(5.0))
+            .style(|theme| {
+                let pal = PaletteTokens::for_theme(theme);
+                iced::widget::progress_bar::Style {
+                    background: pal.bg_app.into(),
+                    bar: pal.accent.into(),
+                    border: Border {
+                        color: pal.border,
+                        width: 0.5,
+                        radius: RADIUS_SM.into(),
+                    },
+                }
+            }),
+        text(status_label)
+            .size(TEXT_SIZE_CAPTION)
+            .style(|theme| text::Style {
+                color: Some(PaletteTokens::for_theme(theme).text_muted),
+            }),
+    ]
+    .spacing(4)
+    .width(Fill);
+
+    let controls_tile = container(
+        column![
+            mode_row,
+            model_provider_row,
+            lang_row,
+            tools_row,
+            process_bar
+        ]
+        .spacing(7)
+        .width(Fill),
+    )
+    .padding(10)
+    .width(Fill)
+    .style(card_style);
+
+    // 6. Result tile (2 separate frames: Original + Translated)
+    let sel_idx = tr_state
+        .editing_block_idx
+        .filter(|&i| i < tr_state.blocks.len())
+        .or_else(|| has_blocks.then_some(0));
+
+    let result_title = match sel_idx {
+        Some(i) => format!(
+            "{} · #{} / {}",
+            tr(lang, "translate-result-title"),
+            i + 1,
+            tr_state.blocks.len()
+        ),
+        None => tr(lang, "translate-result-title"),
+    };
+
+    let mut result_header = row![
+        text(result_title).size(12).style(|theme| text::Style {
+            color: Some(PaletteTokens::for_theme(theme).text_muted),
+        }),
+        iced::widget::space::horizontal(),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center)
+    .width(Fill);
+
+    if let Some(idx) = sel_idx {
+        result_header = result_header
+            .push(button::compact_icon_tipped(
+                Icon::Refresh,
+                ButtonVariant::Ghost,
+                Some(ViewerMessage::RetryTranslateBlock(idx)),
+                tr(lang, "translate-retry-bubble"),
+            ))
+            .push(button::compact_icon_tipped(
+                Icon::Trash,
+                ButtonVariant::Ghost,
+                Some(ViewerMessage::RemoveTranslateBlock(idx)),
+                tr(lang, "translate-remove-bubble"),
+            ))
+            .push(button::compact_icon_tipped(
+                Icon::Copy,
+                ButtonVariant::Ghost,
+                Some(ViewerMessage::CopyTranslatedText),
+                tr(lang, "action-copy"),
+            ))
+            .push(button::labeled(
+                tr(lang, "tooltip-viewer-next"),
+                None,
+                ButtonVariant::Secondary,
+                Some(ViewerMessage::NextTranslateBubble),
+            ));
+    }
+
+    let result_body: Element<'a, ViewerMessage> = if let Some(idx) = sel_idx {
+        let b = &tr_state.blocks[idx];
+        let orig_box = column![
+            text(tr(lang, "translate-bubble-orig"))
+                .size(10)
+                .style(|theme| text::Style {
+                    color: Some(PaletteTokens::for_theme(theme).text_muted),
+                }),
+            text_input("…", &b.original)
+                .on_input(move |s| ViewerMessage::UpdateTranslateBlockOriginal(idx, s))
+                .size(TEXT_SIZE_CAPTION)
+                .padding([5, 8])
+                .style(input_style)
+                .width(Fill),
+        ]
+        .spacing(3)
+        .width(Fill);
+
+        let trans_box = column![
+            text(tr(lang, "translate-bubble-trans"))
+                .size(10)
+                .style(|theme| text::Style {
+                    color: Some(PaletteTokens::for_theme(theme).text_muted),
+                }),
+            if is_ocr_only {
+                text_input("—", &b.translated)
+                    .size(TEXT_SIZE_CAPTION)
+                    .padding([5, 8])
+                    .width(Fill)
+                    .style(|theme, _status| {
+                        let pal = PaletteTokens::for_theme(theme);
+                        iced::widget::text_input::Style {
+                            background: pal.bg_app.into(),
+                            border: Border {
+                                color: pal.border,
+                                width: 1.0,
+                                radius: RADIUS_SM.into(),
+                            },
+                            icon: pal.text_muted,
+                            placeholder: pal.text_muted,
+                            value: pal.text_muted,
+                            selection: pal.bg_selected,
+                        }
+                    })
+            } else {
+                text_input(&tr(lang, "translate-text-placeholder"), &b.translated)
+                    .on_input(move |s| ViewerMessage::UpdateTranslateBlockText(idx, s))
+                    .size(TEXT_SIZE_CAPTION)
+                    .padding([5, 8])
+                    .style(input_style)
+                    .width(Fill)
+            },
+        ]
+        .spacing(3)
+        .width(Fill);
+
+        column![orig_box, trans_box].spacing(6).width(Fill).into()
+    } else {
+        text(tr(lang, "translate-empty-hint"))
+            .size(TEXT_SIZE_CAPTION)
+            .style(|theme| text::Style {
+                color: Some(PaletteTokens::for_theme(theme).text_muted),
+            })
+            .into()
+    };
+
+    let result_tile = container(
+        column![
+            result_header,
+            rule::horizontal(1).style(hairline_rule_style),
+            result_body,
+        ]
+        .spacing(6)
+        .width(Fill),
+    )
+    .padding(10)
+    .width(Fill)
+    .style(card_style);
+
+    // 7. History tile (separated scrollable list of blocks)
+    let history_title = if has_blocks {
+        format!(
+            "{} ({})",
+            tr(lang, "translate-history-title"),
+            tr_state.blocks.len()
+        )
+    } else {
+        tr(lang, "translate-history-title")
+    };
+
+    let history_body: Element<'a, ViewerMessage> = if tr_state.blocks.is_empty() {
+        text("—")
+            .size(TEXT_SIZE_CAPTION)
+            .style(|theme| text::Style {
+                color: Some(PaletteTokens::for_theme(theme).text_muted),
+            })
+            .into()
+    } else {
+        let mut list_col = column![].spacing(4).width(Fill);
+        for (idx, b) in tr_state.blocks.iter().enumerate() {
+            let is_sel = sel_idx == Some(idx);
+            let display_text = if is_ocr_only || b.translated.trim().is_empty() {
+                b.original.trim()
+            } else {
+                b.translated.trim()
+            };
+            let snippet = if display_text.is_empty() {
+                "…".to_owned()
+            } else {
+                display_text.to_owned()
+            };
+            let item_btn = iced_button(
+                row![
+                    text(format!("#{}", idx + 1))
+                        .size(TEXT_SIZE_CAPTION)
+                        .style(|theme| text::Style {
+                            color: Some(PaletteTokens::for_theme(theme).accent),
+                        }),
+                    text(snippet).size(TEXT_SIZE_CAPTION),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .width(Fill),
+            )
+            .width(Fill)
+            .padding([6, 8])
+            .style(move |theme, status| {
+                let pal = PaletteTokens::for_theme(theme);
+                let bg = if is_sel {
+                    pal.bg_selected
+                } else if matches!(status, iced_button::Status::Hovered) {
+                    pal.bg_hover
+                } else {
+                    pal.bg_app
+                };
+                iced_button::Style {
+                    background: Some(bg.into()),
+                    text_color: pal.text_primary,
+                    border: Border {
+                        color: if is_sel { pal.accent } else { pal.border },
+                        width: 1.0,
+                        radius: RADIUS_SM.into(),
+                    },
+                    ..Default::default()
+                }
+            })
+            .on_press(ViewerMessage::SelectTranslateBlock(Some(idx)));
+            list_col = list_col.push(item_btn);
+        }
+        scrollable(container(list_col).padding(Padding {
+            top: 0.0,
+            right: 10.0,
+            bottom: 0.0,
+            left: 0.0,
+        }))
+        .height(Fill)
+        .into()
+    };
+
+    let history_tile = container(
+        column![
+            text(history_title).size(12).style(|theme| text::Style {
+                color: Some(PaletteTokens::for_theme(theme).text_muted),
+            }),
+            rule::horizontal(1).style(hairline_rule_style),
+            container(history_body).width(Fill).height(Fill),
+        ]
+        .spacing(6)
+        .width(Fill)
+        .height(Fill),
+    )
+    .padding(10)
+    .width(Fill)
+    .height(Fill)
+    .style(card_style);
+
+    container(
+        column![controls_tile, result_tile, history_tile]
+            .spacing(8)
+            .width(Fill)
+            .height(Fill),
+    )
+    .padding([6, 6])
+    .width(Fill)
+    .height(Fill)
+    .into()
 }
 
 fn build_viewer_info_body<'a>(
@@ -1102,27 +1849,35 @@ fn build_viewer_info_body<'a>(
         .unwrap_or_else(|| "-".to_owned());
 
     scrollable(
-        column![
-            kv_row(tr(lang, "label-format"), format_str),
-            kv_row(tr(lang, "label-dimensions"), dims),
-            kv_row(tr(lang, "label-file-size"), file_size),
-            kv_row(tr(lang, "label-path"), folder_name),
-            with_tooltip_pos(
-                button::labeled(
+        container(
+            column![
+                kv_row(tr(lang, "label-format"), format_str),
+                kv_row(tr(lang, "label-dimensions"), dims),
+                kv_row(tr(lang, "label-file-size"), file_size),
+                kv_row(tr(lang, "label-path"), folder_name),
+                with_tooltip_pos(
+                    button::labeled(
+                        tr(lang, "action-copy-path"),
+                        Some(Icon::Copy),
+                        ButtonVariant::Secondary,
+                        meta.viewer_path
+                            .as_ref()
+                            .map(|_| ViewerMessage::CopyViewerPath),
+                    )
+                    .width(Fill),
                     tr(lang, "action-copy-path"),
-                    Some(Icon::Copy),
-                    ButtonVariant::Secondary,
-                    meta.viewer_path
-                        .as_ref()
-                        .map(|_| ViewerMessage::CopyViewerPath),
-                )
-                .width(Fill),
-                tr(lang, "action-copy-path"),
-                TooltipPosition::Top,
-            ),
-        ]
-        .spacing(8)
-        .width(Fill),
+                    TooltipPosition::Top,
+                ),
+            ]
+            .spacing(8)
+            .width(Fill),
+        )
+        .padding(Padding {
+            top: 0.0,
+            right: 10.0,
+            bottom: 0.0,
+            left: 0.0,
+        }),
     )
     .height(Fill)
     .into()
@@ -1135,14 +1890,14 @@ fn adj_slider_row<'a>(
     step: f32,
     on_change: impl Fn(f32) -> ViewerMessage + 'a,
 ) -> Element<'a, ViewerMessage> {
-    column![
-        kv_row(label, format!("{value:.2}")),
-        slider(range, value, on_change)
-            .step(step)
-            .style(slider_style),
-    ]
-    .spacing(3)
-    .into()
+    photon_ui::panel::slider_control_row(
+        label,
+        value,
+        range,
+        step,
+        format!("{value:.2}"),
+        on_change,
+    )
 }
 
 fn build_viewer_adjustments_body<'a>(
@@ -1257,7 +2012,13 @@ fn build_viewer_adjustments_body<'a>(
     };
 
     column![
-        scrollable(sliders).height(Fill),
+        scrollable(container(sliders).padding(Padding {
+            top: 0.0,
+            right: 10.0,
+            bottom: 0.0,
+            left: 0.0,
+        }),)
+        .height(Fill),
         rule::horizontal(1).style(hairline_rule_style),
         actions,
     ]
@@ -1791,7 +2552,7 @@ pub fn build_viewer_quality_menu_entries<'a>(
 pub fn build_viewer_context_menu<'a>(
     state: ViewerViewState<'a>,
     target_path: Option<&str>,
-) -> Element<'a, ViewerMessage> {
+) -> (f32, Element<'a, ViewerMessage>) {
     let lang = state.snapshot.meta.language;
     let resolved_path = target_path
         .map(str::to_owned)
@@ -1968,6 +2729,43 @@ pub fn build_viewer_context_menu<'a>(
         MenuEntry::Separator,
         MenuEntry::Item(
             MenuItem::new(
+                tr(lang, "menu-plugins"),
+                ViewerMessage::ToggleContextPluginsSubmenu,
+            )
+            .icon(Icon::Plug)
+            .submenu(true)
+            .on_hover(ViewerMessage::OpenContextPluginsSubmenu),
+        ),
+    ];
+
+    let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+    (est_h, menu_panel_entries(entries, 225.0))
+}
+
+fn plugin_display_name(meta: &photon_protocol::UiStateMeta, plugin_id: &str) -> String {
+    meta.plugins
+        .iter()
+        .find(|p| p.id == plugin_id)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| plugin_id.to_owned())
+}
+
+/// Secondary submenu for Viewer context menu containing Read & Translate and installed Plugins
+/// grouped by plugin (hover/click opens a tertiary submenu with that plugin's actions).
+pub fn build_viewer_plugins_submenu<'a>(
+    state: ViewerViewState<'a>,
+    target_path: Option<&str>,
+) -> Option<(f32, Element<'a, ViewerMessage>)> {
+    let lang = state.snapshot.meta.language;
+    let resolved_path = target_path
+        .map(str::to_owned)
+        .or_else(|| state.snapshot.meta.viewer_path.clone());
+    let has_path = resolved_path.is_some();
+    let is_webtoon = state.viewer_mode == ViewerViewMode::Webtoon;
+
+    let mut entries = vec![
+        MenuEntry::Item(
+            MenuItem::new(
                 tr(lang, "menu-viewer-read-translate"),
                 ViewerMessage::ToggleTranslateOverlay,
             )
@@ -1986,29 +2784,75 @@ pub fn build_viewer_context_menu<'a>(
         ),
     ];
 
-    let mut entries = entries;
-    if let Some(target_path) = resolved_path {
+    if resolved_path.is_some() {
         let qas = viewer_quick_actions(&state.snapshot.meta);
         if !qas.is_empty() {
             entries.push(MenuEntry::Separator);
-            entries.push(MenuEntry::Header(tr(lang, "menu-quick-actions")));
+            let mut plugin_ids: Vec<String> = Vec::new();
             for qa in qas {
+                if !plugin_ids.contains(&qa.plugin_id) {
+                    plugin_ids.push(qa.plugin_id.clone());
+                }
+            }
+            for plugin_id in plugin_ids {
+                let label = plugin_display_name(&state.snapshot.meta, &plugin_id);
                 entries.push(MenuEntry::Item(
                     MenuItem::new(
-                        qa.label.clone(),
-                        ViewerMessage::ContextMenuDispatch(Command::QuickActionRun {
-                            plugin_id: qa.plugin_id.clone(),
-                            action_id: qa.id.clone(),
-                            paths: vec![target_path.to_owned()],
-                        }),
+                        label,
+                        ViewerMessage::ToggleContextPluginGroup(plugin_id.clone()),
                     )
-                    .icon(Icon::Plug),
+                    .icon(Icon::Plug)
+                    .submenu(true)
+                    .on_hover(ViewerMessage::OpenContextPluginGroup(plugin_id)),
                 ));
             }
         }
     }
 
-    menu_panel_entries(entries, 225.0)
+    entries.push(MenuEntry::Separator);
+    entries.push(MenuEntry::Item(
+        MenuItem::new(
+            tr(lang, "action-plugin-settings"),
+            ViewerMessage::OpenPluginSettings,
+        )
+        .icon(Icon::Plug),
+    ));
+
+    let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+    Some((est_h, menu_panel_entries(entries, 220.0)))
+}
+
+/// Tertiary submenu listing Quick Actions for a single plugin in the Viewer context menu.
+pub fn build_viewer_plugin_group_submenu<'a>(
+    state: ViewerViewState<'a>,
+    target_path: Option<&str>,
+    plugin_id: &str,
+) -> Option<(f32, Element<'a, ViewerMessage>)> {
+    let target_path = target_path
+        .map(str::to_owned)
+        .or_else(|| state.snapshot.meta.viewer_path.clone())?;
+    let entries: Vec<MenuEntry<'a, ViewerMessage>> = viewer_quick_actions(&state.snapshot.meta)
+        .into_iter()
+        .filter(|qa| qa.plugin_id == plugin_id)
+        .map(|qa| {
+            MenuEntry::Item(
+                MenuItem::new(
+                    qa.label.clone(),
+                    ViewerMessage::ContextMenuDispatch(Command::QuickActionRun {
+                        plugin_id: qa.plugin_id.clone(),
+                        action_id: qa.id.clone(),
+                        paths: vec![target_path.clone()],
+                    }),
+                )
+                .icon(Icon::Plug),
+            )
+        })
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+    Some((est_h, menu_panel_entries(entries, 220.0)))
 }
 
 fn viewer_fit_geometry(
@@ -2267,41 +3111,96 @@ fn render_translate_bubble_item<'a>(
         select_msg
     };
 
-    let text_body = iced_button(
-        container(
-            text(display_text)
-                .size(font_size)
-                .align_x(iced::alignment::Horizontal::Center)
-                .style(|theme| text::Style {
-                    color: Some(PaletteTokens::for_theme(theme).text_primary),
-                }),
-        )
-        .width(Fill)
-        .height(Fill)
-        .padding([4, 7])
-        .align_x(iced::alignment::Horizontal::Center)
-        .align_y(iced::alignment::Vertical::Center),
+    let pass_through_pan = tr_state.space_pan_held || tr_state.mode == ViewerTranslateMode::Pan;
+
+    let text_content = container(
+        text(display_text)
+            .size(font_size)
+            .align_x(iced::alignment::Horizontal::Center)
+            .style(|theme| text::Style {
+                color: Some(PaletteTokens::for_theme(theme).text_primary),
+            }),
     )
     .width(Fill)
     .height(Fill)
-    .padding(0)
-    .style(|theme, _| {
-        let pal = PaletteTokens::for_theme(theme);
-        iced_button::Style {
-            background: None,
-            text_color: pal.text_primary,
-            ..Default::default()
-        }
-    })
-    .on_press(body_press);
+    .padding([4, 7])
+    .align_x(iced::alignment::Horizontal::Center)
+    .align_y(iced::alignment::Vertical::Center);
+
+    let text_body: Element<'_, ViewerMessage> = if pass_through_pan {
+        text_content.into()
+    } else {
+        iced_button(text_content)
+            .width(Fill)
+            .height(Fill)
+            .padding(0)
+            .style(|theme, _| {
+                let pal = PaletteTokens::for_theme(theme);
+                iced_button::Style {
+                    background: None,
+                    text_color: pal.text_primary,
+                    ..Default::default()
+                }
+            })
+            .on_press(body_press)
+            .into()
+    };
+
+    let idx_badge = text(format!("#{}", idx + 1))
+        .size(10)
+        .style(|theme| text::Style {
+            color: Some(PaletteTokens::for_theme(theme).accent),
+        });
 
     let bubble_inner: Element<'_, ViewerMessage> = if is_review {
-        text_body.into()
+        text_body
+    } else if pass_through_pan {
+        let header_row = row![
+            container(idx_badge)
+                .padding([0, 6])
+                .height(Length::Fixed(22.0))
+                .align_y(iced::alignment::Vertical::Center),
+            iced::widget::space::horizontal(),
+        ]
+        .spacing(3)
+        .align_y(Alignment::Center)
+        .height(Length::Fixed(22.0))
+        .padding([0, 4]);
+
+        let header_bar = container(header_row).width(Fill).style(|theme| {
+            let pal = PaletteTokens::for_theme(theme);
+            container::Style {
+                background: Some(pal.bg_elevated.scale_alpha(0.95).into()),
+                text_color: Some(pal.text_primary),
+                border: Border {
+                    color: pal.border,
+                    width: 0.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            }
+        });
+
+        column![
+            header_bar,
+            rule::horizontal(1).style(hairline_rule_style),
+            text_body
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into()
     } else {
         let drag_grip = mouse_area(
-            container(text("⋮⋮").size(10).style(|theme| text::Style {
-                color: Some(PaletteTokens::for_theme(theme).text_muted),
-            }))
+            container(
+                row![
+                    text("⋮⋮").size(10).style(|theme| text::Style {
+                        color: Some(PaletteTokens::for_theme(theme).text_muted),
+                    }),
+                    idx_badge,
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center),
+            )
             .padding([0, 6])
             .height(Length::Fixed(22.0))
             .align_y(iced::alignment::Vertical::Center),
@@ -2422,17 +3321,9 @@ fn build_viewer_translate_overlay<'a>(
     lang: Language,
 ) -> Element<'a, ViewerMessage> {
     let tr_state = state.translate;
-    let has_path = state.snapshot.meta.viewer_path.is_some();
     let is_single = state.viewer_mode == ViewerViewMode::Single;
     let is_double = state.viewer_mode == ViewerViewMode::Double;
     let is_review = tr_state.mode == ViewerTranslateMode::Review;
-    let running_stage = state
-        .snapshot
-        .meta
-        .ai_task
-        .as_ref()
-        .filter(|t| t.running)
-        .map(|t| (t.percent, t.stage.clone()));
 
     let mut stack_layers: Vec<Element<'a, ViewerMessage>> = vec![viewport];
 
@@ -2616,514 +3507,55 @@ fn build_viewer_translate_overlay<'a>(
         }
     }
 
-    // 2. Top HUD or compact Review Pill (hidden while Space-panning)
-    if !tr_state.space_pan_held {
-        if is_review {
-            let review_pill = container(
-                row![
-                    button::labeled(
-                        "A−",
-                        None,
-                        ButtonVariant::Ghost,
-                        Some(ViewerMessage::SetTranslateFontScale(
-                            (tr_state.font_scale - 0.1).clamp(0.7, 2.0),
-                        )),
-                    ),
-                    button::labeled(
-                        "A+",
-                        None,
-                        ButtonVariant::Ghost,
-                        Some(ViewerMessage::SetTranslateFontScale(
-                            (tr_state.font_scale + 0.1).clamp(0.7, 2.0),
-                        )),
-                    ),
-                    button::labeled(
-                        tr(lang, "action-edit"),
-                        None,
-                        ButtonVariant::Secondary,
-                        Some(ViewerMessage::SetTranslateMode(
-                            ViewerTranslateMode::Translate,
-                        )),
-                    ),
-                    button::compact_icon(
-                        Icon::Close,
-                        ButtonVariant::Ghost,
-                        Some(ViewerMessage::CloseTranslateOverlay),
-                    ),
-                ]
-                .spacing(4)
-                .align_y(Alignment::Center),
-            )
-            .padding([6, 10])
-            .style(popover_style);
+    // 2. Compact Review Pill when in Review mode (hidden while Space-panning)
+    if !tr_state.space_pan_held && is_review {
+        let review_pill = container(
+            row![
+                button::labeled(
+                    "A−",
+                    None,
+                    ButtonVariant::Ghost,
+                    Some(ViewerMessage::SetTranslateFontScale(
+                        (tr_state.font_scale - 0.1).clamp(0.7, 2.0),
+                    )),
+                ),
+                button::labeled(
+                    "A+",
+                    None,
+                    ButtonVariant::Ghost,
+                    Some(ViewerMessage::SetTranslateFontScale(
+                        (tr_state.font_scale + 0.1).clamp(0.7, 2.0),
+                    )),
+                ),
+                button::labeled(
+                    tr(lang, "action-edit"),
+                    None,
+                    ButtonVariant::Secondary,
+                    Some(ViewerMessage::SetTranslateMode(
+                        ViewerTranslateMode::Translate,
+                    )),
+                ),
+                button::compact_icon(
+                    Icon::Close,
+                    ButtonVariant::Ghost,
+                    Some(ViewerMessage::CloseTranslateOverlay),
+                ),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
+        )
+        .padding([6, 10])
+        .style(popover_style);
 
-            stack_layers.push(
-                container(review_pill)
-                    .width(Fill)
-                    .height(Fill)
-                    .align_x(iced::alignment::Horizontal::Right)
-                    .align_y(iced::alignment::Vertical::Top)
-                    .padding(12.0)
-                    .into(),
-            );
-        } else {
-            let off_x = tr_state.top_bar_offset[0];
-            let off_y = tr_state.top_bar_offset[1];
-            let top_running_stage = running_stage.clone();
-            let top_layer: Element<'a, ViewerMessage> = responsive(move |bounds| {
-                let hud_grip: Element<'_, ViewerMessage> = mouse_area(
-                    container(text("⋮⋮").size(12).style(|theme| text::Style {
-                        color: Some(PaletteTokens::for_theme(theme).text_muted),
-                    }))
-                    .padding([4, 4]),
-                )
-                .on_press(ViewerMessage::BeginDragTranslateTopBar)
-                .into();
-
-                let mode_group = row![
-                    button::labeled(
-                        tr(lang, "translate-mode-translate"),
-                        None,
-                        ButtonVariant::Tab {
-                            active: tr_state.mode == ViewerTranslateMode::Translate,
-                        },
-                        Some(ViewerMessage::SetTranslateMode(
-                            ViewerTranslateMode::Translate,
-                        )),
-                    ),
-                    button::labeled(
-                        tr(lang, "translate-mode-ocr"),
-                        None,
-                        ButtonVariant::Tab {
-                            active: tr_state.mode == ViewerTranslateMode::OcrOnly,
-                        },
-                        Some(ViewerMessage::SetTranslateMode(
-                            ViewerTranslateMode::OcrOnly,
-                        )),
-                    ),
-                    button::labeled(
-                        tr(lang, "translate-mode-pan"),
-                        None,
-                        ButtonVariant::Tab {
-                            active: tr_state.mode == ViewerTranslateMode::Pan,
-                        },
-                        Some(ViewerMessage::SetTranslateMode(ViewerTranslateMode::Pan)),
-                    ),
-                ]
-                .spacing(3)
-                .align_y(Alignment::Center);
-
-                let engine_lang_group = row![
-                    button::labeled(
-                        tr(lang, "translate-engine-tesseract"),
-                        None,
-                        ButtonVariant::Tab {
-                            active: tr_state.ocr_engine == ViewerOcrEngine::Tesseract,
-                        },
-                        Some(ViewerMessage::SetTranslateOcrEngine(
-                            ViewerOcrEngine::Tesseract,
-                        )),
-                    ),
-                    button::labeled(
-                        tr(lang, "translate-engine-manga-ocr"),
-                        None,
-                        ButtonVariant::Tab {
-                            active: tr_state.ocr_engine == ViewerOcrEngine::MangaOcr,
-                        },
-                        Some(ViewerMessage::SetTranslateOcrEngine(
-                            ViewerOcrEngine::MangaOcr,
-                        )),
-                    ),
-                    button::labeled(
-                        tr(lang, "translate-engine-rapidocr"),
-                        None,
-                        ButtonVariant::Tab {
-                            active: tr_state.ocr_engine == ViewerOcrEngine::RapidOcr,
-                        },
-                        Some(ViewerMessage::SetTranslateOcrEngine(
-                            ViewerOcrEngine::RapidOcr,
-                        )),
-                    ),
-                    text_input("eng", &tr_state.source_lang)
-                        .on_input(ViewerMessage::SetTranslateSourceLang)
-                        .size(TEXT_SIZE_CAPTION)
-                        .padding([4, 6])
-                        .style(input_style)
-                        .width(Length::Fixed(56.0)),
-                    button::compact_icon(
-                        Icon::Swap,
-                        ButtonVariant::Ghost,
-                        Some(ViewerMessage::SwapTranslateLangs),
-                    ),
-                    text_input("vi", &tr_state.target_lang)
-                        .on_input(ViewerMessage::SetTranslateTargetLang)
-                        .size(TEXT_SIZE_CAPTION)
-                        .padding([4, 6])
-                        .style(input_style)
-                        .width(Length::Fixed(48.0)),
-                ]
-                .spacing(3)
-                .align_y(Alignment::Center);
-
-                let mut action_group = row![
-                    button::labeled(
-                        tr(lang, "translate-scan-page"),
-                        Some(Icon::Translate),
-                        ButtonVariant::Primary,
-                        has_path.then_some(ViewerMessage::ScanTranslatePage),
-                    ),
-                    button::labeled(
-                        tr(lang, "translate-show-bubbles"),
-                        None,
-                        ButtonVariant::Tab {
-                            active: tr_state.show_bubbles,
-                        },
-                        Some(ViewerMessage::ToggleTranslateBubbles),
-                    ),
-                    button::labeled(
-                        tr(
-                            lang,
-                            if tr_state.frosted_bubbles {
-                                "translate-style-frosted"
-                            } else {
-                                "translate-style-solid"
-                            },
-                        ),
-                        None,
-                        ButtonVariant::Secondary,
-                        Some(ViewerMessage::ToggleTranslateBubbleStyle),
-                    ),
-                    button::labeled(
-                        "A−",
-                        None,
-                        ButtonVariant::Ghost,
-                        Some(ViewerMessage::SetTranslateFontScale(
-                            (tr_state.font_scale - 0.1).clamp(0.7, 2.0),
-                        )),
-                    ),
-                    button::labeled(
-                        "A+",
-                        None,
-                        ButtonVariant::Ghost,
-                        Some(ViewerMessage::SetTranslateFontScale(
-                            (tr_state.font_scale + 0.1).clamp(0.7, 2.0),
-                        )),
-                    ),
-                ]
-                .spacing(3)
-                .align_y(Alignment::Center);
-
-                if !tr_state.blocks.is_empty() {
-                    action_group = action_group
-                        .push(button::labeled(
-                            tr(lang, "translate-mode-review"),
-                            None,
-                            ButtonVariant::Secondary,
-                            Some(ViewerMessage::SetTranslateMode(ViewerTranslateMode::Review)),
-                        ))
-                        .push(button::compact_icon_tipped(
-                            Icon::Save,
-                            ButtonVariant::Ghost,
-                            has_path.then_some(ViewerMessage::SaveTranslationSidecar),
-                            tr(lang, "translate-save-sidecar"),
-                        ));
-                }
-                if has_path && tr_state.saved_sidecar {
-                    action_group = action_group.push(button::compact_icon_tipped(
-                        Icon::Trash,
-                        ButtonVariant::Ghost,
-                        Some(ViewerMessage::DeleteTranslationSidecar),
-                        tr(lang, "translate-delete-sidecar"),
-                    ));
-                }
-                action_group = action_group
-                    .push(button::compact_icon_tipped(
-                        Icon::Settings,
-                        ButtonVariant::Ghost,
-                        Some(ViewerMessage::OpenTranslateSettings),
-                        tr(lang, "action-translate-settings"),
-                    ))
-                    .push(button::compact_icon(
-                        Icon::Close,
-                        ButtonVariant::Ghost,
-                        Some(ViewerMessage::CloseTranslateOverlay),
-                    ));
-
-                let mut top_bar_col = column![
-                    row![
-                        hud_grip,
-                        mode_group,
-                        rule::vertical(1).style(hairline_rule_style),
-                        engine_lang_group,
-                        rule::vertical(1).style(hairline_rule_style),
-                        action_group,
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center)
-                    .wrap(),
-                ]
-                .spacing(4);
-
-                if let Some((pct, stage)) = top_running_stage.clone() {
-                    top_bar_col = top_bar_col.push(
-                        text(format!("{pct}% · {stage}"))
-                            .size(TEXT_SIZE_CAPTION)
-                            .style(|theme| text::Style {
-                                color: Some(PaletteTokens::for_theme(theme).accent),
-                            }),
-                    );
-                }
-
-                let top_bar_card =
-                    container(top_bar_col.width(Length::Shrink).height(Length::Shrink))
-                        .width(Length::Shrink)
-                        .height(Length::Shrink)
-                        .padding([6, 10])
-                        .style(popover_style);
-                let max_w = (bounds.width - 24.0).max(260.0);
-                let est_w = max_w.min(920.0);
-                let x = ((bounds.width - est_w) * 0.5 + off_x)
-                    .clamp(8.0, (bounds.width - est_w - 8.0).max(8.0));
-                let y = (12.0 + off_y).clamp(8.0, (bounds.height - 64.0).max(8.0));
-                container(
-                    container(top_bar_card)
-                        .max_width(est_w)
-                        .width(Length::Shrink)
-                        .height(Length::Shrink),
-                )
+        stack_layers.push(
+            container(review_pill)
                 .width(Fill)
                 .height(Fill)
+                .align_x(iced::alignment::Horizontal::Right)
                 .align_y(iced::alignment::Vertical::Top)
-                .padding(Padding {
-                    top: y,
-                    right: 0.0,
-                    bottom: 0.0,
-                    left: x,
-                })
-                .into()
-            })
-            .into();
-            stack_layers.push(top_layer);
-        }
-
-        // 3. Bottom-centered floating resultCard
-        let show_result_card = !is_review
-            && (tr_state.result_card_visible
-                || tr_state.editing_block_idx.is_some()
-                || running_stage.is_some());
-        if show_result_card {
-            let off_x = tr_state.result_card_offset[0];
-            let off_y = tr_state.result_card_offset[1];
-            let card_layer: Element<'a, ViewerMessage> = responsive(move |bounds| {
-                let sel_idx = tr_state
-                    .editing_block_idx
-                    .filter(|&i| i < tr_state.blocks.len());
-                let mut card_body = column![].spacing(8);
-
-                let card_grip: Element<'_, ViewerMessage> = mouse_area(
-                    container(text("⋮⋮").size(11).style(|theme| text::Style {
-                        color: Some(PaletteTokens::for_theme(theme).text_muted),
-                    }))
-                    .padding([0, 6]),
-                )
-                .on_press(ViewerMessage::BeginDragTranslateResultCard)
-                .into();
-
-                let header_title = match sel_idx {
-                    Some(i) => format!("#{} / {}", i + 1, tr_state.blocks.len()),
-                    None if !tr_state.blocks.is_empty() => format!("{}", tr_state.blocks.len()),
-                    None => tr(lang, "translate-mode-translate"),
-                };
-
-                let card_header = container(
-                    row![
-                        card_grip,
-                        text(header_title).size(TEXT_SIZE_CAPTION),
-                        iced::widget::space::horizontal(),
-                        iced_button(text("×").size(12))
-                            .padding([1, 6])
-                            .style(button::style_for(ButtonVariant::Ghost))
-                            .on_press(ViewerMessage::DismissTranslateResultCard),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center)
-                    .height(Length::Fixed(24.0))
-                    .padding([0, 6]),
-                )
-                .width(Fill)
-                .style(|theme| {
-                    let pal = PaletteTokens::for_theme(theme);
-                    container::Style {
-                        background: Some(pal.bg_elevated.into()),
-                        ..Default::default()
-                    }
-                });
-
-                if let Some((pct, stage)) = running_stage.clone() {
-                    card_body = card_body.push(
-                        text(format!("{pct}% · {stage}"))
-                            .size(TEXT_SIZE_CAPTION)
-                            .style(|theme| text::Style {
-                                color: Some(PaletteTokens::for_theme(theme).accent),
-                            }),
-                    );
-                } else if let Some(idx) = sel_idx {
-                    let b = &tr_state.blocks[idx];
-                    let ocr_only = tr_state.mode == ViewerTranslateMode::OcrOnly;
-                    let has_both = !ocr_only
-                        && !b.original.trim().is_empty()
-                        && !b.translated.trim().is_empty();
-                    let show_orig = ocr_only
-                        || tr_state.result_card_show_original
-                        || b.translated.trim().is_empty();
-                    let active_val = if show_orig {
-                        b.original.clone()
-                    } else {
-                        b.translated.clone()
-                    };
-
-                    if has_both {
-                        card_body = card_body.push(
-                            row![
-                                button::labeled(
-                                    tr(lang, "translate-bubble-trans"),
-                                    None,
-                                    ButtonVariant::Tab {
-                                        active: !tr_state.result_card_show_original,
-                                    },
-                                    Some(ViewerMessage::ToggleTranslateResultCardOriginal(false)),
-                                ),
-                                button::labeled(
-                                    tr(lang, "translate-bubble-orig"),
-                                    None,
-                                    ButtonVariant::Tab {
-                                        active: tr_state.result_card_show_original,
-                                    },
-                                    Some(ViewerMessage::ToggleTranslateResultCardOriginal(true)),
-                                ),
-                            ]
-                            .spacing(4),
-                        );
-                    }
-
-                    card_body = card_body.push(
-                        text_input(&tr(lang, "translate-text-placeholder"), &active_val)
-                            .on_input(move |s| ViewerMessage::UpdateTranslateBlockText(idx, s))
-                            .size(TEXT_SIZE_CONTROL)
-                            .padding([6, 8])
-                            .style(input_style),
-                    );
-
-                    card_body = card_body.push(
-                        row![
-                            button::labeled(
-                                tr(lang, "action-copy"),
-                                Some(Icon::Copy),
-                                ButtonVariant::Ghost,
-                                Some(ViewerMessage::CopyTranslatedText),
-                            ),
-                            button::labeled(
-                                tr(lang, "translate-retry-bubble"),
-                                Some(Icon::Refresh),
-                                ButtonVariant::Secondary,
-                                Some(ViewerMessage::RetryTranslateBlock(idx)),
-                            ),
-                            button::labeled(
-                                tr(lang, "translate-remove-bubble"),
-                                Some(Icon::Trash),
-                                ButtonVariant::Danger,
-                                Some(ViewerMessage::RemoveTranslateBlock(idx)),
-                            ),
-                            iced::widget::space::horizontal(),
-                            button::labeled(
-                                tr(lang, "tooltip-viewer-next"),
-                                None,
-                                ButtonVariant::Primary,
-                                Some(ViewerMessage::NextTranslateBubble),
-                            ),
-                            button::labeled(
-                                tr(lang, "action-close"),
-                                None,
-                                ButtonVariant::Ghost,
-                                Some(ViewerMessage::DismissTranslateResultCard),
-                            ),
-                        ]
-                        .spacing(4)
-                        .align_y(Alignment::Center)
-                        .wrap(),
-                    );
-                } else {
-                    card_body = card_body.push(
-                        text(tr(lang, "translate-empty-hint"))
-                            .size(TEXT_SIZE_CAPTION)
-                            .style(|theme| text::Style {
-                                color: Some(PaletteTokens::for_theme(theme).text_muted),
-                            }),
-                    );
-                    if !tr_state.blocks.is_empty() {
-                        card_body = card_body.push(
-                            row![
-                                button::labeled(
-                                    tr(lang, "action-copy"),
-                                    Some(Icon::Copy),
-                                    ButtonVariant::Ghost,
-                                    Some(ViewerMessage::CopyTranslatedText),
-                                ),
-                                iced::widget::space::horizontal(),
-                                button::labeled(
-                                    tr(lang, "tooltip-viewer-next"),
-                                    None,
-                                    ButtonVariant::Primary,
-                                    Some(ViewerMessage::NextTranslateBubble),
-                                ),
-                                button::labeled(
-                                    tr(lang, "action-close"),
-                                    None,
-                                    ButtonVariant::Ghost,
-                                    Some(ViewerMessage::DismissTranslateResultCard),
-                                ),
-                            ]
-                            .spacing(4)
-                            .align_y(Alignment::Center),
-                        );
-                    }
-                }
-
-                let result_card = container(
-                    column![
-                        card_header,
-                        rule::horizontal(1).style(hairline_rule_style),
-                        container(card_body).padding([10, 12]),
-                    ]
-                    .height(Length::Shrink),
-                )
-                .width(Length::Shrink)
-                .height(Length::Shrink)
-                .style(popover_style);
-
-                let card_w = (bounds.width - 28.0).min(580.0).max(260.0);
-                let x = ((bounds.width - card_w) * 0.5 + off_x)
-                    .clamp(8.0, (bounds.width - card_w - 8.0).max(8.0));
-                let bottom_pad = (16.0 - off_y).clamp(12.0, (bounds.height - 120.0).max(12.0));
-                container(
-                    container(result_card)
-                        .width(Length::Fixed(card_w))
-                        .height(Length::Shrink),
-                )
-                .width(Fill)
-                .height(Fill)
-                .align_y(iced::alignment::Vertical::Bottom)
-                .padding(Padding {
-                    top: 0.0,
-                    right: 0.0,
-                    bottom: bottom_pad,
-                    left: x,
-                })
-                .into()
-            })
-            .into();
-            stack_layers.push(card_layer);
-        }
+                .padding(12.0)
+                .into(),
+        );
     }
 
     stack(stack_layers).width(Fill).height(Fill).into()
@@ -3272,13 +3704,13 @@ mod tests {
     }
 
     #[test]
-    fn utility_toggles_collapse_only_below_threshold() {
+    fn utility_toggles_stay_expanded_at_all_widths() {
         assert!(!viewer_utility_collapsed(VIEWER_UTILITY_COLLAPSE_WIDTH));
         assert!(!viewer_utility_collapsed(1280.0));
-        assert!(viewer_utility_collapsed(
+        assert!(!viewer_utility_collapsed(
             VIEWER_UTILITY_COLLAPSE_WIDTH - 1.0
         ));
-        assert!(viewer_utility_collapsed(680.0));
+        assert!(!viewer_utility_collapsed(680.0));
     }
 
     #[test]

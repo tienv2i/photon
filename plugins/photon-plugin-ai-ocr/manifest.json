@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "photon.ocr.ai",
-  "name": "AI OCR — Manga-OCR & RapidOCR (ONNX)",
+  "name": "AI OCR",
   "version": "1.3.0",
   "entry": {
     "command": "bin/photon-plugin-ai-ocr",
@@ -72,7 +72,7 @@
     {
       "action": "viewer.ai_ocr",
       "workspace": "viewer",
-      "label": "AI OCR (Manga-OCR / RapidOCR)",
+      "label": "AI OCR",
       "output": "translation"
     }
   ],

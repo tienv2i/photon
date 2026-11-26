@@ -1,6 +1,7 @@
 //! Studio color tokens, typography helpers, and `iced` widget styles.
 
-use iced::widget::{container, rule, slider, text_input};
+use iced::widget::overlay::menu as iced_menu;
+use iced::widget::{container, pick_list, rule, slider, text_input};
 use iced::{Border, Color, Shadow, Theme, Vector, color};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -271,5 +272,40 @@ pub fn hairline_rule_style(theme: &Theme) -> rule::Style {
         radius: 0.0.into(),
         fill_mode: rule::FillMode::Full,
         snap: true,
+    }
+}
+
+pub fn pick_list_style(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
+    let t = PaletteTokens::for_theme(theme);
+    let active = matches!(
+        status,
+        pick_list::Status::Hovered | pick_list::Status::Opened { .. }
+    );
+    pick_list::Style {
+        text_color: t.text_primary,
+        placeholder_color: t.text_muted,
+        handle_color: t.text_secondary,
+        background: if active { t.bg_hover } else { t.bg_surface }.into(),
+        border: Border {
+            color: if active { t.accent } else { t.border_strong },
+            width: 1.0,
+            radius: RADIUS_SM.into(),
+        },
+    }
+}
+
+pub fn pick_list_menu_style(theme: &Theme) -> iced_menu::Style {
+    let t = PaletteTokens::for_theme(theme);
+    iced_menu::Style {
+        background: t.bg_elevated.into(),
+        border: Border {
+            color: t.border_strong,
+            width: 1.0,
+            radius: RADIUS_SM.into(),
+        },
+        text_color: t.text_primary,
+        selected_text_color: Color::WHITE,
+        selected_background: t.accent.into(),
+        shadow: Shadow::default(),
     }
 }

@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "photon.caption.onnx",
-  "name": "AI Image Captioner (WD14 v3 Tagger ONNX)",
+  "name": "AI Caption",
   "version": "2.0.0",
   "entry": {
     "command": "bin/photon-plugin-caption",
@@ -45,7 +45,7 @@
     {
       "action": "caption.generate_save",
       "workspace": "viewer",
-      "label": "Generate & Save Caption (.txt)",
+      "label": "Save Caption (.txt)",
       "output": "text"
     },
     {
@@ -58,7 +58,7 @@
   "quickActions": [
     {
       "id": "caption-wd-vit-save",
-      "label": "Generate & save caption (.txt — WD-ViT v3)",
+      "label": "Caption (.txt · WD-ViT)",
       "action": "caption.generate_save",
       "workspaces": [
         "browser",
@@ -73,7 +73,7 @@
     },
     {
       "id": "caption-wd-swinv2-save",
-      "label": "Generate & save caption (.txt — WD-SwinV2 v3)",
+      "label": "Caption (.txt · SwinV2)",
       "action": "caption.generate_save",
       "workspaces": [
         "browser",

@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "photon.ocr.tesseract",
-  "name": "OCR — Copy Text (Tesseract)",
+  "name": "OCR Copy",
   "version": "1.3.0",
   "entry": {
     "command": "bin/photon-plugin-ocr",
@@ -70,7 +70,7 @@
   "quickActions": [
     {
       "id": "ocr-copy-en",
-      "label": "Copy text (OCR — English)",
+      "label": "OCR Copy (EN)",
       "action": "viewer.ocr_copy",
       "workspaces": [
         "browser",
@@ -82,7 +82,7 @@
     },
     {
       "id": "ocr-copy-vi",
-      "label": "Copy text (OCR — Vietnamese)",
+      "label": "OCR Copy (VI)",
       "action": "viewer.ocr_copy",
       "workspaces": [
         "browser",
@@ -95,7 +95,7 @@
     },
     {
       "id": "ocr-copy-jpn",
-      "label": "Copy text (OCR — Japanese)",
+      "label": "OCR Copy (JA)",
       "action": "viewer.ocr_copy",
       "workspaces": [
         "browser",
@@ -108,7 +108,7 @@
     },
     {
       "id": "ocr-copy-zh",
-      "label": "Copy text (OCR — Chinese)",
+      "label": "OCR Copy (ZH)",
       "action": "viewer.ocr_copy",
       "workspaces": [
         "browser",
@@ -121,7 +121,7 @@
     },
     {
       "id": "ocr-copy-ko",
-      "label": "Copy text (OCR — Korean)",
+      "label": "OCR Copy (KO)",
       "action": "viewer.ocr_copy",
       "workspaces": [
         "browser",

@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use iced::keyboard::{self, Key, Modifiers, key::Named};
 use iced::widget::{
-    checkbox, column, container, image as iced_image, operation as widget_operation, row,
-    scrollable, slider, text, text_input,
+    checkbox, column, container, image as iced_image, operation as widget_operation, pick_list,
+    row, scrollable, slider, text, text_input,
 };
 use iced::{
     Alignment, Color, Element, Fill, Length, Point, Rectangle, Size, Subscription, Task,
@@ -43,12 +43,13 @@ use photon_ui::grid::{
 };
 use photon_ui::icons::Icon;
 use photon_ui::menu::{
-    MenuEntry, MenuIconButton, MenuItem, menu_panel_entries, with_anchored_menu,
-    with_bottom_right_menu_at, with_context_menu, with_top_right_menu, with_top_right_menu_at,
+    MenuEntry, MenuIconButton, MenuItem, menu_panel_entries, with_anchored_menu, with_context_menu,
+    with_context_menu_and_submenus, with_top_right_menu, with_top_right_menu_at,
 };
 use photon_ui::panel::{section_card, status_bar};
 use photon_ui::theme::{
-    PaletteTokens, TEXT_SIZE_CONTROL, app_shell_style, input_style, slider_style,
+    PaletteTokens, TEXT_SIZE_CONTROL, app_shell_style, input_style, pick_list_menu_style,
+    pick_list_style, slider_style,
 };
 use photon_ui::tooltip::{TooltipPosition, with_tooltip_pos};
 
@@ -60,7 +61,8 @@ use photon_browser::batch_dialog::{
 use photon_browser::{
     BrowserMenuKind, BrowserMessage, BrowserViewState, browser_filter_input_id,
     build_browser_context_menu_entries, build_browser_help_menu_entries,
-    build_browser_plugins_menu_entries, build_browser_sort_menu, build_browser_toolbar,
+    build_browser_plugin_group_submenu, build_browser_plugins_menu_entries,
+    build_browser_plugins_submenu, build_browser_sort_menu, build_browser_toolbar,
     build_browser_view, build_browser_window_menu_entries, build_quick_access_context_menu,
 };
 use photon_canvas::{
@@ -80,11 +82,12 @@ use photon_editor::{
 use photon_ui::editor::{anchor_grid_3x3, checker_swatch};
 use photon_viewer::{
     ViewerMessage, ViewerTranslateMode, ViewerTranslateState, ViewerViewState,
-    build_viewer_context_menu, build_viewer_quality_menu_entries, build_viewer_toolbar,
-    build_viewer_view, dual_spread_slots, dual_spread_slots_for, filmstrip_scroll_id,
-    step_dual_spread, viewer_counter_summary, viewer_double_fit_geometries,
-    viewer_reader_options_right_offset, viewer_status_summary, viewer_utilities_menu_right_offset,
-    webtoon_index_at_scroll, webtoon_offset_for_index, webtoon_scroll_id,
+    build_viewer_context_menu, build_viewer_plugin_group_submenu, build_viewer_plugins_submenu,
+    build_viewer_quality_menu_entries, build_viewer_toolbar, build_viewer_view, dual_spread_slots,
+    dual_spread_slots_for, filmstrip_scroll_id, step_dual_spread, viewer_counter_summary,
+    viewer_double_fit_geometries, viewer_reader_options_right_offset, viewer_status_summary,
+    viewer_utilities_menu_right_offset, webtoon_index_at_scroll, webtoon_offset_for_index,
+    webtoon_scroll_id,
 };
 
 static CORE_HANDLE: OnceLock<CoreHandle> = OnceLock::new();
@@ -197,6 +200,8 @@ pub(crate) enum ActiveContextMenu {
         x: f32,
         y: f32,
         path: String,
+        plugins_submenu_open: bool,
+        active_plugin_submenu: Option<String>,
     },
     BrowserQuickAccess {
         x: f32,
@@ -207,6 +212,8 @@ pub(crate) enum ActiveContextMenu {
         x: f32,
         y: f32,
         target_path: Option<String>,
+        plugins_submenu_open: bool,
+        active_plugin_submenu: Option<String>,
     },
     EditorCanvas {
         x: f32,
@@ -569,6 +576,7 @@ pub struct PhotonGui {
     pub(crate) browser_left_width_drag: Option<f32>,
     pub(crate) browser_right_width_drag: Option<f32>,
     pub(crate) viewer_right_width_preview: Option<f32>,
+    pub(crate) viewer_right_split_preview: Option<f32>,
     pub(crate) editor_tool_tab: EditorToolTab,
     pub(crate) editor_history_open: bool,
     pub(crate) editor_layers_open: bool,
@@ -594,6 +602,7 @@ pub struct PhotonGui {
     toast_seq: u64,
     pub(crate) path_editing: bool,
     pub(crate) active_menu: Option<ActiveMenu>,
+    pub(crate) editor_add_layer_anchor: Option<Point>,
     pub(crate) context_menu: Option<ActiveContextMenu>,
     pub(crate) last_cursor: Option<Point>,
     pub(crate) viewer_quarter_turns: u8,
@@ -718,9 +727,6 @@ pub enum Message {
     CloseBrowserRightPanel(BrowserRightPanel),
     PanelPopupToggleBrowserLeft(BrowserLeftPanel),
     PanelPopupToggleBrowserRight(BrowserRightPanel),
-    PanelPopupToggleViewerAdj,
-    PanelPopupToggleViewerInfo,
-    PanelPopupToggleViewerFilmstrip,
     PanelPopupToggleEditorTools,
     PanelPopupToggleEditorPanel(EditorRightPanel),
     BeginDragViewerPanel(ViewerRightPanel),
@@ -758,6 +764,11 @@ pub enum Message {
         y: f32,
     },
     CloseContextMenu,
+    ToggleContextPluginsSubmenu,
+    OpenContextPluginsSubmenu,
+    ToggleContextPluginGroup(String),
+    OpenContextPluginGroup(String),
+    FilmstripWheelScroll(iced::mouse::ScrollDelta),
     ContextMenuDispatch(Command),
     CopyImageToClipboard(Option<String>),
     CopyImageCompleted(bool),
@@ -786,6 +797,8 @@ pub enum Message {
     ViewerAdjOpenInEditor,
     ViewerSplitterDrag(f32),
     ViewerSplitterRelease(f32),
+    ViewerRightSplitDrag(f32),
+    ViewerRightSplitRelease(f32),
     TogglePathEdit(bool),
     FolderInputChanged(String),
     SubmitFolderInput,
@@ -796,6 +809,7 @@ pub enum Message {
     SetBrowserThumbSize(BrowserThumbSize),
     OpenBatchDialog(BatchDialogKind),
     BatchDialog(BatchDialogMsg),
+    BatchInputFolderPicked(Option<PathBuf>),
     BatchOutputFolderPicked(Option<PathBuf>),
     BrowserSplitterDrag(f32),
     BrowserSplitterRelease(f32),
@@ -1033,6 +1047,7 @@ pub enum Message {
     CustomModelFilePicked(String, Option<PathBuf>),
     OpenPluginModels(String),
     OpenTranslateSettings,
+    OpenTranslatePanel,
     CopyText(String),
     ViewerTranslate(ViewerMessage),
     EditorAi(EditorMessage),
@@ -1262,6 +1277,7 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
         browser_left_width_drag: None,
         browser_right_width_drag: None,
         viewer_right_width_preview: None,
+        viewer_right_split_preview: None,
         editor_tool_tab,
         editor_history_open,
         editor_layers_open,
@@ -1287,6 +1303,7 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
         toast_seq: 0,
         path_editing: false,
         active_menu: None,
+        editor_add_layer_anchor: None,
         context_menu: None,
         last_cursor: None,
         viewer_quarter_turns: 0,
@@ -1556,20 +1573,28 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         Message::ToggleMenu(menu) => {
             state.context_menu = None;
             state.active_menu = if state.active_menu == Some(menu) {
+                state.editor_add_layer_anchor = None;
                 None
             } else {
+                state.editor_add_layer_anchor = (menu == ActiveMenu::EditorAddLayer)
+                    .then(|| state.last_cursor)
+                    .flatten();
                 Some(menu)
             };
             Task::none()
         }
         Message::HoverMenu(menu) => {
             if state.active_menu.is_some() && state.active_menu != Some(menu) {
+                state.editor_add_layer_anchor = (menu == ActiveMenu::EditorAddLayer)
+                    .then(|| state.last_cursor)
+                    .flatten();
                 state.active_menu = Some(menu);
             }
             Task::none()
         }
         Message::CloseMenu => {
             state.active_menu = None;
+            state.editor_add_layer_anchor = None;
             Task::none()
         }
         Message::OpenShortcutsDialog => {
@@ -1671,6 +1696,37 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             }
             state.viewer_filmstrip_offset = offset;
             schedule_missing_thumbnails(state)
+        }
+        Message::FilmstripWheelScroll(delta) => {
+            let dx = match delta {
+                iced::mouse::ScrollDelta::Lines { x, y } => {
+                    if x.abs() > 0.001 {
+                        -x * 64.0
+                    } else {
+                        -y * 64.0
+                    }
+                }
+                iced::mouse::ScrollDelta::Pixels { x, y } => {
+                    if x.abs() > 0.5 && x.abs() >= y.abs() {
+                        -x
+                    } else {
+                        -y
+                    }
+                }
+            };
+            if dx.abs() < 0.1 {
+                return Task::none();
+            }
+            let next = (state.viewer_filmstrip_offset + dx).max(0.0);
+            state.viewer_filmstrip_offset = next;
+            let scroll_task = widget_operation::scroll_to(
+                filmstrip_scroll_id(),
+                scrollable::AbsoluteOffset {
+                    x: Some(next),
+                    y: None,
+                },
+            );
+            Task::batch([scroll_task, schedule_missing_thumbnails(state)])
         }
         Message::ToggleFilmstrip => {
             state.active_menu = None;
@@ -1888,6 +1944,41 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             state.dialog = Some(InAppDialog::TranslateSettings);
             open_dialog_window(state, DesktopDialogId::TranslateSettings);
             Task::none()
+        }
+        Message::OpenTranslatePanel => {
+            state.active_menu = None;
+            state.context_menu = None;
+            match state.snapshot.meta.workspace {
+                Workspace::Viewer => {
+                    handle_viewer_translate_message(state, ViewerMessage::ToggleTranslateOverlay)
+                }
+                Workspace::Browser => {
+                    state.viewer_translate.active = true;
+                    state.viewer_translate.active_page_path =
+                        state.snapshot.meta.viewer_path.clone();
+                    let layout_task = commit_layout_with(state, |_| {});
+                    let ws_task = dispatch_to_core(
+                        state.core.clone(),
+                        Command::SetWorkspace {
+                            workspace: Workspace::Viewer,
+                        },
+                    );
+                    Task::batch([layout_task, ws_task, sync_ui_tree_task(state)])
+                }
+                Workspace::Editor => {
+                    state.viewer_translate.active = true;
+                    state.viewer_translate.active_page_path =
+                        state.snapshot.meta.viewer_path.clone();
+                    let layout_task = commit_layout_with(state, |_| {});
+                    let ws_task = update(
+                        state,
+                        Message::RequestEditorLeave {
+                            close_editor: false,
+                        },
+                    );
+                    Task::batch([layout_task, ws_task, sync_ui_tree_task(state)])
+                }
+            }
         }
         Message::CopyText(value) => {
             let toast_task = show_toast(
@@ -2202,6 +2293,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     || snap.meta.layout.panel("viewer.inspector");
                 state.viewer_adjustments_open = snap.meta.layout.panel("viewer.adjustments");
                 state.viewer_color_popover_open = state.viewer_adjustments_open;
+                state.viewer_translate.active = snap.meta.layout.panel("viewer.translate");
                 state.viewer_right_panels.set_order(
                     snap.meta.layout.viewer_right_panel_order.clone(),
                     &ViewerRightPanel::ALL,
@@ -2505,12 +2597,30 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                             ToastKind::Success,
                         ));
                     }
-                    if task.saved_path.is_some()
+                    if let Some(saved_p) = task.saved_path.as_ref()
                         && task.saved_path != prev_ai_saved
-                        && state.snapshot.meta.workspace == Workspace::Viewer
-                        && let Some(vp) = state.snapshot.meta.viewer_path.clone()
                     {
-                        tasks.push(load_viewer_frame_task(&state.core, vp));
+                        state.thumbnails.remove(saved_p);
+                        state.thumbnails_loading.remove(saved_p);
+                        state.webtoon_pages.remove(saved_p);
+                        state.webtoon_loading.remove(saved_p);
+                        if state.snapshot.meta.workspace == Workspace::Viewer {
+                            if state.viewer_mode == ViewerViewMode::Double {
+                                let (left_slot, right_slot) =
+                                    dual_spread_slots(state.viewer_view_state(true));
+                                if let Some((_, lp)) = left_slot {
+                                    tasks.push(load_viewer_frame_task(&state.core, lp.to_owned()));
+                                }
+                                if let Some((_, rp)) = right_slot {
+                                    tasks.push(load_viewer_pair_frame_task(
+                                        &state.core,
+                                        Some(rp.to_owned()),
+                                    ));
+                                }
+                            } else if let Some(vp) = state.snapshot.meta.viewer_path.clone() {
+                                tasks.push(load_viewer_frame_task(&state.core, vp));
+                            }
+                        }
                     }
                 }
             } else if state
@@ -2532,7 +2642,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     root_changed || tree_changed,
                 ));
             }
-            if listing_changed || folder_changed {
+            if folder_changed {
                 state.webtoon_pages.clear();
                 state.webtoon_loading.clear();
                 state.webtoon_order.clear();
@@ -2541,6 +2651,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 state.browser_visible_range = Some((0, BROWSER_INITIAL_VISIBLE_ENTRIES));
                 state.thumbnails_loading.clear();
                 state.viewer_filmstrip_offset = 0.0;
+                tasks.push(schedule_missing_thumbnails(state));
+            } else if listing_changed {
+                state.thumbnails_loading.clear();
                 tasks.push(schedule_missing_thumbnails(state));
             }
             if viewer_changed {
@@ -6014,36 +6127,6 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             state.active_menu = None;
             toggle_browser_right_panel(state, panel)
         }
-        Message::PanelPopupToggleViewerAdj => {
-            state.active_menu = None;
-            state.viewer_adjustments_open = !state.viewer_adjustments_open;
-            state.viewer_color_popover_open = state.viewer_adjustments_open;
-            let layout_task = commit_layout_with(state, |_| {});
-            Task::batch([layout_task, sync_ui_tree_task(state)])
-        }
-        Message::PanelPopupToggleViewerInfo => {
-            state.active_menu = None;
-            state.viewer_info_open = !state.viewer_info_open;
-            let layout_task = commit_layout_with(state, |_| {});
-            Task::batch([layout_task, sync_ui_tree_task(state)])
-        }
-        Message::PanelPopupToggleViewerFilmstrip => {
-            state.active_menu = None;
-            state.viewer_filmstrip_open = !state.viewer_filmstrip_open;
-            let thumb_task = if state.viewer_filmstrip_open {
-                schedule_missing_thumbnails(state)
-            } else {
-                state.viewer_filmstrip_offset = 0.0;
-                Task::none()
-            };
-            let layout_task = commit_layout_with(state, |_| {});
-            Task::batch([
-                thumb_task,
-                scroll_filmstrip_to_active(state),
-                layout_task,
-                sync_ui_tree_task(state),
-            ])
-        }
         Message::PanelPopupToggleEditorTools => {
             state.active_menu = None;
             let next = !state.snapshot.meta.layout.panel("editor.tools");
@@ -6102,6 +6185,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 ViewerRightPanel::Info => {
                     state.viewer_info_open = !state.viewer_info_open;
                 }
+                ViewerRightPanel::Translate => {
+                    state.viewer_translate.active = !state.viewer_translate.active;
+                }
             }
             let layout_task = commit_layout_with(state, |_| {});
             Task::batch([layout_task, sync_ui_tree_task(state)])
@@ -6115,6 +6201,12 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 }
                 ViewerRightPanel::Info => {
                     state.viewer_info_open = false;
+                }
+                ViewerRightPanel::Translate => {
+                    return update(
+                        state,
+                        Message::ViewerTranslate(ViewerMessage::CloseTranslateOverlay),
+                    );
                 }
             }
             let layout_task = commit_layout_with(state, |_| {});
@@ -6353,15 +6445,31 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                         .get(&wb_drag.path)
                         .copied()
                         .unwrap_or((wb_drag.disp_w.round() as u32, wb_drag.disp_h.round() as u32));
-                    let sx = img_w.max(1) as f32 / wb_drag.disp_w.max(1.0);
-                    let sy = img_h.max(1) as f32 / wb_drag.disp_h.max(1.0);
-                    let region = [
-                        (rx * sx).round().max(0.0) as i32,
-                        (ry * sy).round().max(0.0) as i32,
-                        (rw * sx).round().max(8.0) as i32,
-                        (rh * sy).round().max(8.0) as i32,
-                    ];
-                    return dispatch_viewer_translate_region(state, wb_drag.path, region);
+                    let iw = img_w.max(1) as f32;
+                    let ih = img_h.max(1) as f32;
+                    let dw = wb_drag.disp_w.max(1.0);
+                    let dh = wb_drag.disp_h.max(1.0);
+                    // Account for `ContentFit::Contain` letterboxing inside (dw, dh)
+                    let scale = (dw / iw).min(dh / ih);
+                    let fit_w = (iw * scale).max(1.0);
+                    let fit_h = (ih * scale).max(1.0);
+                    let off_x = (dw - fit_w) * 0.5;
+                    let off_y = (dh - fit_h) * 0.5;
+                    let x0 = (rx - off_x).clamp(0.0, fit_w);
+                    let y0 = (ry - off_y).clamp(0.0, fit_h);
+                    let x1 = (rx + rw - off_x).clamp(0.0, fit_w);
+                    let y1 = (ry + rh - off_y).clamp(0.0, fit_h);
+                    if x1 - x0 >= 2.0 && y1 - y0 >= 2.0 {
+                        let sx = iw / fit_w;
+                        let sy = ih / fit_h;
+                        let region = [
+                            (x0 * sx).round().clamp(0.0, iw) as i32,
+                            (y0 * sy).round().clamp(0.0, ih) as i32,
+                            ((x1 - x0) * sx).round().max(8.0) as i32,
+                            ((y1 - y0) * sy).round().max(8.0) as i32,
+                        ];
+                        return dispatch_viewer_translate_region(state, wb_drag.path, region);
+                    }
                 }
             }
             let mut order_changed = false;
@@ -6428,6 +6536,8 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 x: resolved_pos[0],
                 y: resolved_pos[1],
                 target_path: resolved_path,
+                plugins_submenu_open: false,
+                active_plugin_submenu: None,
             });
             sync_ui_tree_task(state)
         }
@@ -6453,6 +6563,85 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             } else {
                 Task::none()
             }
+        }
+        Message::ToggleContextPluginsSubmenu => {
+            match state.context_menu.as_mut() {
+                Some(ActiveContextMenu::Viewer {
+                    plugins_submenu_open,
+                    active_plugin_submenu,
+                    ..
+                })
+                | Some(ActiveContextMenu::BrowserEntry {
+                    plugins_submenu_open,
+                    active_plugin_submenu,
+                    ..
+                }) => {
+                    *plugins_submenu_open = !*plugins_submenu_open;
+                    if !*plugins_submenu_open {
+                        *active_plugin_submenu = None;
+                    }
+                }
+                _ => {}
+            }
+            Task::none()
+        }
+        Message::OpenContextPluginsSubmenu => {
+            match state.context_menu.as_mut() {
+                Some(ActiveContextMenu::Viewer {
+                    plugins_submenu_open,
+                    ..
+                })
+                | Some(ActiveContextMenu::BrowserEntry {
+                    plugins_submenu_open,
+                    ..
+                }) => {
+                    *plugins_submenu_open = true;
+                }
+                _ => {}
+            }
+            Task::none()
+        }
+        Message::ToggleContextPluginGroup(plugin_id) => {
+            match state.context_menu.as_mut() {
+                Some(ActiveContextMenu::Viewer {
+                    plugins_submenu_open,
+                    active_plugin_submenu,
+                    ..
+                })
+                | Some(ActiveContextMenu::BrowserEntry {
+                    plugins_submenu_open,
+                    active_plugin_submenu,
+                    ..
+                }) => {
+                    *plugins_submenu_open = true;
+                    if active_plugin_submenu.as_deref() == Some(plugin_id.as_str()) {
+                        *active_plugin_submenu = None;
+                    } else {
+                        *active_plugin_submenu = Some(plugin_id);
+                    }
+                }
+                _ => {}
+            }
+            Task::none()
+        }
+        Message::OpenContextPluginGroup(plugin_id) => {
+            match state.context_menu.as_mut() {
+                Some(ActiveContextMenu::Viewer {
+                    plugins_submenu_open,
+                    active_plugin_submenu,
+                    ..
+                })
+                | Some(ActiveContextMenu::BrowserEntry {
+                    plugins_submenu_open,
+                    active_plugin_submenu,
+                    ..
+                }) => {
+                    *plugins_submenu_open = true;
+                    *active_plugin_submenu = Some(plugin_id);
+                }
+                _ => {}
+            }
+            Task::none()
         }
         Message::ContextMenuDispatch(cmd) => {
             state.context_menu = None;
@@ -6625,6 +6814,20 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 layout.right_width = clamped;
             })
         }
+        Message::ViewerRightSplitDrag(pct) => {
+            state.viewer_right_split_preview = Some(pct.clamp(20.0, 80.0));
+            Task::none()
+        }
+        Message::ViewerRightSplitRelease(pct) => {
+            state.viewer_right_split_preview = None;
+            let clamped = pct.round().clamp(20.0, 80.0) as u16;
+            if state.snapshot.meta.layout.viewer_right_split_pct == clamped {
+                return Task::none();
+            }
+            commit_layout_with(state, |layout| {
+                layout.viewer_right_split_pct = clamped;
+            })
+        }
         Message::SetBrowserSortField(field) => {
             state.active_menu = None;
             commit_layout_with(state, |layout| {
@@ -6693,6 +6896,24 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::BatchDialog(msg) => {
+            if matches!(msg, BatchDialogMsg::PickInputFolder) {
+                let title = tr(state.snapshot.meta.language, "batch-source-custom");
+                let start = match &state.dialog {
+                    Some(InAppDialog::Batch(b)) if !b.input_folder.is_empty() => {
+                        Some(PathBuf::from(&b.input_folder))
+                    }
+                    _ => state
+                        .snapshot
+                        .meta
+                        .current_folder
+                        .as_deref()
+                        .map(PathBuf::from),
+                };
+                return Task::perform(
+                    async move { photon_dialogs::pick_folder(&title, start).await },
+                    Message::BatchInputFolderPicked,
+                );
+            }
             if matches!(msg, BatchDialogMsg::PickOutputFolder) {
                 let title = tr(state.snapshot.meta.language, "batch-output-folder");
                 let start = match &state.dialog {
@@ -6737,6 +6958,15 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::BatchInputFolderPicked(Some(path)) => {
+            if let Some(InAppDialog::Batch(b)) = &mut state.dialog {
+                b.apply_msg(BatchDialogMsg::InputFolderPicked(Some(
+                    path.to_string_lossy().into_owned(),
+                )));
+            }
+            Task::none()
+        }
+        Message::BatchInputFolderPicked(None) => Task::none(),
         Message::BatchOutputFolderPicked(Some(path)) => {
             if let Some(InAppDialog::Batch(b)) = &mut state.dialog {
                 b.apply_msg(BatchDialogMsg::OutputFolderPicked(Some(
@@ -6753,6 +6983,8 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 x: pos.x,
                 y: pos.y,
                 path,
+                plugins_submenu_open: false,
+                active_plugin_submenu: None,
             });
             sync_ui_tree_task(state)
         }
@@ -7709,7 +7941,30 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
                 Message::CloseMenu,
             ),
             Some(ActiveMenu::EditorAddLayer) => {
-                with_bottom_right_menu_at(shell, true, 14.0, 60.0, menu_el, Message::CloseMenu)
+                let (est_h, add_layer_menu) =
+                    build_editor_add_layer_menu(state.editor_view_state());
+                let anchor = state.editor_add_layer_anchor.unwrap_or_else(|| {
+                    Point::new(
+                        (state.window_size.width - 240.0).max(16.0),
+                        (state.window_size.height - est_h - 16.0).max(48.0),
+                    )
+                });
+                let anchor_y = if anchor.y + est_h > state.window_size.height - 8.0 {
+                    (anchor.y - est_h).max(8.0)
+                } else {
+                    anchor.y
+                };
+                with_context_menu(
+                    shell,
+                    true,
+                    anchor.x,
+                    anchor_y,
+                    state.window_size,
+                    224.0,
+                    est_h,
+                    add_layer_menu.map(Message::Editor),
+                    Message::CloseMenu,
+                )
             }
             _ => with_top_right_menu(shell, true, menu_el, Message::CloseMenu),
         },
@@ -7733,14 +7988,38 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
     }
 
     let with_ctx = match &state.context_menu {
-        Some(ActiveContextMenu::BrowserEntry { x, y, path }) => {
-            let (menu_el, est_h) = clamp_menu_height(
-                build_browser_context_menu_entries(state.browser_view_state(), path)
-                    .map(Message::Browser),
-                480.0,
-                max_menu_h,
-            );
-            with_context_menu(
+        Some(ActiveContextMenu::BrowserEntry {
+            x,
+            y,
+            path,
+            plugins_submenu_open,
+            active_plugin_submenu,
+        }) => {
+            let (raw_est_h, raw_menu) =
+                build_browser_context_menu_entries(state.browser_view_state(), path);
+            let (menu_el, est_h) =
+                clamp_menu_height(raw_menu.map(Message::Browser), raw_est_h, max_menu_h);
+            let mut submenus = Vec::new();
+            if *plugins_submenu_open
+                && let Some((sub_h, sub_el)) =
+                    build_browser_plugins_submenu(state.browser_view_state(), path)
+            {
+                let (sub_el, sub_h) =
+                    clamp_menu_height(sub_el.map(Message::Browser), sub_h, max_menu_h);
+                submenus.push((220.0, sub_h, sub_el));
+                if let Some(plugin_id) = active_plugin_submenu.as_deref()
+                    && let Some((grp_h, grp_el)) = build_browser_plugin_group_submenu(
+                        state.browser_view_state(),
+                        path,
+                        plugin_id,
+                    )
+                {
+                    let (grp_el, grp_h) =
+                        clamp_menu_height(grp_el.map(Message::Browser), grp_h, max_menu_h);
+                    submenus.push((220.0, grp_h, grp_el));
+                }
+            }
+            with_context_menu_and_submenus(
                 with_menu,
                 true,
                 *x,
@@ -7749,16 +8028,15 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
                 225.0,
                 est_h,
                 menu_el,
+                submenus,
                 Message::CloseContextMenu,
             )
         }
         Some(ActiveContextMenu::BrowserQuickAccess { x, y, path }) => {
-            let (menu_el, est_h) = clamp_menu_height(
-                build_quick_access_context_menu(state.browser_view_state(), path)
-                    .map(Message::Browser),
-                220.0,
-                max_menu_h,
-            );
+            let (raw_est_h, raw_menu) =
+                build_quick_access_context_menu(state.browser_view_state(), path);
+            let (menu_el, est_h) =
+                clamp_menu_height(raw_menu.map(Message::Browser), raw_est_h, max_menu_h);
             with_context_menu(
                 with_menu,
                 true,
@@ -7771,17 +8049,39 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
                 Message::CloseContextMenu,
             )
         }
-        Some(ActiveContextMenu::Viewer { x, y, target_path }) => {
-            let (menu_el, est_h) = clamp_menu_height(
-                build_viewer_context_menu(
-                    state.viewer_view_state(role == WindowRole::Main),
-                    target_path.as_deref(),
-                )
-                .map(Message::Viewer),
-                615.0,
-                max_menu_h,
-            );
-            with_context_menu(
+        Some(ActiveContextMenu::Viewer {
+            x,
+            y,
+            target_path,
+            plugins_submenu_open,
+            active_plugin_submenu,
+        }) => {
+            let viewer_state = state.viewer_view_state(role == WindowRole::Main);
+            let (raw_est_h, raw_menu) =
+                build_viewer_context_menu(viewer_state, target_path.as_deref());
+            let (menu_el, est_h) =
+                clamp_menu_height(raw_menu.map(Message::Viewer), raw_est_h, max_menu_h);
+            let mut submenus = Vec::new();
+            if *plugins_submenu_open
+                && let Some((sub_h, sub_el)) =
+                    build_viewer_plugins_submenu(viewer_state, target_path.as_deref())
+            {
+                let (sub_el, sub_h) =
+                    clamp_menu_height(sub_el.map(Message::Viewer), sub_h, max_menu_h);
+                submenus.push((220.0, sub_h, sub_el));
+                if let Some(plugin_id) = active_plugin_submenu.as_deref()
+                    && let Some((grp_h, grp_el)) = build_viewer_plugin_group_submenu(
+                        viewer_state,
+                        target_path.as_deref(),
+                        plugin_id,
+                    )
+                {
+                    let (grp_el, grp_h) =
+                        clamp_menu_height(grp_el.map(Message::Viewer), grp_h, max_menu_h);
+                    submenus.push((220.0, grp_h, grp_el));
+                }
+            }
+            with_context_menu_and_submenus(
                 with_menu,
                 true,
                 *x,
@@ -7790,13 +8090,16 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
                 225.0,
                 est_h,
                 menu_el,
+                submenus,
                 Message::CloseContextMenu,
             )
         }
         Some(ActiveContextMenu::EditorCanvas { x, y }) => {
-            if let Some(raw_menu) = build_editor_canvas_context_menu(state.editor_view_state()) {
+            if let Some((raw_est_h, raw_menu)) =
+                build_editor_canvas_context_menu(state.editor_view_state())
+            {
                 let (menu_el, est_h) =
-                    clamp_menu_height(raw_menu.map(Message::Editor), 575.0, max_menu_h);
+                    clamp_menu_height(raw_menu.map(Message::Editor), raw_est_h, max_menu_h);
                 with_context_menu(
                     with_menu,
                     true,
@@ -7813,18 +8116,18 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
             }
         }
         Some(ActiveContextMenu::EditorLayer { x, y, layer_id }) => {
-            if let Some(raw_menu) =
+            if let Some((raw_est_h, raw_menu)) =
                 build_editor_layer_context_menu(state.editor_view_state(), *layer_id)
             {
                 let (menu_el, est_h) =
-                    clamp_menu_height(raw_menu.map(Message::Editor), 380.0, max_menu_h);
+                    clamp_menu_height(raw_menu.map(Message::Editor), raw_est_h, max_menu_h);
                 with_context_menu(
                     with_menu,
                     true,
                     *x,
                     *y,
                     state.window_size,
-                    210.0,
+                    220.0,
                     est_h,
                     menu_el,
                     Message::CloseContextMenu,
@@ -8015,8 +8318,43 @@ fn build_workspace_panels_menu(state: &PhotonGui, ws: Workspace) -> Element<'_, 
                 .icon(Icon::Info)
                 .checked(state.browser_info_open),
             ));
+            entries.push(MenuEntry::Item(
+                MenuItem::new(tr(lang, "panel-translate"), Message::OpenTranslatePanel)
+                    .icon(Icon::Translate)
+                    .shortcut("L"),
+            ));
         }
         Workspace::Viewer => {
+            entries.push(MenuEntry::Header(tr(lang, "panels-group-viewer")));
+            entries.push(MenuEntry::Item(
+                MenuItem::new(
+                    tr(lang, "panel-view-adjustments"),
+                    Message::ToggleViewerColorPopover,
+                )
+                .icon(Icon::Palette)
+                .checked(state.viewer_adjustments_open),
+            ));
+            entries.push(MenuEntry::Item(
+                MenuItem::new(tr(lang, "action-info"), Message::ToggleViewerInspector)
+                    .icon(Icon::Info)
+                    .shortcut("I")
+                    .checked(state.viewer_info_open),
+            ));
+            entries.push(MenuEntry::Item(
+                MenuItem::new(
+                    tr(lang, "panel-translate"),
+                    Message::ViewerTranslate(ViewerMessage::ToggleTranslateOverlay),
+                )
+                .icon(Icon::Translate)
+                .shortcut("L")
+                .checked(state.viewer_translate.active),
+            ));
+            entries.push(MenuEntry::Item(
+                MenuItem::new(tr(lang, "action-filmstrip"), Message::ToggleFilmstrip)
+                    .icon(Icon::Filmstrip)
+                    .checked(state.viewer_filmstrip_open),
+            ));
+            entries.push(MenuEntry::Separator);
             entries.push(MenuEntry::Header(tr(lang, "menu-viewer-backdrop")));
             let dark_bg = default_viewport_bg_rgb(true);
             let light_bg = default_viewport_bg_rgb(false);
@@ -8077,6 +8415,11 @@ fn build_workspace_panels_menu(state: &PhotonGui, ws: Workspace) -> Element<'_, 
                 .icon(Icon::Layers)
                 .checked(state.editor_layers_open),
             ));
+            entries.push(MenuEntry::Item(
+                MenuItem::new(tr(lang, "panel-translate"), Message::OpenTranslatePanel)
+                    .icon(Icon::Translate)
+                    .shortcut("L"),
+            ));
         }
     }
 
@@ -8093,6 +8436,13 @@ fn build_workspace_panels_menu(state: &PhotonGui, ws: Workspace) -> Element<'_, 
             .icon(Icon::Reset),
     ));
     entries.push(MenuEntry::Separator);
+    entries.push(MenuEntry::Item(
+        MenuItem::new(
+            tr(lang, "action-plugin-settings"),
+            Message::OpenManagePlugins,
+        )
+        .icon(Icon::Plug),
+    ));
     entries.push(MenuEntry::Item(
         MenuItem::new(tr(lang, "action-settings"), Message::OpenSettings)
             .icon(Icon::Settings)
@@ -8164,7 +8514,9 @@ fn build_active_menu(
     if ws == Workspace::Editor && menu == ActiveMenu::EditorAddLayer {
         return Some((
             None,
-            build_editor_add_layer_menu(state.editor_view_state()).map(Message::Editor),
+            build_editor_add_layer_menu(state.editor_view_state())
+                .1
+                .map(Message::Editor),
         ));
     }
     let lang = state.snapshot.meta.language;
@@ -9115,6 +9467,15 @@ fn build_active_menu(
                     .checked(state.viewer_adjustments_open),
                 ),
                 MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "panel-translate"),
+                        Message::ViewerTranslate(ViewerMessage::ToggleTranslateOverlay),
+                    )
+                    .icon(Icon::Translate)
+                    .shortcut("L")
+                    .checked(state.viewer_translate.active),
+                ),
+                MenuEntry::Item(
                     MenuItem::new(tr(lang, "action-info"), Message::ToggleViewerInspector)
                         .icon(Icon::Info)
                         .shortcut("I")
@@ -9277,6 +9638,44 @@ fn build_settings_general_tab(state: &PhotonGui) -> Element<'_, Message> {
                 .spacing(6)
                 .align_y(Alignment::Center),
             ),
+            setting_row(
+                tr(lang, "settings-backup-method"),
+                row![
+                    button::labeled(
+                        tr(lang, "backup-method-tilde"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: meta.backup_method == photon_protocol::BackupMethod::Tilde,
+                        },
+                        Some(Message::Dispatch(Command::SetBackupMethod {
+                            method: photon_protocol::BackupMethod::Tilde,
+                        })),
+                    ),
+                    button::labeled(
+                        tr(lang, "backup-method-dot"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: meta.backup_method == photon_protocol::BackupMethod::DotBackup,
+                        },
+                        Some(Message::Dispatch(Command::SetBackupMethod {
+                            method: photon_protocol::BackupMethod::DotBackup,
+                        })),
+                    ),
+                    button::labeled(
+                        tr(lang, "backup-method-folder"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: meta.backup_method == photon_protocol::BackupMethod::Folder,
+                        },
+                        Some(Message::Dispatch(Command::SetBackupMethod {
+                            method: photon_protocol::BackupMethod::Folder,
+                        })),
+                    ),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .wrap(),
+            ),
         ]
         .spacing(10),
     );
@@ -9349,11 +9748,6 @@ fn build_settings_general_tab(state: &PhotonGui) -> Element<'_, Message> {
                 .align_y(Alignment::Center)
                 .wrap(),
             ),
-            text(tr(lang, "settings-system-open-hint"))
-                .size(11)
-                .style(|theme| text::Style {
-                    color: Some(PaletteTokens::for_theme(theme).text_muted),
-                }),
             setting_row(
                 tr(lang, "settings-remember-folder"),
                 row![
@@ -9451,40 +9845,32 @@ fn build_settings_general_tab(state: &PhotonGui) -> Element<'_, Message> {
                 Some(Message::ApplySafeDefaultsToDisk),
             ));
     }
-    recovery_col = recovery_col
-        .push(
-            row![
-                button::labeled(
-                    tr(lang, "action-reset-layout"),
-                    Some(Icon::Reset),
-                    ButtonVariant::Secondary,
-                    Some(Message::RequestResetLayout),
-                ),
-                button::labeled(
-                    if state.settings_confirm_factory_reset {
-                        tr(lang, "settings-factory-reset-confirm")
-                    } else {
-                        tr(lang, "settings-factory-reset")
-                    },
-                    Some(Icon::Trash),
-                    if state.settings_confirm_factory_reset {
-                        ButtonVariant::Danger
-                    } else {
-                        ButtonVariant::Secondary
-                    },
-                    Some(Message::RequestFactoryReset),
-                ),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        )
-        .push(
-            text(tr(lang, "settings-reset-hint"))
-                .size(11)
-                .style(|theme| text::Style {
-                    color: Some(PaletteTokens::for_theme(theme).text_muted),
-                }),
-        );
+    recovery_col = recovery_col.push(
+        row![
+            button::labeled(
+                tr(lang, "action-reset-layout"),
+                Some(Icon::Reset),
+                ButtonVariant::Secondary,
+                Some(Message::RequestResetLayout),
+            ),
+            button::labeled(
+                if state.settings_confirm_factory_reset {
+                    tr(lang, "settings-factory-reset-confirm")
+                } else {
+                    tr(lang, "settings-factory-reset")
+                },
+                Some(Icon::Trash),
+                if state.settings_confirm_factory_reset {
+                    ButtonVariant::Danger
+                } else {
+                    ButtonVariant::Secondary
+                },
+                Some(Message::RequestFactoryReset),
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    );
 
     let recovery_card = section_card(tr(lang, "settings-section-recovery"), recovery_col);
 
@@ -9967,12 +10353,7 @@ fn build_settings_translate_tab(state: &PhotonGui) -> Element<'_, Message> {
                     .width(Length::Fixed(140.0)),
             ),
             row![
-                text(tr(lang, "settings-translate-hint"))
-                    .size(11)
-                    .style(|theme| text::Style {
-                        color: Some(PaletteTokens::for_theme(theme).text_muted),
-                    })
-                    .width(Length::Fill),
+                iced::widget::space::horizontal(),
                 button::labeled(
                     tr(lang, "settings-translate-save"),
                     Some(Icon::Check),
@@ -10030,9 +10411,9 @@ pub(crate) fn default_window_state_for(id: DesktopDialogId) -> DialogWindowState
         DesktopDialogId::AdjustColorBalance => DialogWindowState::new(460.0, 365.0)
             .min_size(360.0, 280.0)
             .max_size(760.0, 760.0),
-        DesktopDialogId::AdjustCurves => DialogWindowState::new(480.0, 560.0)
-            .min_size(400.0, 480.0)
-            .max_size(760.0, 880.0),
+        DesktopDialogId::AdjustCurves => DialogWindowState::new(500.0, 650.0)
+            .min_size(420.0, 560.0)
+            .max_size(760.0, 900.0),
         DesktopDialogId::AdjustDenoise => DialogWindowState::new(440.0, 290.0)
             .min_size(340.0, 240.0)
             .max_size(720.0, 640.0),
@@ -10120,6 +10501,9 @@ fn apply_live_layout_fields(state: &PhotonGui, layout: &mut photon_protocol::Lay
         "viewer.adjustments".to_owned(),
         state.viewer_adjustments_open,
     );
+    layout
+        .panels
+        .insert("viewer.translate".to_owned(), state.viewer_translate.active);
     layout
         .panels
         .insert("viewer.filmstrip".to_owned(), state.viewer_filmstrip_open);
@@ -10563,56 +10947,63 @@ fn build_editor_adjustment_dialog<'a>(
                     .style(|th| text::Style {
                         color: Some(PaletteTokens::for_theme(th).text_muted),
                     }),
-                row![
-                    button::labeled(
-                        tr(lang, "curve-preset-linear"),
-                        None,
-                        ButtonVariant::Secondary,
-                        Some(Message::EditorCurvesChanged(vec![[0.0, 0.0], [1.0, 1.0]])),
-                    ),
-                    button::labeled(
-                        tr(lang, "curve-preset-s-curve"),
-                        None,
-                        ButtonVariant::Secondary,
-                        Some(Message::EditorCurvesChanged(vec![
-                            [0.0, 0.0],
-                            [0.25, 0.18],
-                            [0.75, 0.82],
-                            [1.0, 1.0],
-                        ])),
-                    ),
-                    button::labeled(
-                        tr(lang, "curve-preset-fade"),
-                        None,
-                        ButtonVariant::Secondary,
-                        Some(Message::EditorCurvesChanged(vec![
-                            [0.0, 0.08],
-                            [0.5, 0.52],
-                            [1.0, 0.96],
-                        ])),
-                    ),
-                ]
-                .spacing(6),
-                row![
-                    button::labeled(
-                        tr(lang, "curve-preset-high-contrast"),
-                        None,
-                        ButtonVariant::Secondary,
-                        Some(Message::EditorCurvesChanged(vec![
-                            [0.0, 0.0],
-                            [0.20, 0.10],
-                            [0.80, 0.90],
-                            [1.0, 1.0],
-                        ])),
-                    ),
-                    button::labeled(
-                        tr(lang, "curve-preset-negative"),
-                        None,
-                        ButtonVariant::Secondary,
-                        Some(Message::EditorCurvesChanged(vec![[0.0, 1.0], [1.0, 0.0]])),
-                    ),
-                ]
-                .spacing(6),
+                {
+                    #[derive(Clone, Copy, PartialEq, Eq)]
+                    struct CurvePresetOpt {
+                        idx: usize,
+                        label: &'static str,
+                    }
+                    impl std::fmt::Display for CurvePresetOpt {
+                        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                            f.write_str(self.label)
+                        }
+                    }
+                    let opts = [
+                        CurvePresetOpt {
+                            idx: 0,
+                            label: Box::leak(tr(lang, "curve-preset-linear").into_boxed_str()),
+                        },
+                        CurvePresetOpt {
+                            idx: 1,
+                            label: Box::leak(tr(lang, "curve-preset-s-curve").into_boxed_str()),
+                        },
+                        CurvePresetOpt {
+                            idx: 2,
+                            label: Box::leak(tr(lang, "curve-preset-fade").into_boxed_str()),
+                        },
+                        CurvePresetOpt {
+                            idx: 3,
+                            label: Box::leak(
+                                tr(lang, "curve-preset-high-contrast").into_boxed_str(),
+                            ),
+                        },
+                        CurvePresetOpt {
+                            idx: 4,
+                            label: Box::leak(tr(lang, "curve-preset-negative").into_boxed_str()),
+                        },
+                    ];
+                    row![
+                        text(tr(lang, "label-general-presets")).size(12),
+                        pick_list(opts, None::<CurvePresetOpt>, |opt| {
+                            let pts = match opt.idx {
+                                0 => vec![[0.0, 0.0], [1.0, 1.0]],
+                                1 => vec![[0.0, 0.0], [0.25, 0.18], [0.75, 0.82], [1.0, 1.0]],
+                                2 => vec![[0.0, 0.08], [0.5, 0.52], [1.0, 0.96]],
+                                3 => vec![[0.0, 0.0], [0.20, 0.10], [0.80, 0.90], [1.0, 1.0]],
+                                _ => vec![[0.0, 1.0], [1.0, 0.0]],
+                            };
+                            Message::EditorCurvesChanged(pts)
+                        })
+                        .placeholder(tr(lang, "label-general-presets"))
+                        .text_size(TEXT_SIZE_CONTROL)
+                        .padding([5, 10])
+                        .width(Fill)
+                        .style(pick_list_style)
+                        .menu_style(pick_list_menu_style),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                },
             ]
             .spacing(6)
             .into()
@@ -10783,24 +11174,6 @@ fn build_plugins_manager_body<'a>(
     }
 
     let details: Element<'a, Message> = if let Some(p) = active_plugin {
-        let caps = if p.capabilities.is_empty() {
-            "—".to_owned()
-        } else {
-            p.capabilities
-                .iter()
-                .map(|c| match c {
-                    PluginCapability::EditorFilter => "editor_filter",
-                    PluginCapability::BrowserAction => "browser_action",
-                    PluginCapability::ViewerAction => "viewer_action",
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let perms = if p.permissions.is_empty() {
-            tr(lang, "label-plugin-no-permissions")
-        } else {
-            p.permissions.join(", ")
-        };
         let can_run = p.enabled
             && p.available
             && p.error.is_none()
@@ -10833,10 +11206,8 @@ fn build_plugins_manager_body<'a>(
             ]
             .align_y(Alignment::Center),
             text(format!(
-                "{}: {} · {}: {}",
-                tr(lang, "label-plugin-version"),
+                "v{} · {}",
                 p.version,
-                tr(lang, "label-plugin-author"),
                 if p.author.is_empty() {
                     "—"
                 } else {
@@ -10849,19 +11220,6 @@ fn build_plugins_manager_body<'a>(
             }),
         ]
         .spacing(6);
-        if !p.description.is_empty() {
-            det_col = det_col.push(text(p.description.clone()).size(12));
-        }
-        det_col = det_col
-            .push(text(format!("{}: {caps}", tr(lang, "label-plugin-capabilities"))).size(12))
-            .push(text(format!("{}: {perms}", tr(lang, "label-plugin-permissions"))).size(12))
-            .push(
-                text(p.install_dir.clone())
-                    .size(11)
-                    .style(|th| text::Style {
-                        color: Some(PaletteTokens::for_theme(th).text_muted),
-                    }),
-            );
         if let Some(err) = &p.error {
             det_col = det_col.push(text(err.clone()).size(12).style(|th| text::Style {
                 color: Some(PaletteTokens::for_theme(th).danger),
@@ -11001,63 +11359,106 @@ fn build_in_app_dialog<'a>(
             custom_rgb,
             error,
         } => {
-            let presets: &[(&str, u32, u32)] = &[
-                ("1920×1080", 1920, 1080),
-                ("1080×1080", 1080, 1080),
-                ("1280×720", 1280, 720),
-                ("2480×3508", 2480, 3508),
-                ("1080×1920", 1080, 1920),
-            ];
-            let mut preset_row = row![text(tr(lang, "label-presets")).size(12)]
-                .spacing(4)
-                .align_y(Alignment::Center);
-            for &(lbl, pw, ph) in presets {
-                preset_row = preset_row.push(button::labeled(
-                    lbl,
-                    None,
-                    ButtonVariant::Tab {
-                        active: dims.width_px == pw && dims.height_px == ph,
-                    },
-                    Some(Message::NewDocApplyPreset(pw, ph)),
-                ));
+            #[derive(Clone, Copy, PartialEq, Eq)]
+            struct DocPresetOpt {
+                label: &'static str,
+                w: u32,
+                h: u32,
             }
-            let preset_row = preset_row.wrap();
+            impl std::fmt::Display for DocPresetOpt {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str(self.label)
+                }
+            }
+            let presets = [
+                DocPresetOpt {
+                    label: "1920×1080",
+                    w: 1920,
+                    h: 1080,
+                },
+                DocPresetOpt {
+                    label: "1080×1080",
+                    w: 1080,
+                    h: 1080,
+                },
+                DocPresetOpt {
+                    label: "1280×720",
+                    w: 1280,
+                    h: 720,
+                },
+                DocPresetOpt {
+                    label: "2480×3508",
+                    w: 2480,
+                    h: 3508,
+                },
+                DocPresetOpt {
+                    label: "1080×1920",
+                    w: 1080,
+                    h: 1920,
+                },
+            ];
+            let selected_preset = presets
+                .iter()
+                .find(|p| dims.width_px == p.w && dims.height_px == p.h)
+                .copied();
+            let preset_row = row![
+                text(tr(lang, "label-general-presets")).size(12),
+                pick_list(presets, selected_preset, |p| {
+                    Message::NewDocApplyPreset(p.w, p.h)
+                })
+                .placeholder(tr(lang, "label-general-presets"))
+                .text_size(TEXT_SIZE_CONTROL)
+                .padding([5, 10])
+                .width(Length::Fixed(180.0))
+                .style(pick_list_style)
+                .menu_style(pick_list_menu_style),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+
+            #[derive(Clone, Copy, PartialEq, Eq)]
+            struct BgOpt {
+                bg: NewDocBackground,
+                label: &'static str,
+            }
+            impl std::fmt::Display for BgOpt {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str(self.label)
+                }
+            }
+            let bg_opts = [
+                BgOpt {
+                    bg: NewDocBackground::Transparent,
+                    label: Box::leak(tr(lang, "label-bg-transparent").into_boxed_str()),
+                },
+                BgOpt {
+                    bg: NewDocBackground::White,
+                    label: Box::leak(tr(lang, "label-bg-white").into_boxed_str()),
+                },
+                BgOpt {
+                    bg: NewDocBackground::Black,
+                    label: Box::leak(tr(lang, "label-bg-black").into_boxed_str()),
+                },
+                BgOpt {
+                    bg: NewDocBackground::Custom(*custom_rgb),
+                    label: Box::leak(tr(lang, "label-bg-custom").into_boxed_str()),
+                },
+            ];
+            let selected_bg = bg_opts
+                .iter()
+                .find(|o| match (o.bg, *background) {
+                    (NewDocBackground::Custom(_), NewDocBackground::Custom(_)) => true,
+                    (a, b) => a == b,
+                })
+                .copied();
             let custom_swatch_color = Some(rgb_to_color(*custom_rgb));
             let bg_row = row![
-                button::labeled(
-                    tr(lang, "label-bg-transparent"),
-                    None,
-                    ButtonVariant::Tab {
-                        active: *background == NewDocBackground::Transparent,
-                    },
-                    Some(Message::NewDocSetBackground(NewDocBackground::Transparent)),
-                ),
-                button::labeled(
-                    tr(lang, "label-bg-white"),
-                    None,
-                    ButtonVariant::Tab {
-                        active: *background == NewDocBackground::White,
-                    },
-                    Some(Message::NewDocSetBackground(NewDocBackground::White)),
-                ),
-                button::labeled(
-                    tr(lang, "label-bg-black"),
-                    None,
-                    ButtonVariant::Tab {
-                        active: *background == NewDocBackground::Black,
-                    },
-                    Some(Message::NewDocSetBackground(NewDocBackground::Black)),
-                ),
-                button::labeled(
-                    tr(lang, "label-bg-custom"),
-                    None,
-                    ButtonVariant::Tab {
-                        active: matches!(background, NewDocBackground::Custom(_)),
-                    },
-                    Some(Message::NewDocSetBackground(NewDocBackground::Custom(
-                        *custom_rgb,
-                    ))),
-                ),
+                pick_list(bg_opts, selected_bg, |o| Message::NewDocSetBackground(o.bg))
+                    .text_size(TEXT_SIZE_CONTROL)
+                    .padding([5, 10])
+                    .width(Length::Fixed(180.0))
+                    .style(pick_list_style)
+                    .menu_style(pick_list_menu_style),
                 checker_swatch(
                     custom_swatch_color,
                     36.0,
@@ -11065,9 +11466,8 @@ fn build_in_app_dialog<'a>(
                     Some(Message::OpenNewDocColorPicker),
                 ),
             ]
-            .spacing(4)
-            .align_y(Alignment::Center)
-            .wrap();
+            .spacing(8)
+            .align_y(Alignment::Center);
 
             let mut body_col = column![
                 preset_row,
@@ -11186,78 +11586,81 @@ fn build_in_app_dialog<'a>(
             error,
             ..
         } => {
+            #[derive(Clone, Copy, PartialEq, Eq)]
+            struct ResizeChoice<T: Copy + PartialEq> {
+                value: T,
+                label: &'static str,
+            }
+            impl<T: Copy + PartialEq> std::fmt::Display for ResizeChoice<T> {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str(self.label)
+                }
+            }
+            let mode_opts = [
+                ResizeChoice {
+                    value: ResizeMode::Stretch,
+                    label: Box::leak(tr(lang, "mode-stretch").into_boxed_str()),
+                },
+                ResizeChoice {
+                    value: ResizeMode::Cover,
+                    label: Box::leak(tr(lang, "mode-cover").into_boxed_str()),
+                },
+                ResizeChoice {
+                    value: ResizeMode::Pad,
+                    label: Box::leak(tr(lang, "mode-pad").into_boxed_str()),
+                },
+            ];
+            let selected_mode = mode_opts.iter().find(|o| o.value == *mode).copied();
+            let filter_opts = [
+                ResizeChoice {
+                    value: ResizeFilter::Lanczos3,
+                    label: "Lanczos3",
+                },
+                ResizeChoice {
+                    value: ResizeFilter::CatmullRom,
+                    label: "CatmullRom",
+                },
+                ResizeChoice {
+                    value: ResizeFilter::Triangle,
+                    label: "Triangle",
+                },
+                ResizeChoice {
+                    value: ResizeFilter::Nearest,
+                    label: "Nearest",
+                },
+            ];
+            let selected_filter = filter_opts.iter().find(|o| o.value == *filter).copied();
             let mut body_col = column![
                 dims.view(lang, Message::ResizeDimAction),
-                column![
-                    text(tr(lang, "label-resize-mode")).size(12),
-                    row![
-                        button::labeled(
-                            tr(lang, "mode-stretch"),
-                            None,
-                            ButtonVariant::Tab {
-                                active: *mode == ResizeMode::Stretch,
-                            },
-                            Some(Message::ResizeModeChanged(ResizeMode::Stretch)),
-                        ),
-                        button::labeled(
-                            tr(lang, "mode-cover"),
-                            None,
-                            ButtonVariant::Tab {
-                                active: *mode == ResizeMode::Cover,
-                            },
-                            Some(Message::ResizeModeChanged(ResizeMode::Cover)),
-                        ),
-                        button::labeled(
-                            tr(lang, "mode-pad"),
-                            None,
-                            ButtonVariant::Tab {
-                                active: *mode == ResizeMode::Pad,
-                            },
-                            Some(Message::ResizeModeChanged(ResizeMode::Pad)),
-                        ),
+                row![
+                    column![
+                        text(tr(lang, "label-resize-mode")).size(12),
+                        pick_list(mode_opts, selected_mode, |o| {
+                            Message::ResizeModeChanged(o.value)
+                        })
+                        .text_size(TEXT_SIZE_CONTROL)
+                        .padding([5, 10])
+                        .width(Fill)
+                        .style(pick_list_style)
+                        .menu_style(pick_list_menu_style),
                     ]
-                    .spacing(4),
-                ]
-                .spacing(6),
-                column![
-                    text(tr(lang, "label-filter")).size(12),
-                    row![
-                        button::labeled(
-                            "Lanczos3",
-                            None,
-                            ButtonVariant::Tab {
-                                active: *filter == ResizeFilter::Lanczos3,
-                            },
-                            Some(Message::ResizeFilterChanged(ResizeFilter::Lanczos3)),
-                        ),
-                        button::labeled(
-                            "CatmullRom",
-                            None,
-                            ButtonVariant::Tab {
-                                active: *filter == ResizeFilter::CatmullRom,
-                            },
-                            Some(Message::ResizeFilterChanged(ResizeFilter::CatmullRom)),
-                        ),
-                        button::labeled(
-                            "Triangle",
-                            None,
-                            ButtonVariant::Tab {
-                                active: *filter == ResizeFilter::Triangle,
-                            },
-                            Some(Message::ResizeFilterChanged(ResizeFilter::Triangle)),
-                        ),
-                        button::labeled(
-                            "Nearest",
-                            None,
-                            ButtonVariant::Tab {
-                                active: *filter == ResizeFilter::Nearest,
-                            },
-                            Some(Message::ResizeFilterChanged(ResizeFilter::Nearest)),
-                        ),
+                    .spacing(4)
+                    .width(Fill),
+                    column![
+                        text(tr(lang, "label-filter")).size(12),
+                        pick_list(filter_opts, selected_filter, |o| {
+                            Message::ResizeFilterChanged(o.value)
+                        })
+                        .text_size(TEXT_SIZE_CONTROL)
+                        .padding([5, 10])
+                        .width(Fill)
+                        .style(pick_list_style)
+                        .menu_style(pick_list_menu_style),
                     ]
-                    .spacing(4),
+                    .spacing(4)
+                    .width(Fill),
                 ]
-                .spacing(6),
+                .spacing(10),
             ]
             .spacing(12);
 
@@ -12076,6 +12479,10 @@ fn map_browser_message(msg: BrowserMessage) -> Message {
         BrowserMessage::OpenQuickAccessContextMenu { path, x, y } => {
             Message::OpenQuickAccessContextMenu { path, x, y }
         }
+        BrowserMessage::ToggleContextPluginsSubmenu => Message::ToggleContextPluginsSubmenu,
+        BrowserMessage::OpenContextPluginsSubmenu => Message::OpenContextPluginsSubmenu,
+        BrowserMessage::ToggleContextPluginGroup(id) => Message::ToggleContextPluginGroup(id),
+        BrowserMessage::OpenContextPluginGroup(id) => Message::OpenContextPluginGroup(id),
         BrowserMessage::BrowserCopyPath(p) => Message::BrowserCopyPath(p),
         BrowserMessage::BrowserStartRename(p) => Message::BrowserStartRename(p),
         BrowserMessage::BrowserCopyTo(ps) => Message::BrowserCopyTo(ps),
@@ -12374,6 +12781,11 @@ fn map_viewer_message(msg: ViewerMessage) -> Message {
         ViewerMessage::ToggleFilmstrip => Message::ToggleFilmstrip,
         ViewerMessage::CloseFilmstrip => Message::CloseFilmstrip,
         ViewerMessage::FilmstripScrolled { offset } => Message::FilmstripScrolled { offset },
+        ViewerMessage::FilmstripWheelScroll(delta) => Message::FilmstripWheelScroll(delta),
+        ViewerMessage::ToggleContextPluginsSubmenu => Message::ToggleContextPluginsSubmenu,
+        ViewerMessage::OpenContextPluginsSubmenu => Message::OpenContextPluginsSubmenu,
+        ViewerMessage::ToggleContextPluginGroup(id) => Message::ToggleContextPluginGroup(id),
+        ViewerMessage::OpenContextPluginGroup(id) => Message::OpenContextPluginGroup(id),
         ViewerMessage::ToggleViewerInspector => Message::ToggleViewerInspector,
         ViewerMessage::ToggleViewerColorPopover => Message::ToggleViewerColorPopover,
         ViewerMessage::CloseViewerPanel(p) => Message::CloseViewerPanel(p),
@@ -12384,6 +12796,8 @@ fn map_viewer_message(msg: ViewerMessage) -> Message {
         ViewerMessage::SwapViewerRightPanels => Message::SwapViewerRightPanels,
         ViewerMessage::ViewerSplitterDrag(w) => Message::ViewerSplitterDrag(w),
         ViewerMessage::ViewerSplitterRelease(w) => Message::ViewerSplitterRelease(w),
+        ViewerMessage::ViewerRightSplitDrag(p) => Message::ViewerRightSplitDrag(p),
+        ViewerMessage::ViewerRightSplitRelease(p) => Message::ViewerRightSplitRelease(p),
         ViewerMessage::SetViewerAdjExposure(v) => Message::SetViewerAdjExposure(v),
         ViewerMessage::SetViewerAdjGamma(v) => Message::SetViewerAdjGamma(v),
         ViewerMessage::SetViewerAdjBrightness(v) => Message::SetViewerAdjBrightness(v),
@@ -12396,6 +12810,8 @@ fn map_viewer_message(msg: ViewerMessage) -> Message {
         ViewerMessage::OpenBrowserWindow => Message::OpenBrowserWindow,
         ViewerMessage::WebtoonScrolled(vp) => Message::WebtoonScrolled(vp),
         ViewerMessage::OpenTranslateSettings => Message::OpenTranslateSettings,
+        ViewerMessage::SetTranslateProvider(p) => Message::SetTranslateProvider(p),
+        ViewerMessage::OpenPluginSettings => Message::OpenManagePlugins,
         ViewerMessage::OpenInNewViewerWindow(p) => Message::OpenInViewerWindow(p),
         other @ (ViewerMessage::ToggleTranslateOverlay
         | ViewerMessage::CloseTranslateOverlay
@@ -12411,10 +12827,12 @@ fn map_viewer_message(msg: ViewerMessage) -> Message {
         | ViewerMessage::ToggleTranslateBlockOriginal(_)
         | ViewerMessage::SetTranslateFontScale(_)
         | ViewerMessage::SelectTranslateBlock(_)
+        | ViewerMessage::UpdateTranslateBlockOriginal(_, _)
         | ViewerMessage::UpdateTranslateBlockText(_, _)
         | ViewerMessage::MoveTranslateBlock(_, _, _)
         | ViewerMessage::RetryTranslateBlock(_)
         | ViewerMessage::RemoveTranslateBlock(_)
+        | ViewerMessage::ClearTranslateBlocks
         | ViewerMessage::SaveTranslationSidecar
         | ViewerMessage::DeleteTranslationSidecar
         | ViewerMessage::CopyTranslatedText
@@ -12556,7 +12974,7 @@ impl PhotonGui {
             viewer_filmstrip_open: self.viewer_filmstrip_open,
             viewer_right_panels: &self.viewer_right_panels,
             viewer_right_width_preview: self.viewer_right_width_preview,
-            viewer_right_split_preview: None,
+            viewer_right_split_preview: self.viewer_right_split_preview,
             is_fullscreen: self.is_fullscreen,
             window_size: self.window_size,
             is_main_window,
@@ -12591,6 +13009,7 @@ impl PhotonGui {
         self.viewer_info_open = layout.panel("viewer.info") || layout.panel("viewer.inspector");
         self.viewer_adjustments_open = layout.panel("viewer.adjustments");
         self.viewer_color_popover_open = self.viewer_adjustments_open;
+        self.viewer_translate.active = layout.panel("viewer.translate");
         self.viewer_right_panels.set_order(
             layout.viewer_right_panel_order.clone(),
             &ViewerRightPanel::ALL,
@@ -14339,14 +14758,6 @@ fn is_archive_path_str(path: &str) -> bool {
         .is_some_and(photon_protocol::is_archive_extension)
 }
 
-fn is_supported_image_path_str(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|ext| ext.trim_start_matches('.').to_ascii_lowercase())
-        .is_some_and(|lower| photon_protocol::IMAGE_EXTENSIONS.contains(&lower.as_str()))
-}
-
 fn open_folder_in_file_manager(dir: &Path) {
     xdg_open(dir);
 }
@@ -14849,8 +15260,13 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
     let lang = state.snapshot.meta.language;
     match msg {
         ViewerMessage::ToggleTranslateOverlay => {
+            state.active_menu = None;
+            state.context_menu = None;
             state.viewer_translate.active = !state.viewer_translate.active;
             if state.viewer_translate.active {
+                if state.viewer_translate.mode == ViewerTranslateMode::Pan {
+                    state.viewer_translate.mode = ViewerTranslateMode::Translate;
+                }
                 state.viewer_translate.active_page_path = state.snapshot.meta.viewer_path.clone();
                 if let Some(saved) = &state.snapshot.meta.viewer_saved_translation
                     && Some(saved.path.as_str()) == state.snapshot.meta.viewer_path.as_deref()
@@ -14871,9 +15287,12 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
                 state.active_translate_target = None;
                 state.webtoon_marquee_drag = None;
             }
-            sync_ui_tree_task(state)
+            let layout_task = commit_layout_with(state, |_| {});
+            Task::batch([layout_task, sync_ui_tree_task(state)])
         }
         ViewerMessage::CloseTranslateOverlay => {
+            state.active_menu = None;
+            state.context_menu = None;
             state.viewer_translate.active = false;
             state.viewer_translate.picking_region = false;
             state.viewer_translate.editing_block_idx = None;
@@ -14886,7 +15305,8 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
             state.pending_translate_queue.clear();
             state.active_translate_target = None;
             state.webtoon_marquee_drag = None;
-            sync_ui_tree_task(state)
+            let layout_task = commit_layout_with(state, |_| {});
+            Task::batch([layout_task, sync_ui_tree_task(state)])
         }
         ViewerMessage::SetTranslateMode(mode) => {
             state.viewer_translate.mode = mode;
@@ -14917,7 +15337,10 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
         ViewerMessage::StartTranslateRegionPick => {
             state.context_menu = None;
             state.viewer_translate.active = true;
-            state.viewer_translate.picking_region = !state.viewer_translate.picking_region;
+            if state.viewer_translate.mode == ViewerTranslateMode::Pan {
+                state.viewer_translate.mode = ViewerTranslateMode::Translate;
+            }
+            state.viewer_translate.picking_region = true;
             sync_ui_tree_task(state)
         }
         ViewerMessage::ScanTranslatePage => {
@@ -15012,6 +15435,13 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
             state.viewer_translate.result_card_visible = idx.is_some();
             Task::none()
         }
+        ViewerMessage::UpdateTranslateBlockOriginal(idx, text_val) => {
+            if let Some(b) = state.viewer_translate.blocks.get_mut(idx) {
+                b.original = text_val;
+            }
+            sync_translate_bubble_cache(state);
+            Task::none()
+        }
         ViewerMessage::UpdateTranslateBlockText(idx, text_val) => {
             if let Some(b) = state.viewer_translate.blocks.get_mut(idx) {
                 if state.viewer_translate.mode == ViewerTranslateMode::OcrOnly {
@@ -15064,6 +15494,22 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
                     state.viewer_translate.result_card_visible = false;
                 }
                 sync_translate_bubble_cache(state);
+            }
+            Task::none()
+        }
+        ViewerMessage::ClearTranslateBlocks => {
+            state.viewer_translate.blocks.clear();
+            state.viewer_translate.editing_block_idx = None;
+            state.viewer_translate.result_card_visible = false;
+            state.viewer_translate.show_original_indices.clear();
+            state.viewer_translate.pending_replace_idx = None;
+            if let Some(path) = state
+                .viewer_translate
+                .active_page_path
+                .clone()
+                .or_else(|| state.snapshot.meta.viewer_path.clone())
+            {
+                state.viewer_translate.bubble_cache.remove(&path);
             }
             Task::none()
         }
@@ -16233,10 +16679,10 @@ mod tests {
     #[test]
     fn dialog_defaults_cover_curves_denoise_and_plugins() {
         let curves = default_window_state_for(DesktopDialogId::AdjustCurves);
-        assert_eq!(curves.width, 480.0);
-        assert_eq!(curves.height, 560.0);
-        assert_eq!(curves.min_width, 400.0);
-        assert_eq!(curves.min_height, 480.0);
+        assert_eq!(curves.width, 500.0);
+        assert_eq!(curves.height, 650.0);
+        assert_eq!(curves.min_width, 420.0);
+        assert_eq!(curves.min_height, 560.0);
 
         let plugins = default_window_state_for(DesktopDialogId::ManagePlugins);
         assert_eq!(plugins.width, 680.0);

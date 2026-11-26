@@ -5,13 +5,16 @@
 //! `panel_tab_bar`) lives in the `photon-panels` crate. Compatibility exports remain
 //! here so `photon-ui` stays cycle-free while downstream crates migrate.
 
-use iced::widget::{Space, button, column, container, mouse_area, row, rule, text};
+use std::rc::Rc;
+
+use iced::widget::{Space, button, column, container, mouse_area, row, rule, slider, text};
 use iced::{Alignment, Border, Color, Element, Length};
 
 use crate::button::{self as ui_button, ButtonVariant};
 use crate::icons::{self, Icon};
 use crate::theme::{
-    PaletteTokens, RADIUS_MD, RADIUS_SM, card_style, hairline_rule_style, surface_panel_style,
+    PaletteTokens, RADIUS_MD, RADIUS_SM, card_style, hairline_rule_style, slider_style,
+    surface_panel_style,
 };
 use crate::tooltip::{TooltipPosition, with_optional_tooltip};
 
@@ -429,6 +432,87 @@ pub fn kv_row<'a, M: 'a>(key: impl Into<String>, value: impl Into<String>) -> El
     .width(Length::Fill)
     .spacing(8)
     .align_y(Alignment::Center)
+    .into()
+}
+
+/// Inline slider row: `label  [----o----]  < [value] >`.
+pub fn slider_control_row<'a, M: Clone + 'a>(
+    label: impl Into<String>,
+    value: f32,
+    range: std::ops::RangeInclusive<f32>,
+    step: f32,
+    value_text: impl Into<String>,
+    on_change: impl Fn(f32) -> M + 'a,
+) -> Element<'a, M> {
+    let min_v = *range.start();
+    let max_v = *range.end();
+    let cb = Rc::new(on_change);
+    let cb_slider = Rc::clone(&cb);
+    let prev_val = (value - step).clamp(min_v, max_v);
+    let next_val = (value + step).clamp(min_v, max_v);
+
+    let step_btn = |sym: &'static str, msg: M| {
+        button(text(sym).size(11))
+            .padding([2, 6])
+            .style(|theme, status| {
+                let t = PaletteTokens::for_theme(theme);
+                let bg = if matches!(status, button::Status::Hovered) {
+                    t.bg_hover
+                } else {
+                    t.bg_surface
+                };
+                button::Style {
+                    background: Some(bg.into()),
+                    text_color: t.text_secondary,
+                    border: Border {
+                        color: t.border,
+                        width: 1.0,
+                        radius: RADIUS_SM.into(),
+                    },
+                    ..Default::default()
+                }
+            })
+            .on_press(msg)
+    };
+
+    row![
+        text(label.into())
+            .size(12)
+            .width(Length::FillPortion(3))
+            .style(|theme| {
+                let t = PaletteTokens::for_theme(theme);
+                text::Style {
+                    color: Some(t.text_muted),
+                }
+            }),
+        slider(range, value, move |v| cb_slider(v))
+            .step(step)
+            .style(slider_style)
+            .width(Length::FillPortion(4)),
+        row![
+            step_btn("<", cb(prev_val)),
+            container(text(value_text.into()).size(11))
+                .padding([2, 6])
+                .style(|theme| {
+                    let t = PaletteTokens::for_theme(theme);
+                    container::Style {
+                        background: Some(t.bg_app.into()),
+                        border: Border {
+                            color: t.border,
+                            width: 1.0,
+                            radius: RADIUS_SM.into(),
+                        },
+                        ..Default::default()
+                    }
+                }),
+            step_btn(">", cb(next_val)),
+        ]
+        .spacing(2)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .width(Length::Fill)
     .into()
 }
 

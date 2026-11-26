@@ -30,11 +30,12 @@ ICON_ROLES = {
 }
 ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
 
-# Exact MIME types matching image codecs decoded by `photon-image`.
+# Exact MIME types matching image codecs & documents/archives supported by Photon.
 IMAGE_MIME_TYPES = ";".join(
     [
         "image/jpeg",
         "image/png",
+        "image/apng",
         "image/webp",
         "image/gif",
         "image/tiff",
@@ -42,8 +43,16 @@ IMAGE_MIME_TYPES = ";".join(
         "image/avif",
         "image/heic",
         "image/heif",
+        "image/jxl",
         "image/jp2",
+        "image/x-jp2",
         "image/jpx",
+        "image/jpm",
+        "image/svg+xml",
+        "image/svg+xml-compressed",
+        "image/vnd.adobe.photoshop",
+        "image/openraster",
+        "application/x-krita",
         "image/x-exr",
         "image/vnd.radiance",
         "image/x-hdr",
@@ -57,6 +66,17 @@ IMAGE_MIME_TYPES = ";".join(
         "image/x-tga",
         "image/x-farbfeld",
         "image/vnd.ms-dds",
+        "image/x-adobe-dng",
+        "image/x-canon-cr2",
+        "image/x-canon-cr3",
+        "image/x-nikon-nef",
+        "image/x-sony-arw",
+        "image/x-fuji-raf",
+        "image/x-olympus-orf",
+        "image/x-panasonic-rw2",
+        "image/x-dcraw",
+        "application/pdf",
+        "application/zip",
         "application/vnd.comicbook+zip",
         "application/x-cbz",
     ]

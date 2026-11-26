@@ -138,6 +138,10 @@ pub enum BrowserMessage {
         x: f32,
         y: f32,
     },
+    ToggleContextPluginsSubmenu,
+    OpenContextPluginsSubmenu,
+    ToggleContextPluginGroup(String),
+    OpenContextPluginGroup(String),
     BrowserCopyPath(String),
     BrowserStartRename(String),
     BrowserCopyTo(Vec<String>),
@@ -1705,6 +1709,7 @@ fn collect_tree_rows<'a>(
                 ),
             ]
             .spacing(2)
+            .width(Fill)
             .align_y(Alignment::Center),
         )
         .on_right_press(BrowserMessage::OpenQuickAccessContextMenu {
@@ -1713,6 +1718,8 @@ fn collect_tree_rows<'a>(
             y: cursor_pt.y,
         }),
     )
+    .width(Fill)
+    .clip(true)
     .padding(Padding {
         top: 0.0,
         right: 0.0,
@@ -1781,7 +1788,7 @@ pub fn build_browser_sort_menu<'a>(state: BrowserViewState<'a>) -> Element<'a, B
 pub fn build_browser_context_menu_entries<'a>(
     state: BrowserViewState<'a>,
     entry_path: &str,
-) -> Element<'a, BrowserMessage> {
+) -> (f32, Element<'a, BrowserMessage>) {
     let lang = state.snapshot.meta.language;
     let entry = state.snapshot.entries.iter().find(|e| e.path == entry_path);
     let is_dir = entry
@@ -1979,9 +1986,108 @@ pub fn build_browser_context_menu_entries<'a>(
         let qas = workspace_quick_actions(&state.snapshot.meta, "browser");
         if !qas.is_empty() {
             entries.push(MenuEntry::Separator);
-            entries.push(MenuEntry::Header(tr(lang, "menu-quick-actions")));
-            for qa in qas {
-                entries.push(MenuEntry::Item(
+            entries.push(MenuEntry::Item(
+                MenuItem::new(
+                    tr(lang, "menu-plugins"),
+                    BrowserMessage::ToggleContextPluginsSubmenu,
+                )
+                .icon(Icon::Plug)
+                .submenu(true)
+                .on_hover(BrowserMessage::OpenContextPluginsSubmenu),
+            ));
+        }
+    }
+
+    let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+    (est_h, menu_panel_entries(entries, 225.0))
+}
+
+fn browser_context_image_paths(state: BrowserViewState<'_>, entry_path: &str) -> Vec<String> {
+    let paths: Vec<String> = if state
+        .snapshot
+        .meta
+        .selection
+        .iter()
+        .any(|p| p == entry_path)
+        && state.snapshot.meta.selection.len() > 1
+    {
+        state.snapshot.meta.selection.clone()
+    } else {
+        vec![entry_path.to_owned()]
+    };
+    paths
+        .into_iter()
+        .filter(|p| {
+            state
+                .snapshot
+                .entries
+                .iter()
+                .any(|e| e.path == *p && e.is_image)
+        })
+        .collect()
+}
+
+fn plugin_display_name(meta: &photon_protocol::UiStateMeta, plugin_id: &str) -> String {
+    meta.plugins
+        .iter()
+        .find(|p| p.id == plugin_id)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| plugin_id.to_owned())
+}
+
+/// Secondary submenu listing installed Plugins grouped by plugin for the context-clicked entry.
+pub fn build_browser_plugins_submenu<'a>(
+    state: BrowserViewState<'a>,
+    entry_path: &str,
+) -> Option<(f32, Element<'a, BrowserMessage>)> {
+    if browser_context_image_paths(state, entry_path).is_empty() {
+        return None;
+    }
+    let qas = workspace_quick_actions(&state.snapshot.meta, "browser");
+    if qas.is_empty() {
+        return None;
+    }
+    let mut plugin_ids: Vec<String> = Vec::new();
+    for qa in qas {
+        if !plugin_ids.contains(&qa.plugin_id) {
+            plugin_ids.push(qa.plugin_id.clone());
+        }
+    }
+    let entries: Vec<MenuEntry<'a, BrowserMessage>> = plugin_ids
+        .into_iter()
+        .map(|plugin_id| {
+            let label = plugin_display_name(&state.snapshot.meta, &plugin_id);
+            MenuEntry::Item(
+                MenuItem::new(
+                    label,
+                    BrowserMessage::ToggleContextPluginGroup(plugin_id.clone()),
+                )
+                .icon(Icon::Plug)
+                .submenu(true)
+                .on_hover(BrowserMessage::OpenContextPluginGroup(plugin_id)),
+            )
+        })
+        .collect();
+    let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+    Some((est_h, menu_panel_entries(entries, 220.0)))
+}
+
+/// Tertiary submenu listing Quick Actions for a single plugin in the Browser context menu.
+pub fn build_browser_plugin_group_submenu<'a>(
+    state: BrowserViewState<'a>,
+    entry_path: &str,
+    plugin_id: &str,
+) -> Option<(f32, Element<'a, BrowserMessage>)> {
+    let image_paths = browser_context_image_paths(state, entry_path);
+    if image_paths.is_empty() {
+        return None;
+    }
+    let entries: Vec<MenuEntry<'a, BrowserMessage>> =
+        workspace_quick_actions(&state.snapshot.meta, "browser")
+            .into_iter()
+            .filter(|qa| qa.plugin_id == plugin_id)
+            .map(|qa| {
+                MenuEntry::Item(
                     MenuItem::new(
                         qa.label.clone(),
                         BrowserMessage::ContextMenuDispatch(Command::QuickActionRun {
@@ -1991,18 +2097,20 @@ pub fn build_browser_context_menu_entries<'a>(
                         }),
                     )
                     .icon(Icon::Plug),
-                ));
-            }
-        }
+                )
+            })
+            .collect();
+    if entries.is_empty() {
+        return None;
     }
-
-    menu_panel_entries(entries, 225.0)
+    let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+    Some((est_h, menu_panel_entries(entries, 220.0)))
 }
 
 pub fn build_quick_access_context_menu<'a>(
     state: BrowserViewState<'a>,
     path: &str,
-) -> Element<'a, BrowserMessage> {
+) -> (f32, Element<'a, BrowserMessage>) {
     let lang = state.snapshot.meta.language;
     let fav_idx = state.snapshot.meta.favorites.iter().position(|p| p == path);
 
@@ -2066,7 +2174,8 @@ pub fn build_quick_access_context_menu<'a>(
         ));
     }
 
-    menu_panel_entries(entries, 220.0)
+    let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+    (est_h, menu_panel_entries(entries, 220.0))
 }
 
 pub fn build_browser_plugins_menu_entries<'a>(

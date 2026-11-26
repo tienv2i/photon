@@ -18,7 +18,7 @@ All workspace checks below were executed after the final Rust edits:
 | Check | Command | Result |
 |---|---|---|
 | Formatting | `just fmt-check` (`cargo fmt --all -- --check`) | Passed |
-| Workspace tests | `just test` (`cargo test --workspace`) | **204 passed, 0 failed** (`photon-browser`: 5, `photon-canvas`: 13, `photon-cli`: 1, `photon-core`: 33 unit + 8 `automation_e2e`, `photon-desktop`: 14, `photon-dialogs`: 12, `photon-editor`: 5, `photon-i18n`: 3, `photon-image`: 35, `photon-ipc`: 4, `photon-panels`: 13, `photon-plugins`: 1 unit + 12 `plugin_bridge_tests`, `photon-protocol`: 13, `photon-storage`: 8, `photon-ui`: 19, `photon-viewer`: 5) |
+| Workspace tests | `just test` (`cargo test --workspace`) | **225 passed, 0 failed** (`photon-browser`: 7, `photon-canvas`: 13, `photon-cli`: 1, `photon-core`: 33 unit + 8 `automation_e2e`, `photon-desktop`: 20, `photon-dialogs`: 12, `photon-editor`: 5, `photon-i18n`: 3, `photon-image`: 35, `photon-ipc`: 8, `photon-panels`: 13, `photon-plugins`: 1 unit + 12 `plugin_bridge_tests`, `photon-protocol`: 13, `photon-storage`: 13, `photon-ui`: 21, `photon-viewer`: 7) |
 
 ## Implemented Feature Milestones
 

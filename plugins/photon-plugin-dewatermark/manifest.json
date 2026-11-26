@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "photon.dewatermark",
-  "name": "Watermark Remover (Gemini Logo + General Region)",
+  "name": "Dewatermark",
   "version": "2.0.0",
   "entry": {
     "command": "bin/photon-plugin-dewatermark",
@@ -17,20 +17,20 @@
     {
       "action": "editor.dewatermark_gemini",
       "workspace": "editor",
-      "label": "Remove Gemini Logo (Reverse Alpha Blending)",
+      "label": "Remove Gemini",
       "output": "image"
     },
     {
       "action": "editor.inpaint_region",
       "workspace": "editor",
-      "label": "Remove Watermark Region (Inpaint)",
+      "label": "Inpaint Region",
       "output": "image"
     }
   ],
   "quickActions": [
     {
       "id": "dewatermark-gemini-auto",
-      "label": "Remove Gemini logo (Auto)",
+      "label": "Remove Gemini (Auto)",
       "action": "editor.dewatermark_gemini",
       "workspaces": [
         "browser",
@@ -44,7 +44,7 @@
     },
     {
       "id": "dewatermark-gemini-force",
-      "label": "Remove Gemini logo (Force)",
+      "label": "Remove Gemini (Force)",
       "action": "editor.dewatermark_gemini",
       "workspaces": [
         "browser",

@@ -87,6 +87,10 @@ lang-vietnamese = Tiếng Việt
 
 settings-title = Cài đặt
 settings-section-general = Giao diện & Ngôn ngữ
+settings-backup-method = Phương thức sao lưu
+backup-method-tilde = Đuôi ~
+backup-method-dot = Đuôi .backup
+backup-method-folder = Thư mục riêng
 settings-section-viewer = Trình xem & Khi mở từ hệ thống
 settings-section-behavior = Phiên làm việc & Hiệu năng
 settings-theme = Giao diện
@@ -147,6 +151,7 @@ label-height = Chiều cao (px)
 label-lock-aspect = Giữ nguyên tỉ lệ
 label-filter = Bộ lọc nội suy
 label-presets = Tỉ lệ khung
+label-general-presets = Mẫu có sẵn
 
 # Core UiText codes (kebab-case)
 ready = Sẵn sàng
@@ -323,6 +328,7 @@ batch-convert = Chuyển đổi định dạng
 batch-source = Nguồn ảnh
 batch-source-selection = Ảnh đang chọn
 batch-source-folder = Thư mục hiện tại
+batch-source-custom = Thư mục tùy chọn
 batch-output = Đầu ra
 batch-output-beside = Cùng thư mục gốc
 batch-output-folder = Thư mục đích
@@ -902,6 +908,13 @@ translate-style-frosted = Kính mờ
 translate-style-solid = Nền đặc
 translate-bubble-orig = Gốc
 translate-bubble-trans = Dịch
+panel-translate = Đọc & Dịch
+translate-section-scan = Quét & Chế độ
+translate-section-ocr = OCR & Ngôn ngữ
+translate-section-display = Hiển thị & Khung dịch
+translate-result-title = Kết quả
+translate-history-title = Lịch sử
+translate-select-full = Dịch toàn bộ ảnh
 
 # Công cụ AI trong Trình chỉnh sửa
 tool-ai-rembg = Tách nền AI
@@ -953,6 +966,7 @@ action-generate-caption = Tạo mô tả
 action-save-caption = Lưu .txt
 caption-placeholder = Mô tả hoặc các thẻ được tạo…
 action-plugin-settings-models = Cài đặt & Mô hình
+action-plugin-settings = Cài đặt Plugin…
 action-translate-settings = Cài đặt dịch & OCR
 
 # Stage 2B: Size Popups, Multi-tab Editor, Panel Options, Multi-Viewer

@@ -81,6 +81,8 @@ pub struct MenuItem<'a, M> {
     pub shortcut: Option<String>,
     pub checked: bool,
     pub enabled: bool,
+    pub submenu: bool,
+    pub on_hover: Option<M>,
     pub on_press: M,
     _marker: std::marker::PhantomData<&'a ()>,
 }
@@ -93,6 +95,8 @@ impl<'a, M> MenuItem<'a, M> {
             shortcut: None,
             checked: false,
             enabled: true,
+            submenu: false,
+            on_hover: None,
             on_press,
             _marker: std::marker::PhantomData,
         }
@@ -118,13 +122,25 @@ impl<'a, M> MenuItem<'a, M> {
         self
     }
 
-    pub fn map<N>(self, f: impl FnOnce(M) -> N) -> MenuItem<'a, N> {
+    pub fn submenu(mut self, submenu: bool) -> Self {
+        self.submenu = submenu;
+        self
+    }
+
+    pub fn on_hover(mut self, on_hover: M) -> Self {
+        self.on_hover = Some(on_hover);
+        self
+    }
+
+    pub fn map<N>(self, mut f: impl FnMut(M) -> N) -> MenuItem<'a, N> {
         MenuItem {
             icon: self.icon,
             label: self.label,
             shortcut: self.shortcut,
             checked: self.checked,
             enabled: self.enabled,
+            submenu: self.submenu,
+            on_hover: self.on_hover.map(&mut f),
             on_press: f(self.on_press),
             _marker: std::marker::PhantomData,
         }
@@ -209,6 +225,11 @@ pub fn estimate_menu_height<M>(entries: &[MenuEntry<'_, M>]) -> f32 {
         }
     }
     h
+}
+
+/// Estimate the rendered height (px) of a menu including `column![].spacing(2)` gaps.
+pub fn estimate_menu_height_with_spacing<M>(entries: &[MenuEntry<'_, M>]) -> f32 {
+    estimate_menu_height(entries) + entries.len().saturating_sub(1) as f32 * 2.0 + 4.0
 }
 
 pub fn menu_panel<'a, M: Clone + 'a>(items: Vec<MenuItem<'a, M>>, width: f32) -> Element<'a, M> {
@@ -317,6 +338,14 @@ pub fn menu_panel_entries<'a, M: Clone + 'a>(
                     };
                     r = r.push(check_el);
                 }
+                if item.submenu {
+                    let arrow_el = if enabled {
+                        icons::render(Icon::ChevronRight, 13.0, None)
+                    } else {
+                        icons::render_disabled(Icon::ChevronRight, 13.0)
+                    };
+                    r = r.push(arrow_el);
+                }
 
                 let mut btn =
                     button(r)
@@ -345,7 +374,12 @@ pub fn menu_panel_entries<'a, M: Clone + 'a>(
                 if enabled {
                     btn = btn.on_press(item.on_press);
                 }
-                col = col.push(btn);
+                let entry_el: Element<'a, M> = if enabled && let Some(hover_msg) = item.on_hover {
+                    mouse_area(btn).on_enter(hover_msg).into()
+                } else {
+                    btn.into()
+                };
+                col = col.push(entry_el);
             }
         }
     }
@@ -529,6 +563,64 @@ pub fn with_context_menu<'a, M: Clone + 'a>(
     menu: impl Into<Element<'a, M>>,
     on_dismiss: M,
 ) -> Element<'a, M> {
+    with_context_menu_and_submenu(
+        base,
+        open,
+        anchor_x,
+        anchor_y,
+        viewport_size,
+        menu_width,
+        estimated_height,
+        menu,
+        None,
+        on_dismiss,
+    )
+}
+
+/// Overlay a cursor-anchored context menu with an optional secondary submenu panel
+/// positioned beside the primary menu and clamped inside `viewport_size`.
+#[allow(clippy::too_many_arguments)]
+pub fn with_context_menu_and_submenu<'a, M: Clone + 'a>(
+    base: impl Into<Element<'a, M>>,
+    open: bool,
+    anchor_x: f32,
+    anchor_y: f32,
+    viewport_size: Size,
+    menu_width: f32,
+    estimated_height: f32,
+    menu: impl Into<Element<'a, M>>,
+    submenu: Option<(f32, f32, Element<'a, M>)>,
+    on_dismiss: M,
+) -> Element<'a, M> {
+    with_context_menu_and_submenus(
+        base,
+        open,
+        anchor_x,
+        anchor_y,
+        viewport_size,
+        menu_width,
+        estimated_height,
+        menu,
+        submenu.into_iter().collect(),
+        on_dismiss,
+    )
+}
+
+/// Overlay a cursor-anchored context menu with zero or more cascading submenu panels,
+/// each positioned beside its parent menu and clamped inside `viewport_size`.
+#[allow(clippy::too_many_arguments)]
+pub fn with_context_menu_and_submenus<'a, M: Clone + 'a>(
+    base: impl Into<Element<'a, M>>,
+    open: bool,
+    anchor_x: f32,
+    anchor_y: f32,
+    viewport_size: Size,
+    menu_width: f32,
+    estimated_height: f32,
+    menu: impl Into<Element<'a, M>>,
+    submenus: Vec<(f32, f32, Element<'a, M>)>,
+    on_dismiss: M,
+) -> Element<'a, M> {
     if !open {
         return base.into();
     }
@@ -566,7 +658,44 @@ pub fn with_context_menu<'a, M: Clone + 'a>(
             left,
         });
 
-    stack![base.into(), dismiss_layer, positioned_menu]
+    let mut layers = vec![base.into(), dismiss_layer.into(), positioned_menu.into()];
+    let mut prev_left = left;
+    let mut prev_top = top;
+    let mut prev_w = menu_width;
+    let mut prev_clamped_h = estimated_height.min(max_h);
+    for (sub_w, sub_est_h, sub_el) in submenus {
+        let sub_left = if prev_left + prev_w + 4.0 + sub_w <= viewport_size.width - 8.0 {
+            prev_left + prev_w + 4.0
+        } else {
+            (prev_left - sub_w - 4.0).max(8.0)
+        };
+        let clamped_sub_h = sub_est_h.min(max_h);
+        let sub_top = (prev_top + prev_clamped_h - clamped_sub_h)
+            .clamp(8.0, (viewport_size.height - clamped_sub_h - 8.0).max(8.0));
+        let clamped_sub: Element<'a, M> = if sub_est_h > max_h {
+            scrollable(sub_el).height(Length::Fixed(max_h)).into()
+        } else {
+            container(sub_el).max_height(max_h).into()
+        };
+        let positioned_sub = container(opaque(clamped_sub))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Left)
+            .align_y(iced::alignment::Vertical::Top)
+            .padding(Padding {
+                top: sub_top,
+                right: 8.0,
+                bottom: 8.0,
+                left: sub_left,
+            });
+        layers.push(positioned_sub.into());
+        prev_left = sub_left;
+        prev_top = sub_top;
+        prev_w = sub_w;
+        prev_clamped_h = clamped_sub_h;
+    }
+
+    stack(layers)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

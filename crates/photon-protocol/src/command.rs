@@ -158,6 +158,9 @@ pub enum Command {
     SetTheme {
         theme: Theme,
     },
+    SetBackupMethod {
+        method: crate::BackupMethod,
+    },
     ToggleTheme,
     SetLanguage {
         language: Language,
@@ -789,6 +792,7 @@ impl Command {
             Self::SetWorkspace { .. } => "set_workspace",
             Self::WorkspaceBack => "workspace_back",
             Self::SetTheme { .. } => "set_theme",
+            Self::SetBackupMethod { .. } => "set_backup_method",
             Self::ToggleTheme => "toggle_theme",
             Self::SetLanguage { .. } => "set_language",
             Self::SetLayout { .. } => "set_layout",

@@ -17,8 +17,9 @@ use thiserror::Error;
 
 pub use bridge::{
     BrowserPluginResult, EditorPluginResult, PluginOutputMode, commit_browser_image_output,
-    resolve_models_dir_for, run_browser_plugin, run_browser_plugin_with_timeout, run_editor_plugin,
-    run_editor_plugin_with_timeout, run_jsonl_inference_streaming,
+    commit_browser_image_output_with_backup, resolve_models_dir_for, run_browser_plugin,
+    run_browser_plugin_with_timeout, run_editor_plugin, run_editor_plugin_with_timeout,
+    run_jsonl_inference_streaming,
 };
 pub use manifest::{
     LoadedPlugin, load_plugin_from_dir, resolve_safe_entry, validate_manifest, validate_plugin_id,

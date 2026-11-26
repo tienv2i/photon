@@ -2,7 +2,7 @@
 //! with Print Units (`px` / `cm` / `in` / `%`), DPI selection, source selection, and
 //! output/overwrite guardrails.
 
-use iced::widget::{checkbox, column, container, row, rule, slider, text, text_input};
+use iced::widget::{checkbox, column, container, pick_list, row, rule, slider, text, text_input};
 use iced::{Alignment, Element, Fill, Length};
 use photon_i18n::tr;
 use photon_protocol::{
@@ -17,7 +17,7 @@ use photon_ui::editor::{
 use photon_ui::icons::Icon;
 use photon_ui::theme::{
     PaletteTokens, TEXT_SIZE_CAPTION, TEXT_SIZE_CONTROL, card_style, hairline_rule_style,
-    input_style, slider_style,
+    input_style, pick_list_menu_style, pick_list_style, slider_style,
 };
 use photon_ui::tooltip::{TooltipPosition, with_tooltip_pos};
 
@@ -38,9 +38,19 @@ pub enum BatchDialogKind {
     Convert,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchInputMode {
+    Selection,
+    CurrentFolder,
+    CustomFolder,
+}
+
 #[derive(Debug, Clone)]
 pub enum BatchDialogMsg {
-    UseSelection(bool),
+    InputModeChanged(BatchInputMode),
+    InputFolderChanged(String),
+    PickInputFolder,
+    InputFolderPicked(Option<String>),
     BesideOriginals(bool),
     OutputFolderChanged(String),
     PickOutputFolder,
@@ -73,7 +83,8 @@ pub enum BatchDialogMsg {
 #[derive(Debug, Clone)]
 pub struct BatchDialogState {
     pub kind: BatchDialogKind,
-    pub use_selection: bool,
+    pub input_mode: BatchInputMode,
+    pub input_folder: String,
     pub beside_originals: bool,
     pub output_folder: String,
     pub suffix: String,
@@ -118,7 +129,12 @@ impl BatchDialogState {
         };
         Self {
             kind,
-            use_selection: has_selection_images,
+            input_mode: if has_selection_images {
+                BatchInputMode::Selection
+            } else {
+                BatchInputMode::CurrentFolder
+            },
+            input_folder: current_folder.unwrap_or_default().to_owned(),
             beside_originals: true,
             output_folder: current_folder.unwrap_or_default().to_owned(),
             suffix: default_suffix.to_owned(),
@@ -150,7 +166,13 @@ impl BatchDialogState {
     pub fn apply_msg(&mut self, msg: BatchDialogMsg) {
         self.error = None;
         match msg {
-            BatchDialogMsg::UseSelection(v) => self.use_selection = v,
+            BatchDialogMsg::InputModeChanged(m) => self.input_mode = m,
+            BatchDialogMsg::InputFolderChanged(v) => self.input_folder = v,
+            BatchDialogMsg::InputFolderPicked(Some(folder)) => {
+                self.input_folder = folder;
+                self.input_mode = BatchInputMode::CustomFolder;
+            }
+            BatchDialogMsg::PickInputFolder | BatchDialogMsg::InputFolderPicked(None) => {}
             BatchDialogMsg::BesideOriginals(v) => self.beside_originals = v,
             BatchDialogMsg::OutputFolderChanged(v) => self.output_folder = v,
             BatchDialogMsg::OutputFolderPicked(Some(folder)) => {
@@ -362,20 +384,32 @@ impl BatchDialogState {
             .filter(|e| e.is_image && snapshot.meta.selection.contains(&e.path))
             .map(|e| e.path.clone())
             .collect();
-        let source = if self.use_selection {
-            if selected_images.is_empty() {
-                return Err(tr(lang, "batch-no-images"));
+        let source = match self.input_mode {
+            BatchInputMode::Selection => {
+                if selected_images.is_empty() {
+                    return Err(tr(lang, "batch-no-images"));
+                }
+                BatchSource::Selection {
+                    paths: selected_images,
+                }
             }
-            BatchSource::Selection {
-                paths: selected_images,
+            BatchInputMode::CurrentFolder => {
+                let folder = snapshot
+                    .meta
+                    .current_folder
+                    .clone()
+                    .ok_or_else(|| tr(lang, "label-no-folder"))?;
+                BatchSource::Folder { path: folder }
             }
-        } else {
-            let folder = snapshot
-                .meta
-                .current_folder
-                .clone()
-                .ok_or_else(|| tr(lang, "label-no-folder"))?;
-            BatchSource::Folder { path: folder }
+            BatchInputMode::CustomFolder => {
+                let trimmed = self.input_folder.trim();
+                if trimmed.is_empty() {
+                    return Err(tr(lang, "label-no-folder"));
+                }
+                BatchSource::Folder {
+                    path: trimmed.to_owned(),
+                }
+            }
         };
 
         let folder = if self.beside_originals {
@@ -522,45 +556,82 @@ fn build_batch_dialog_for_kind<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
         .count();
     let folder_img_count = snapshot.entries.iter().filter(|e| e.is_image).count();
 
-    let source_section = container(
-        column![
-            text(tr(lang, "batch-source"))
-                .size(TEXT_SIZE_CONTROL)
-                .style(|theme| {
-                    let t = PaletteTokens::for_theme(theme);
-                    text::Style {
-                        color: Some(t.text_muted),
-                    }
-                }),
-            row![
-                button::labeled(
-                    format!(
-                        "{} ({selected_img_count})",
-                        tr(lang, "batch-source-selection")
-                    ),
-                    None,
-                    ButtonVariant::Tab {
-                        active: batch.use_selection,
-                    },
-                    (selected_img_count > 0)
-                        .then_some(BatchDialogAction::Msg(BatchDialogMsg::UseSelection(true))),
+    let mut source_col = column![
+        text(tr(lang, "batch-source"))
+            .size(TEXT_SIZE_CONTROL)
+            .style(|theme| {
+                let t = PaletteTokens::for_theme(theme);
+                text::Style {
+                    color: Some(t.text_muted),
+                }
+            }),
+        row![
+            button::labeled(
+                format!(
+                    "{} ({selected_img_count})",
+                    tr(lang, "batch-source-selection")
                 ),
-                button::labeled(
-                    format!("{} ({folder_img_count})", tr(lang, "batch-source-folder")),
-                    None,
-                    ButtonVariant::Tab {
-                        active: !batch.use_selection,
-                    },
-                    Some(BatchDialogAction::Msg(BatchDialogMsg::UseSelection(false))),
-                ),
-            ]
-            .spacing(6),
+                None,
+                ButtonVariant::Tab {
+                    active: batch.input_mode == BatchInputMode::Selection,
+                },
+                (selected_img_count > 0).then_some(BatchDialogAction::Msg(
+                    BatchDialogMsg::InputModeChanged(BatchInputMode::Selection)
+                )),
+            ),
+            button::labeled(
+                format!("{} ({folder_img_count})", tr(lang, "batch-source-folder")),
+                None,
+                ButtonVariant::Tab {
+                    active: batch.input_mode == BatchInputMode::CurrentFolder,
+                },
+                Some(BatchDialogAction::Msg(BatchDialogMsg::InputModeChanged(
+                    BatchInputMode::CurrentFolder
+                ))),
+            ),
+            button::labeled(
+                tr(lang, "batch-source-custom"),
+                None,
+                ButtonVariant::Tab {
+                    active: batch.input_mode == BatchInputMode::CustomFolder,
+                },
+                Some(BatchDialogAction::Msg(BatchDialogMsg::InputModeChanged(
+                    BatchInputMode::CustomFolder
+                ))),
+            ),
         ]
         .spacing(6),
-    )
-    .padding(10)
-    .width(Fill)
-    .style(card_style);
+    ]
+    .spacing(6);
+
+    if batch.input_mode == BatchInputMode::CustomFolder {
+        source_col = source_col.push(
+            row![
+                text_input("/path/to/input", &batch.input_folder)
+                    .on_input(|v| BatchDialogAction::Msg(BatchDialogMsg::InputFolderChanged(v)))
+                    .padding([6, 8])
+                    .size(TEXT_SIZE_CONTROL)
+                    .style(input_style)
+                    .width(Fill),
+                with_tooltip_pos(
+                    button::icon_only(
+                        Icon::FolderOpen,
+                        ButtonVariant::Secondary,
+                        Some(BatchDialogAction::Msg(BatchDialogMsg::PickInputFolder)),
+                    ),
+                    tr(lang, "batch-source-custom"),
+                    TooltipPosition::Top,
+                ),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        );
+    }
+
+    let source_section = container(source_col)
+        .padding(10)
+        .width(Fill)
+        .style(card_style);
 
     let op_section: Element<'a, BatchDialogAction<Id>> = match kind {
         BatchDialogKind::Resize => build_batch_resize_section(lang, batch),
@@ -674,10 +745,10 @@ fn build_batch_dialog_for_kind<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
         }));
     }
 
-    let can_run = if batch.use_selection {
-        selected_img_count > 0
-    } else {
-        folder_img_count > 0
+    let can_run = match batch.input_mode {
+        BatchInputMode::Selection => selected_img_count > 0,
+        BatchInputMode::CurrentFolder => folder_img_count > 0,
+        BatchInputMode::CustomFolder => !batch.input_folder.trim().is_empty(),
     };
 
     let footer = row![
@@ -791,47 +862,74 @@ fn build_batch_resize_section<'a, Id: Clone + 'a>(
         ],
     });
 
-    let mode_row = row![
-        button::labeled(
-            tr(lang, "mode-stretch"),
-            None,
-            ButtonVariant::Tab {
-                active: batch.resize_mode == ResizeMode::Stretch,
-            },
-            Some(BatchDialogAction::Msg(BatchDialogMsg::ResizeModeChanged(
-                ResizeMode::Stretch,
-            ))),
-        ),
-        button::labeled(
-            tr(lang, "mode-cover"),
-            None,
-            ButtonVariant::Tab {
-                active: batch.resize_mode == ResizeMode::Cover,
-            },
-            Some(BatchDialogAction::Msg(BatchDialogMsg::ResizeModeChanged(
-                ResizeMode::Cover,
-            ))),
-        ),
-        button::labeled(
-            tr(lang, "mode-pad"),
-            None,
-            ButtonVariant::Tab {
-                active: batch.resize_mode == ResizeMode::Pad,
-            },
-            Some(BatchDialogAction::Msg(BatchDialogMsg::ResizeModeChanged(
-                ResizeMode::Pad,
-            ))),
-        ),
-    ]
-    .spacing(4);
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct LabeledChoice<T: Copy + PartialEq> {
+        value: T,
+        label: &'static str,
+    }
+    impl<T: Copy + PartialEq> std::fmt::Display for LabeledChoice<T> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.label)
+        }
+    }
 
-    let filter_row = row![
-        filter_tab("Lanczos3", ResizeFilter::Lanczos3, batch.resize_filter),
-        filter_tab("CatmullRom", ResizeFilter::CatmullRom, batch.resize_filter),
-        filter_tab("Triangle", ResizeFilter::Triangle, batch.resize_filter),
-        filter_tab("Nearest", ResizeFilter::Nearest, batch.resize_filter),
-    ]
-    .spacing(4);
+    let mode_options = [
+        LabeledChoice {
+            value: ResizeMode::Stretch,
+            label: Box::leak(tr(lang, "mode-stretch").into_boxed_str()),
+        },
+        LabeledChoice {
+            value: ResizeMode::Cover,
+            label: Box::leak(tr(lang, "mode-cover").into_boxed_str()),
+        },
+        LabeledChoice {
+            value: ResizeMode::Pad,
+            label: Box::leak(tr(lang, "mode-pad").into_boxed_str()),
+        },
+    ];
+    let selected_mode = mode_options
+        .iter()
+        .find(|o| o.value == batch.resize_mode)
+        .copied();
+    let mode_picker = pick_list(mode_options, selected_mode, |o| {
+        BatchDialogAction::Msg(BatchDialogMsg::ResizeModeChanged(o.value))
+    })
+    .text_size(TEXT_SIZE_CONTROL)
+    .padding([5, 10])
+    .width(Fill)
+    .style(pick_list_style)
+    .menu_style(pick_list_menu_style);
+
+    let filter_options = [
+        LabeledChoice {
+            value: ResizeFilter::Lanczos3,
+            label: "Lanczos3",
+        },
+        LabeledChoice {
+            value: ResizeFilter::CatmullRom,
+            label: "CatmullRom",
+        },
+        LabeledChoice {
+            value: ResizeFilter::Triangle,
+            label: "Triangle",
+        },
+        LabeledChoice {
+            value: ResizeFilter::Nearest,
+            label: "Nearest",
+        },
+    ];
+    let selected_filter = filter_options
+        .iter()
+        .find(|o| o.value == batch.resize_filter)
+        .copied();
+    let filter_picker = pick_list(filter_options, selected_filter, |o| {
+        BatchDialogAction::Msg(BatchDialogMsg::ResizeFilterChanged(o.value))
+    })
+    .text_size(TEXT_SIZE_CONTROL)
+    .padding([5, 10])
+    .width(Fill)
+    .style(pick_list_style)
+    .menu_style(pick_list_menu_style);
 
     container(
         column![
@@ -840,40 +938,24 @@ fn build_batch_resize_section<'a, Id: Clone + 'a>(
             row![
                 column![
                     text(tr(lang, "label-resize-mode")).size(TEXT_SIZE_CAPTION),
-                    mode_row
+                    mode_picker
                 ]
                 .spacing(4)
                 .width(Fill),
-            ],
-            column![
-                text(tr(lang, "label-filter")).size(TEXT_SIZE_CAPTION),
-                filter_row
+                column![
+                    text(tr(lang, "label-filter")).size(TEXT_SIZE_CAPTION),
+                    filter_picker
+                ]
+                .spacing(4)
+                .width(Fill),
             ]
-            .spacing(4),
+            .spacing(10),
         ]
         .spacing(8),
     )
     .padding(10)
     .width(Fill)
     .style(card_style)
-    .into()
-}
-
-fn filter_tab<'a, Id: Clone + 'a>(
-    label: &'static str,
-    filter: ResizeFilter,
-    active_filter: ResizeFilter,
-) -> Element<'a, BatchDialogAction<Id>> {
-    button::labeled(
-        label,
-        None,
-        ButtonVariant::Tab {
-            active: filter == active_filter,
-        },
-        Some(BatchDialogAction::Msg(BatchDialogMsg::ResizeFilterChanged(
-            filter,
-        ))),
-    )
     .into()
 }
 
@@ -952,14 +1034,61 @@ fn build_batch_crop_section<'a, Id: Clone + 'a>(
     ]
     .spacing(6);
 
-    let ratio_row = row![
-        crop_ratio_chip("Free", None, batch.crop_ratio),
-        crop_ratio_chip("1:1", Some(1.0), batch.crop_ratio),
-        crop_ratio_chip("4:3", Some(4.0 / 3.0), batch.crop_ratio),
-        crop_ratio_chip("3:2", Some(1.5), batch.crop_ratio),
-        crop_ratio_chip("16:9", Some(16.0 / 9.0), batch.crop_ratio),
-    ]
-    .spacing(4);
+    #[derive(Clone, Copy)]
+    struct RatioPreset {
+        label: &'static str,
+        ratio: Option<f64>,
+    }
+    impl PartialEq for RatioPreset {
+        fn eq(&self, other: &Self) -> bool {
+            self.label == other.label
+        }
+    }
+    impl Eq for RatioPreset {}
+    impl std::fmt::Display for RatioPreset {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.label)
+        }
+    }
+
+    let ratio_options = [
+        RatioPreset {
+            label: "Free",
+            ratio: None,
+        },
+        RatioPreset {
+            label: "1:1",
+            ratio: Some(1.0),
+        },
+        RatioPreset {
+            label: "4:3",
+            ratio: Some(4.0 / 3.0),
+        },
+        RatioPreset {
+            label: "3:2",
+            ratio: Some(1.5),
+        },
+        RatioPreset {
+            label: "16:9",
+            ratio: Some(16.0 / 9.0),
+        },
+    ];
+    let selected_ratio = ratio_options
+        .iter()
+        .find(|o| match (o.ratio, batch.crop_ratio) {
+            (None, None) => true,
+            (Some(a), Some(b)) => (a - b).abs() < 0.01,
+            _ => false,
+        })
+        .copied();
+    let ratio_row = pick_list(ratio_options, selected_ratio, |o| {
+        BatchDialogAction::Msg(BatchDialogMsg::CropRatioChanged(o.ratio))
+    })
+    .text_size(TEXT_SIZE_CONTROL)
+    .padding([5, 10])
+    .width(Length::Fixed(160.0))
+    .style(pick_list_style)
+    .menu_style(pick_list_menu_style);
 
     let mut left_col = column![
         row![
@@ -995,50 +1124,33 @@ fn build_batch_crop_section<'a, Id: Clone + 'a>(
     .into()
 }
 
-fn crop_ratio_chip<'a, Id: Clone + 'a>(
-    label: &'static str,
-    ratio: Option<f64>,
-    current: Option<f64>,
-) -> Element<'a, BatchDialogAction<Id>> {
-    let active = match (ratio, current) {
-        (None, None) => true,
-        (Some(a), Some(b)) => (a - b).abs() < 0.01,
-        _ => false,
-    };
-    button::labeled(
-        label,
-        None,
-        ButtonVariant::Tab { active },
-        Some(BatchDialogAction::Msg(BatchDialogMsg::CropRatioChanged(
-            ratio,
-        ))),
-    )
-    .into()
-}
-
 fn build_batch_convert_section<'a, Id: Clone + 'a>(
     lang: photon_protocol::Language,
     batch: &'a BatchDialogState,
 ) -> Element<'a, BatchDialogAction<Id>> {
-    let mut row1 = row![].spacing(4);
-    let mut row2 = row![].spacing(4);
-    for (idx, fmt) in BatchImageFormat::ALL.iter().copied().enumerate() {
-        let btn = button::labeled(
-            fmt.label().to_ascii_uppercase(),
-            None,
-            ButtonVariant::Tab {
-                active: batch.convert_format == fmt,
-            },
-            Some(BatchDialogAction::Msg(
-                BatchDialogMsg::ConvertFormatChanged(fmt),
-            )),
-        );
-        if idx < 4 {
-            row1 = row1.push(btn);
-        } else {
-            row2 = row2.push(btn);
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct FormatChoice(BatchImageFormat);
+    impl std::fmt::Display for FormatChoice {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0.label().to_ascii_uppercase())
         }
     }
+
+    let format_options: Vec<FormatChoice> = BatchImageFormat::ALL
+        .iter()
+        .copied()
+        .map(FormatChoice)
+        .collect();
+    let format_picker = pick_list(
+        format_options,
+        Some(FormatChoice(batch.convert_format)),
+        |c| BatchDialogAction::Msg(BatchDialogMsg::ConvertFormatChanged(c.0)),
+    )
+    .text_size(TEXT_SIZE_CONTROL)
+    .padding([5, 10])
+    .width(Length::Fixed(180.0))
+    .style(pick_list_style)
+    .menu_style(pick_list_menu_style);
 
     let mut col = column![
         text(tr(lang, "label-format"))
@@ -1049,8 +1161,7 @@ fn build_batch_convert_section<'a, Id: Clone + 'a>(
                     color: Some(t.text_muted),
                 }
             }),
-        row1,
-        row2,
+        format_picker,
     ]
     .spacing(6);
 
@@ -1188,6 +1299,7 @@ mod tests {
                 remember_last_folder: true,
                 save_ui_state_on_exit: true,
                 hardware_acceleration: true,
+                backup_method: Default::default(),
                 viewer_index: None,
                 viewer_path: None,
                 viewer_count: 0,

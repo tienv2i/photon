@@ -120,14 +120,21 @@ pub fn details_table_row<'a, M: Clone + 'a>(
         }
 
         let cell_el: Element<'a, M> = if idx == 0 {
-            row![icons::render(icon, 16.0, None), cell_text]
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .width(cell_width(width))
-                .into()
+            row![
+                icons::render(icon, 16.0, None),
+                container(cell_text.width(Length::Fill))
+                    .width(Length::Fill)
+                    .clip(true),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .width(cell_width(width))
+            .clip(true)
+            .into()
         } else {
             container(cell_text)
                 .width(cell_width(width))
+                .clip(true)
                 .align_x(if align_right {
                     Horizontal::Right
                 } else {

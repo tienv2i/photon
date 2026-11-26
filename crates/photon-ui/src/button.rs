@@ -479,9 +479,7 @@ pub fn list_row<'a, M: Clone + 'a>(
     .align_y(Alignment::Center)
     .width(Length::Fill);
     if let Some(meta) = trailing {
-        r = r
-            .push(iced::widget::space::horizontal())
-            .push(text(meta).size(TEXT_SIZE_CAPTION));
+        r = r.push(text(meta).size(TEXT_SIZE_CAPTION));
     }
     let mut b = button(r)
         .padding([7, 10])

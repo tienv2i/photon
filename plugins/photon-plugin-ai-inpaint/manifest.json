@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "photon.ai_inpaint.onnx",
-  "name": "AI Watermark Remover (YOLO Detector + LaMa / MI-GAN)",
+  "name": "Watermark AI",
   "version": "2.0.0",
   "entry": {
     "command": "bin/photon-plugin-ai-inpaint",
@@ -54,14 +54,14 @@
     {
       "action": "editor.ai_inpaint",
       "workspace": "editor",
-      "label": "AI Watermark Remover (Detector + LaMa / MI-GAN)",
+      "label": "AI Watermark Remover",
       "output": "image"
     }
   ],
   "quickActions": [
     {
       "id": "ai-dewatermark-yolo26-migan",
-      "label": "AI Remove watermark (YOLO26 + MI-GAN — Fast)",
+      "label": "Remove watermark (Fast)",
       "action": "editor.ai_inpaint",
       "workspaces": [
         "browser",
@@ -76,7 +76,7 @@
     },
     {
       "id": "ai-dewatermark-yolo26-lama",
-      "label": "AI Remove watermark (YOLO26 + LaMa — High Quality)",
+      "label": "Remove watermark (HQ)",
       "action": "editor.ai_inpaint",
       "workspaces": [
         "browser",
@@ -91,7 +91,7 @@
     },
     {
       "id": "ai-dewatermark-yolo11-migan",
-      "label": "AI Remove watermark (YOLO11 + MI-GAN)",
+      "label": "Remove watermark (YOLO11)",
       "action": "editor.ai_inpaint",
       "workspaces": [
         "browser",

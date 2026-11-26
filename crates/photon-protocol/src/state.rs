@@ -191,6 +191,8 @@ pub struct UiStateMeta {
     #[serde(default = "crate::default_true")]
     pub save_ui_state_on_exit: bool,
     pub hardware_acceleration: bool,
+    #[serde(default)]
+    pub backup_method: crate::BackupMethod,
     pub viewer_index: Option<usize>,
     pub viewer_path: Option<String>,
     pub viewer_count: usize,

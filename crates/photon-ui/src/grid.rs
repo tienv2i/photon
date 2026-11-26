@@ -1,6 +1,8 @@
 //! Reusable responsive thumbnail grid and clickable breadcrumb bar.
 
-use iced::widget::{button, column, container, image, responsive, row, scrollable, text};
+use iced::widget::{
+    button, column, container, image, mouse_area, responsive, row, scrollable, text,
+};
 use iced::{Alignment, Border, ContentFit, Element, Length};
 
 use crate::button::{self as ui_button, ButtonVariant};
@@ -79,26 +81,41 @@ pub fn thumbnail_card<'a, M: Clone + 'a>(spec: GridCardSpec<M>, card_width: f32)
     };
 
     let mut meta_col = column![
-        text(spec.label)
-            .size(12)
-            .wrapping(text::Wrapping::None)
-            .style(|theme| {
-                let t = PaletteTokens::for_theme(theme);
-                text::Style {
-                    color: Some(t.text_primary),
-                }
-            }),
+        container(
+            text(spec.label)
+                .size(12)
+                .width(Length::Fill)
+                .wrapping(text::Wrapping::None)
+                .style(|theme| {
+                    let t = PaletteTokens::for_theme(theme);
+                    text::Style {
+                        color: Some(t.text_primary),
+                    }
+                })
+        )
+        .width(Length::Fill)
+        .clip(true),
     ]
     .spacing(2)
     .width(Length::Fill);
 
     if let Some(sub) = spec.subtitle {
-        meta_col = meta_col.push(text(sub).size(11).style(|theme| {
-            let t = PaletteTokens::for_theme(theme);
-            text::Style {
-                color: Some(t.text_muted),
-            }
-        }));
+        meta_col = meta_col.push(
+            container(
+                text(sub)
+                    .size(11)
+                    .width(Length::Fill)
+                    .wrapping(text::Wrapping::None)
+                    .style(|theme| {
+                        let t = PaletteTokens::for_theme(theme);
+                        text::Style {
+                            color: Some(t.text_muted),
+                        }
+                    }),
+            )
+            .width(Length::Fill)
+            .clip(true),
+        );
     }
 
     button(column![preview, meta_col].spacing(8).width(Length::Fill))
@@ -190,6 +207,7 @@ pub fn filmstrip_bar<'a, M: Clone + 'a>(
     items: Vec<FilmstripItem<M>>,
     scroll_id: iced::widget::Id,
     on_scroll: Option<Box<dyn Fn(scrollable::Viewport) -> M + 'a>>,
+    on_wheel: Option<Box<dyn Fn(iced::mouse::ScrollDelta) -> M + 'a>>,
 ) -> Element<'a, M> {
     let mut r = row![].spacing(6).align_y(Alignment::Center);
     for item in items {
@@ -241,8 +259,12 @@ pub fn filmstrip_bar<'a, M: Clone + 'a>(
         .direction(scrollable::Direction::Horizontal(
             scrollable::Scrollbar::default(),
         ));
-    let strip = match on_scroll {
-        Some(f) => strip.on_scroll(f),
+    let strip: Element<'a, M> = match on_scroll {
+        Some(f) => strip.on_scroll(f).into(),
+        None => strip.into(),
+    };
+    let strip: Element<'a, M> = match on_wheel {
+        Some(f) => mouse_area(strip).on_scroll(f).into(),
         None => strip,
     };
     container(strip)

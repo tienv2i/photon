@@ -501,6 +501,22 @@ pub fn commit_browser_image_output(
     input_path: &Path,
     temp_output: &Path,
 ) -> Result<PathBuf, PluginError> {
+    commit_browser_image_output_with_backup(
+        plugin_id,
+        action,
+        input_path,
+        temp_output,
+        photon_protocol::BackupMethod::Tilde,
+    )
+}
+
+pub fn commit_browser_image_output_with_backup(
+    plugin_id: &str,
+    action: &str,
+    input_path: &Path,
+    temp_output: &Path,
+    backup_method: photon_protocol::BackupMethod,
+) -> Result<PathBuf, PluginError> {
     if !temp_output.is_file() {
         return Err(PluginError::InvalidResponse {
             id: plugin_id.to_owned(),
@@ -527,8 +543,7 @@ pub fn commit_browser_image_output(
             .and_then(|s| s.to_str())
             .unwrap_or("image");
         let dest = input_path.with_file_name(format!("{stem}_nobg.png"));
-        let backup = create_numbered_backup_if_exists(&dest)?;
-        let _ = backup;
+        let _ = create_backup_for_method(&dest, backup_method)?;
         decoded
             .save_with_format(&dest, ImageFormat::Png)
             .map_err(|source| PluginError::Image {
@@ -538,7 +553,7 @@ pub fn commit_browser_image_output(
         return Ok(dest);
     }
 
-    let _ = create_numbered_backup_if_exists(input_path)?;
+    let _ = create_backup_for_method(input_path, backup_method)?;
     if action.starts_with("utils.") || input_ext == "png" {
         // `utils` writes exact target extension bytes, and PNG outputs can copy directly.
         if fs::copy(temp_output, input_path).is_err() {
@@ -564,22 +579,67 @@ pub fn commit_browser_image_output(
     Ok(input_path.to_path_buf())
 }
 
-fn create_numbered_backup_if_exists(path: &Path) -> Result<Option<PathBuf>, PluginError> {
+fn create_backup_for_method(
+    path: &Path,
+    method: photon_protocol::BackupMethod,
+) -> Result<Option<PathBuf>, PluginError> {
     if !path.exists() {
         return Ok(None);
     }
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
-    let first = path.with_file_name(format!("{name}~"));
-    let backup_path = if !first.exists() {
-        first
-    } else {
-        let mut idx = 2u32;
-        loop {
-            let candidate = path.with_file_name(format!("{name}.{idx}~"));
-            if !candidate.exists() {
-                break candidate;
+    let backup_path = match method {
+        photon_protocol::BackupMethod::Tilde => {
+            let first = path.with_file_name(format!("{name}~"));
+            if !first.exists() {
+                first
+            } else {
+                let mut idx = 2u32;
+                loop {
+                    let candidate = path.with_file_name(format!("{name}.{idx}~"));
+                    if !candidate.exists() {
+                        break candidate;
+                    }
+                    idx = idx.saturating_add(1);
+                }
             }
-            idx = idx.saturating_add(1);
+        }
+        photon_protocol::BackupMethod::DotBackup => {
+            let first = path.with_file_name(format!("{name}.backup"));
+            if !first.exists() {
+                first
+            } else {
+                let mut idx = 2u32;
+                loop {
+                    let candidate = path.with_file_name(format!("{name}.{idx}.backup"));
+                    if !candidate.exists() {
+                        break candidate;
+                    }
+                    idx = idx.saturating_add(1);
+                }
+            }
+        }
+        photon_protocol::BackupMethod::Folder => {
+            let backup_dir = path
+                .parent()
+                .map(|p| p.join(".photon_backup"))
+                .unwrap_or_else(|| PathBuf::from(".photon_backup"));
+            fs::create_dir_all(&backup_dir).map_err(|source| PluginError::Io {
+                context: format!("create backup dir {}", backup_dir.display()),
+                source,
+            })?;
+            let first = backup_dir.join(name);
+            if !first.exists() {
+                first
+            } else {
+                let mut idx = 2u32;
+                loop {
+                    let candidate = backup_dir.join(format!("{name}.{idx}"));
+                    if !candidate.exists() {
+                        break candidate;
+                    }
+                    idx = idx.saturating_add(1);
+                }
+            }
         }
     };
     fs::copy(path, &backup_path).map_err(|source| PluginError::Io {

@@ -7,6 +7,27 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+pub enum BackupMethod {
+    #[default]
+    Tilde,
+    DotBackup,
+    Folder,
+}
+
+impl BackupMethod {
+    pub const ALL: [Self; 3] = [Self::Tilde, Self::DotBackup, Self::Folder];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tilde => "tilde",
+            Self::DotBackup => "dot_backup",
+            Self::Folder => "folder",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum Language {
     #[default]
     System,
@@ -120,10 +141,11 @@ fn default_browser_right_panel_order() -> Vec<BrowserRightPanel> {
 pub enum ViewerRightPanel {
     ViewAdjustment,
     Info,
+    Translate,
 }
 
 impl ViewerRightPanel {
-    pub const ALL: [Self; 2] = [Self::ViewAdjustment, Self::Info];
+    pub const ALL: [Self; 3] = [Self::ViewAdjustment, Self::Info, Self::Translate];
 }
 
 fn default_viewer_right_panel_order() -> Vec<ViewerRightPanel> {
@@ -266,6 +288,8 @@ pub struct LayoutState {
     pub editor_right_width: u32,
     #[serde(default = "default_editor_right_split_pct")]
     pub editor_right_split_pct: u16,
+    #[serde(default = "default_editor_right_split_pct")]
+    pub viewer_right_split_pct: u16,
     #[serde(default = "default_browser_left_panel_order")]
     pub browser_left_panel_order: Vec<BrowserLeftPanel>,
     #[serde(default = "default_browser_right_panel_order")]
@@ -311,6 +335,7 @@ impl Default for LayoutState {
             right_width: 290,
             editor_right_width: default_editor_right_width(),
             editor_right_split_pct: default_editor_right_split_pct(),
+            viewer_right_split_pct: default_editor_right_split_pct(),
             browser_left_panel_order: default_browser_left_panel_order(),
             browser_right_panel_order: default_browser_right_panel_order(),
             viewer_right_panel_order: default_viewer_right_panel_order(),
@@ -347,6 +372,7 @@ impl LayoutState {
         self.right_width = self.right_width.clamp(200, 600);
         self.editor_right_width = self.editor_right_width.clamp(220, 560);
         self.editor_right_split_pct = self.editor_right_split_pct.clamp(20, 80);
+        self.viewer_right_split_pct = self.viewer_right_split_pct.clamp(20, 80);
         self.browser_left_panel_order =
             sanitize_panel_order(&self.browser_left_panel_order, &BrowserLeftPanel::ALL);
         self.browser_right_panel_order =
@@ -458,7 +484,11 @@ mod tests {
         );
         assert_eq!(
             layout.viewer_right_panel_order,
-            vec![ViewerRightPanel::ViewAdjustment, ViewerRightPanel::Info]
+            vec![
+                ViewerRightPanel::ViewAdjustment,
+                ViewerRightPanel::Info,
+                ViewerRightPanel::Translate
+            ]
         );
         assert_eq!(
             layout.editor_right_panel_order,
@@ -488,7 +518,11 @@ mod tests {
         );
         assert_eq!(
             clean.viewer_right_panel_order,
-            vec![ViewerRightPanel::ViewAdjustment, ViewerRightPanel::Info]
+            vec![
+                ViewerRightPanel::ViewAdjustment,
+                ViewerRightPanel::Info,
+                ViewerRightPanel::Translate
+            ]
         );
         assert_eq!(
             clean.editor_right_panel_order,
@@ -516,7 +550,11 @@ mod tests {
         );
         assert_eq!(
             layout.viewer_right_panel_order,
-            vec![ViewerRightPanel::Info, ViewerRightPanel::ViewAdjustment]
+            vec![
+                ViewerRightPanel::Info,
+                ViewerRightPanel::ViewAdjustment,
+                ViewerRightPanel::Translate
+            ]
         );
         assert_eq!(
             layout.editor_right_panel_order,

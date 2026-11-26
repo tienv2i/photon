@@ -87,6 +87,10 @@ lang-vietnamese = Tiếng Việt
 
 settings-title = Settings
 settings-section-general = Appearance & Language
+settings-backup-method = Backup Method
+backup-method-tilde = ~ suffix
+backup-method-dot = .backup
+backup-method-folder = Backup folder
 settings-section-viewer = Viewer & Launch Behavior
 settings-section-behavior = Session & Performance
 settings-theme = Appearance
@@ -147,6 +151,7 @@ label-height = Height (px)
 label-lock-aspect = Lock aspect ratio
 label-filter = Resample Filter
 label-presets = Aspect Ratio
+label-general-presets = Presets
 
 # Core UiText codes (kebab-case)
 ready = Ready
@@ -323,6 +328,7 @@ batch-convert = Batch Convert
 batch-source = Source
 batch-source-selection = Selected images
 batch-source-folder = Current folder
+batch-source-custom = Custom folder
 batch-output = Output
 batch-output-beside = Beside originals
 batch-output-folder = Output folder
@@ -902,6 +908,13 @@ translate-style-frosted = Frosted
 translate-style-solid = Solid
 translate-bubble-orig = Orig
 translate-bubble-trans = Trans
+panel-translate = Read & Translate
+translate-section-scan = Scan & Mode
+translate-section-ocr = OCR & Languages
+translate-section-display = Display & Bubbles
+translate-result-title = Result
+translate-history-title = History
+translate-select-full = Translate Full Image
 
 # Editor AI Tools
 tool-ai-rembg = Remove Background
@@ -953,6 +966,7 @@ action-generate-caption = Generate
 action-save-caption = Save .txt
 caption-placeholder = Generated caption or tags…
 action-plugin-settings-models = Settings & Models
+action-plugin-settings = Plugin Settings…
 action-translate-settings = Translation & OCR Settings
 
 # Stage 2B: Size Popups, Multi-tab Editor, Panel Options, Multi-Viewer

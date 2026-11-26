@@ -75,14 +75,14 @@ pub struct CurveGraphState {
     last_click: Option<(Instant, Point, usize)>,
 }
 
-/// Build the default 256×256 studio tonal curve widget wrapped in a themed frame.
+/// Build the default 360×360 studio tonal curve widget wrapped in a themed frame.
 pub fn curve_graph<'a, M: Clone + 'a>(
     points: Vec<[f32; 2]>,
     channel_color: Color,
     histogram: Option<Arc<[u32; 256]>>,
     on_event: impl Fn(CurveGraphEvent) -> M + 'a,
 ) -> Element<'a, M> {
-    curve_graph_sized(256.0, points, channel_color, histogram, on_event)
+    curve_graph_sized(360.0, points, channel_color, histogram, on_event)
 }
 
 /// Build a tonal curve widget with an explicit square plot side length in logical pixels.

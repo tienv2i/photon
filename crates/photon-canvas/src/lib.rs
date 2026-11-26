@@ -1941,13 +1941,13 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 self.tool,
                 CanvasTool::MarqueeRect | CanvasTool::MarqueeEllipse
             )
-            && let (Some(a), Some(b), Some(frame)) = (
+            && let (Some(a), Some(b), Some((doc_w, doc_h))) = (
                 state.select_anchor_px,
                 state.select_current_px,
-                self.frame.as_ref(),
+                self.effective_doc_size(),
             ) {
-            let fw = frame.width.max(1) as f32;
-            let fh = frame.height.max(1) as f32;
+            let fw = doc_w.max(1.0);
+            let fh = doc_h.max(1.0);
             let u0 = (a[0].min(b[0]) / fw).clamp(0.0, 1.0);
             let v0 = (a[1].min(b[1]) / fh).clamp(0.0, 1.0);
             let u1 = (a[0].max(b[0]) / fw).clamp(0.0, 1.0);

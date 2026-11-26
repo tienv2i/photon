@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "photon.utils",
-  "name": "Image Utilities (Non-AI)",
+  "name": "Image Utils",
   "version": "1.2.0",
   "entry": {
     "command": "bin/photon-plugin-utils",
@@ -17,20 +17,20 @@
     {
       "action": "utils.strip_exif",
       "workspace": "browser",
-      "label": "Strip EXIF / GPS metadata",
+      "label": "Strip EXIF / GPS",
       "output": "rgba_image"
     },
     {
       "action": "utils.optimize_size",
       "workspace": "browser",
-      "label": "Optimize file size",
+      "label": "Optimize size",
       "output": "rgba_image"
     }
   ],
   "quickActions": [
     {
       "id": "utils-strip-exif",
-      "label": "Strip EXIF / GPS metadata",
+      "label": "Strip EXIF / GPS",
       "action": "utils.strip_exif",
       "workspaces": [
         "browser",
@@ -40,7 +40,7 @@
     },
     {
       "id": "utils-optimize-size",
-      "label": "Optimize file size",
+      "label": "Optimize size",
       "action": "utils.optimize_size",
       "workspaces": [
         "browser",

@@ -13,8 +13,8 @@ use iced::{Alignment, Border, Color, Element, Length};
 use crate::button::{self as ui_button, ButtonVariant};
 use crate::icons::{self, Icon};
 use crate::theme::{
-    PaletteTokens, RADIUS_MD, RADIUS_SM, card_style, hairline_rule_style, slider_style,
-    surface_panel_style,
+    PaletteTokens, RADIUS_MD, RADIUS_SM, TEXT_SIZE_CAPTION, TEXT_SIZE_CONTROL, card_style,
+    hairline_rule_style, slider_style, surface_panel_style,
 };
 use crate::tooltip::{TooltipPosition, with_optional_tooltip};
 
@@ -435,7 +435,180 @@ pub fn kv_row<'a, M: 'a>(key: impl Into<String>, value: impl Into<String>) -> El
     .into()
 }
 
-/// Inline slider row: `label  [----o----]  < [value] >`.
+const STEPPER_DEFAULT_VALUE_WIDTH: f32 = 54.0;
+const STEPPER_COMPACT_CHAR_LIMIT: usize = 7;
+
+fn step_f32_value(value: f32, delta: f32, min_v: f32, max_v: f32) -> f32 {
+    let next = (value + delta).clamp(min_v, max_v);
+    if min_v <= 0.0 && max_v >= 0.0 && next.abs() < 1e-5 {
+        0.0
+    } else {
+        next
+    }
+}
+
+fn render_stepper_pill<'a, M: Clone + 'a>(
+    value_text: String,
+    value_width: Option<f32>,
+    on_decrement: Option<M>,
+    on_increment: Option<M>,
+) -> Element<'a, M> {
+    let step_btn = |sym: &'static str, on_press: Option<M>| {
+        let mut btn = button(text(sym).size(TEXT_SIZE_CAPTION))
+            .padding([2, 6])
+            .style(|theme, status| {
+                let t = PaletteTokens::for_theme(theme);
+                let (bg, fg, border_color) = match status {
+                    button::Status::Disabled => (
+                        t.bg_surface.scale_alpha(0.55),
+                        t.text_muted.scale_alpha(0.45),
+                        t.border.scale_alpha(0.6),
+                    ),
+                    button::Status::Hovered => (t.bg_hover, t.text_primary, t.border_strong),
+                    button::Status::Pressed => (t.bg_pressed, t.text_primary, t.accent),
+                    button::Status::Active => (t.bg_elevated, t.text_secondary, t.border),
+                };
+                button::Style {
+                    background: Some(bg.into()),
+                    text_color: fg,
+                    border: Border {
+                        color: border_color,
+                        width: 1.0,
+                        radius: RADIUS_SM.into(),
+                    },
+                    ..Default::default()
+                }
+            });
+        if let Some(msg) = on_press {
+            btn = btn.on_press(msg);
+        }
+        btn
+    };
+
+    let auto_fixed = value_width.or_else(|| {
+        (value_text.chars().count() <= STEPPER_COMPACT_CHAR_LIMIT)
+            .then_some(STEPPER_DEFAULT_VALUE_WIDTH)
+    });
+
+    let mut pill = container(
+        text(value_text)
+            .size(TEXT_SIZE_CAPTION)
+            .wrapping(text::Wrapping::None)
+            .style(|theme| {
+                let t = PaletteTokens::for_theme(theme);
+                text::Style {
+                    color: Some(t.text_primary),
+                }
+            }),
+    )
+    .padding([2, 6])
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .style(|theme| {
+        let t = PaletteTokens::for_theme(theme);
+        container::Style {
+            background: Some(t.bg_app.into()),
+            border: Border {
+                color: t.border,
+                width: 1.0,
+                radius: RADIUS_SM.into(),
+            },
+            ..Default::default()
+        }
+    });
+    if let Some(w) = auto_fixed {
+        pill = pill.width(Length::Fixed(w));
+    }
+
+    row![
+        step_btn("<", on_decrement),
+        pill,
+        step_btn(">", on_increment),
+    ]
+    .spacing(2)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// Reusable compact numeric stepper control: `< [value] >`.
+///
+/// Pass `None` for `on_decrement` / `on_increment` to visually disable the corresponding button
+/// at the minimum or maximum bound.
+pub fn numeric_stepper<'a, M: Clone + 'a>(
+    value_text: impl Into<String>,
+    on_decrement: Option<M>,
+    on_increment: Option<M>,
+) -> Element<'a, M> {
+    render_stepper_pill(value_text.into(), None, on_decrement, on_increment)
+}
+
+/// Specification for [`slider_stepper`]: a two-line slider + numeric stepper template.
+///
+/// - **Line 1**: `<Label>` on the left, `< [number] >` stepper pill on the right.
+/// - **Line 2**: Full-width slider (`Length::Fill`).
+pub struct SliderStepperSpec<'a, M> {
+    pub label: String,
+    pub value: f32,
+    pub range: std::ops::RangeInclusive<f32>,
+    pub step: f32,
+    pub value_text: String,
+    pub value_width: Option<f32>,
+    pub on_change: Box<dyn Fn(f32) -> M + 'a>,
+}
+
+/// Two-line slider + numeric stepper built from a [`SliderStepperSpec`].
+pub fn slider_stepper<'a, M: Clone + 'a>(spec: SliderStepperSpec<'a, M>) -> Element<'a, M> {
+    let min_v = *spec.range.start();
+    let max_v = *spec.range.end();
+    let safe_step = if spec.step.is_finite() && spec.step > 0.0 {
+        spec.step
+    } else {
+        1.0
+    };
+    let clamped_val = spec.value.clamp(min_v, max_v);
+    let cb = Rc::new(spec.on_change);
+    let cb_slider = Rc::clone(&cb);
+
+    let can_dec = clamped_val > min_v + 1e-6;
+    let can_inc = clamped_val < max_v - 1e-6;
+    let prev_val = step_f32_value(clamped_val, -safe_step, min_v, max_v);
+    let next_val = step_f32_value(clamped_val, safe_step, min_v, max_v);
+
+    let header = row![
+        text(spec.label)
+            .size(TEXT_SIZE_CONTROL)
+            .width(Length::Fill)
+            .style(|theme| {
+                let t = PaletteTokens::for_theme(theme);
+                text::Style {
+                    color: Some(t.text_secondary),
+                }
+            }),
+        render_stepper_pill(
+            spec.value_text,
+            spec.value_width,
+            can_dec.then(|| cb(prev_val)),
+            can_inc.then(|| cb(next_val)),
+        ),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .width(Length::Fill);
+
+    let slider_el = slider(spec.range, clamped_val, move |v| cb_slider(v))
+        .step(safe_step)
+        .style(slider_style)
+        .width(Length::Fill);
+
+    column![header, slider_el]
+        .spacing(4)
+        .width(Length::Fill)
+        .into()
+}
+
+/// Two-line slider + stepper row:
+/// - **Line 1**: `<Label>` on the left, `< [value] >` stepper on the right.
+/// - **Line 2**: Full-width slider (`Length::Fill`).
 pub fn slider_control_row<'a, M: Clone + 'a>(
     label: impl Into<String>,
     value: f32,
@@ -444,76 +617,82 @@ pub fn slider_control_row<'a, M: Clone + 'a>(
     value_text: impl Into<String>,
     on_change: impl Fn(f32) -> M + 'a,
 ) -> Element<'a, M> {
+    slider_stepper(SliderStepperSpec {
+        label: label.into(),
+        value,
+        range,
+        step,
+        value_text: value_text.into(),
+        value_width: None,
+        on_change: Box::new(on_change),
+    })
+}
+
+/// Semantic alias for [`slider_control_row`]: two-line `<Label>` + `< [number] >` stepper
+/// above a full-width `Length::Fill` slider.
+pub fn slider_stepper_row<'a, M: Clone + 'a>(
+    label: impl Into<String>,
+    value: f32,
+    range: std::ops::RangeInclusive<f32>,
+    step: f32,
+    value_text: impl Into<String>,
+    on_change: impl Fn(f32) -> M + 'a,
+) -> Element<'a, M> {
+    slider_control_row(label, value, range, step, value_text, on_change)
+}
+
+/// Integer (`i32`) variant of [`slider_stepper_row`] for discrete controls such as RGB channels,
+/// export quality, brush/padding pixel counts, and percentages.
+pub fn int_slider_stepper_row<'a, M: Clone + 'a>(
+    label: impl Into<String>,
+    value: i32,
+    range: std::ops::RangeInclusive<i32>,
+    step: i32,
+    value_text: impl Into<String>,
+    on_change: impl Fn(i32) -> M + 'a,
+) -> Element<'a, M> {
     let min_v = *range.start();
     let max_v = *range.end();
+    let safe_step = step.max(1);
+    let clamped_val = value.clamp(min_v, max_v);
     let cb = Rc::new(on_change);
     let cb_slider = Rc::clone(&cb);
-    let prev_val = (value - step).clamp(min_v, max_v);
-    let next_val = (value + step).clamp(min_v, max_v);
 
-    let step_btn = |sym: &'static str, msg: M| {
-        button(text(sym).size(11))
-            .padding([2, 6])
-            .style(|theme, status| {
-                let t = PaletteTokens::for_theme(theme);
-                let bg = if matches!(status, button::Status::Hovered) {
-                    t.bg_hover
-                } else {
-                    t.bg_surface
-                };
-                button::Style {
-                    background: Some(bg.into()),
-                    text_color: t.text_secondary,
-                    border: Border {
-                        color: t.border,
-                        width: 1.0,
-                        radius: RADIUS_SM.into(),
-                    },
-                    ..Default::default()
-                }
-            })
-            .on_press(msg)
-    };
+    let can_dec = clamped_val > min_v;
+    let can_inc = clamped_val < max_v;
+    let prev_val = clamped_val.saturating_sub(safe_step).clamp(min_v, max_v);
+    let next_val = clamped_val.saturating_add(safe_step).clamp(min_v, max_v);
 
-    row![
+    let header = row![
         text(label.into())
-            .size(12)
-            .width(Length::FillPortion(3))
+            .size(TEXT_SIZE_CONTROL)
+            .width(Length::Fill)
             .style(|theme| {
                 let t = PaletteTokens::for_theme(theme);
                 text::Style {
-                    color: Some(t.text_muted),
+                    color: Some(t.text_secondary),
                 }
             }),
-        slider(range, value, move |v| cb_slider(v))
-            .step(step)
-            .style(slider_style)
-            .width(Length::FillPortion(4)),
-        row![
-            step_btn("<", cb(prev_val)),
-            container(text(value_text.into()).size(11))
-                .padding([2, 6])
-                .style(|theme| {
-                    let t = PaletteTokens::for_theme(theme);
-                    container::Style {
-                        background: Some(t.bg_app.into()),
-                        border: Border {
-                            color: t.border,
-                            width: 1.0,
-                            radius: RADIUS_SM.into(),
-                        },
-                        ..Default::default()
-                    }
-                }),
-            step_btn(">", cb(next_val)),
-        ]
-        .spacing(2)
-        .align_y(Alignment::Center),
+        render_stepper_pill(
+            value_text.into(),
+            None,
+            can_dec.then(|| cb(prev_val)),
+            can_inc.then(|| cb(next_val)),
+        ),
     ]
-    .spacing(6)
+    .spacing(8)
     .align_y(Alignment::Center)
-    .width(Length::Fill)
-    .into()
+    .width(Length::Fill);
+
+    let slider_el = slider(range, clamped_val, move |v| cb_slider(v))
+        .step(safe_step)
+        .style(slider_style)
+        .width(Length::Fill);
+
+    column![header, slider_el]
+        .spacing(4)
+        .width(Length::Fill)
+        .into()
 }
 
 pub fn status_bar<'a, M: 'a>(
@@ -550,4 +729,31 @@ pub fn status_bar<'a, M: 'a>(
     ]
     .width(Length::Fill)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn step_f32_clamps_bounds_and_snaps_negative_zero() {
+        assert_eq!(step_f32_value(0.05, -0.05, -1.0, 1.0), 0.0);
+        assert_eq!(step_f32_value(-0.05, 0.05, -1.0, 1.0), 0.0);
+        assert_eq!(step_f32_value(0.0, -0.05, 0.0, 1.0), 0.0);
+        assert_eq!(step_f32_value(1.0, 0.05, 0.0, 1.0), 1.0);
+        assert!((step_f32_value(0.5, 0.1, 0.0, 1.0) - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn two_line_slider_stepper_helpers_build_elements() {
+        let _f32_row: Element<'_, f32> =
+            slider_control_row("Exposure", 0.0, -2.0..=2.0, 0.05, "0.00", |v| v);
+        let _alias_row: Element<'_, f32> =
+            slider_stepper_row("Opacity", 1.0, 0.0..=1.0, 0.05, "100%", |v| v);
+        let _int_row: Element<'_, i32> =
+            int_slider_stepper_row("Quality", 90, 10..=100, 5, "90%", |v| v);
+        let _stepper: Element<'_, i32> = numeric_stepper("100%", Some(95), None);
+        let _long_label_stepper: Element<'_, i32> =
+            numeric_stepper("Auto (100%)", Some(95), Some(105));
+    }
 }

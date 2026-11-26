@@ -14,6 +14,10 @@ use iced::{
 
 use crate::button::{self as ui_button, ButtonVariant};
 use crate::icons::{self, Icon};
+pub use crate::panel::{
+    SliderStepperSpec, int_slider_stepper_row, numeric_stepper, slider_control_row, slider_stepper,
+    slider_stepper_row,
+};
 use crate::theme::{
     PaletteTokens, RADIUS_MD, RADIUS_SM, TEXT_SIZE_CAPTION, TEXT_SIZE_CONTROL, input_style,
 };

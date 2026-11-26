@@ -517,6 +517,7 @@ pub struct PhotonGui {
     last_click: Option<(String, Instant)>,
     pub(crate) thumbnails: HashMap<String, iced_image::Handle>,
     thumbnails_loading: BTreeSet<String>,
+    pub(crate) browser_visible_range: Option<(usize, usize)>,
     pub(crate) editor_layer_thumbs: HashMap<u64, iced_image::Handle>,
     pub(crate) editor_mask_thumbs: HashMap<u64, iced_image::Handle>,
     pub(crate) zoom: f32,
@@ -819,6 +820,10 @@ pub enum Message {
     WebtoonScrolled(scrollable::Viewport),
     WebtoonPagesLoaded(Vec<(String, u32, u32, u32, u32, Vec<u8>)>),
     Browser(BrowserMessage),
+    BrowserVisibleRangeChanged {
+        start: usize,
+        end: usize,
+    },
     Viewer(ViewerMessage),
     Editor(EditorMessage),
     BrowserEntryActivated {
@@ -1200,6 +1205,7 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
         last_click: None,
         thumbnails: HashMap::new(),
         thumbnails_loading: BTreeSet::new(),
+        browser_visible_range: Some((0, BROWSER_INITIAL_VISIBLE_ENTRIES)),
         editor_layer_thumbs: HashMap::new(),
         editor_mask_thumbs: HashMap::new(),
         zoom: 1.0,
@@ -2494,6 +2500,8 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 state.webtoon_order.clear();
                 state.webtoon_scroll_y = 0.0;
                 state.webtoon_visible_index = None;
+                state.browser_visible_range = Some((0, BROWSER_INITIAL_VISIBLE_ENTRIES));
+                state.thumbnails_loading.clear();
                 tasks.push(schedule_missing_thumbnails(state));
             }
             if viewer_changed {
@@ -3909,7 +3917,23 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     .thumbnails
                     .insert(path, iced_image::Handle::from_rgba(w, h, rgba));
             }
-            Task::none()
+            // Top up free in-flight slots for the current view/visible range.
+            if state.snapshot.meta.workspace == Workspace::Browser
+                || state.snapshot.meta.workspace == Workspace::Viewer
+                || state.snapshot.meta.viewer_archive.is_some()
+            {
+                schedule_missing_thumbnails(state)
+            } else {
+                Task::none()
+            }
+        }
+        Message::BrowserVisibleRangeChanged { start, end } => {
+            let next = (start, end);
+            if state.browser_visible_range == Some(next) {
+                return Task::none();
+            }
+            state.browser_visible_range = Some(next);
+            schedule_missing_thumbnails(state)
         }
         Message::ViewerImageSizesProbed(items) => {
             let mut changed = false;
@@ -12004,6 +12028,9 @@ fn map_browser_message(msg: BrowserMessage) -> Message {
         BrowserMessage::OpenInViewerWindow(p) => Message::OpenInViewerWindow(p),
         BrowserMessage::OpenExternally(p) => Message::OpenExternally(p),
         BrowserMessage::EditPath(p) => Message::BrowserEditPath(p),
+        BrowserMessage::VisibleRangeChanged { start, end } => {
+            Message::BrowserVisibleRangeChanged { start, end }
+        }
     }
 }
 
@@ -13338,6 +13365,31 @@ fn load_folder_children_task(core: CoreHandle, path: String) -> Task<Message> {
 
 const ARCHIVE_THUMB_WINDOW_BEFORE: usize = 10;
 const ARCHIVE_THUMB_WINDOW_AFTER: usize = 18;
+/// Viewer page probe radius (both sides) for non-archive images.
+const VIEWER_PROBE_RADIUS: usize = 8;
+/// Thumbnail prefetch radius around the active standalone-viewer page.
+const VIEWER_THUMB_RADIUS: usize = 8;
+/// Webtoon thumbnail window: before the active page and after it (inclusive).
+const WEBTOON_THUMB_BEFORE: usize = 4;
+const WEBTOON_THUMB_AFTER: usize = 11;
+/// Entries scheduled for thumbnails on the first browser paint (~2 screens).
+const BROWSER_INITIAL_VISIBLE_ENTRIES: usize = 120;
+/// Maximum number of thumbnail jobs in flight at once.
+const THUMBNAIL_MAX_IN_FLIGHT: usize = 24;
+/// Hard cap for retained thumbnail textures; evicted ones are re-requested
+/// when the visible range changes.
+const THUMBNAIL_CACHE_MAX: usize = 512;
+
+/// Pure half-open index window around `center`, clamped to `0..len`.
+fn probe_window(len: usize, center: usize, before: usize, after: usize) -> std::ops::Range<usize> {
+    if len == 0 {
+        return 0..0;
+    }
+    let c = center.min(len - 1);
+    let start = c.saturating_sub(before);
+    let end = c.saturating_add(after).saturating_add(1).min(len);
+    start..end
+}
 
 fn archive_thumbnail_window_indices(
     total: usize,
@@ -13368,76 +13420,153 @@ fn archive_thumbnail_window_indices(
     indices
 }
 
-fn schedule_missing_thumbnails(state: &mut PhotonGui) -> Task<Message> {
-    let is_archive = state.snapshot.meta.viewer_archive.is_some();
-    if state.thumbnails.len() > 256 {
-        let mut keep: BTreeSet<&str> = state
-            .snapshot
-            .entries
-            .iter()
-            .map(|e| e.path.as_str())
-            .collect();
-        if is_archive {
-            let center = state.snapshot.meta.viewer_index.unwrap_or(0);
-            for idx in
-                archive_thumbnail_window_indices(state.snapshot.viewer_images.len(), center, 32, 32)
-            {
-                if let Some(p) = state.snapshot.viewer_images.get(idx) {
-                    keep.insert(p.as_str());
-                }
-            }
+fn browser_visible_entry_range(state: &PhotonGui) -> std::ops::Range<usize> {
+    let len = state.snapshot.entries.len();
+    if len == 0 {
+        return 0..0;
+    }
+    let (start, end) = state
+        .browser_visible_range
+        .unwrap_or((0, BROWSER_INITIAL_VISIBLE_ENTRIES));
+    let start = start.min(len);
+    let end = end.min(len).max(start);
+    start..end
+}
+
+/// Bounded thumbnail window for a non-archive viewer. Webtoon uses its
+/// near-page window; single/double share a small radius around the active page.
+fn viewer_thumbnail_window(state: &PhotonGui) -> std::ops::Range<usize> {
+    let total = state.snapshot.viewer_images.len();
+    let center = state.snapshot.meta.viewer_index.unwrap_or(0);
+    if state.viewer_mode == ViewerViewMode::Webtoon {
+        if total <= 24 {
+            0..total
         } else {
-            keep.extend(state.snapshot.viewer_images.iter().map(String::as_str));
+            probe_window(total, center, WEBTOON_THUMB_BEFORE, WEBTOON_THUMB_AFTER)
         }
-        state.thumbnails.retain(|k, _| keep.contains(k.as_str()));
+    } else {
+        probe_window(total, center, VIEWER_THUMB_RADIUS, VIEWER_THUMB_RADIUS)
     }
+}
 
-    let mut pending: Vec<String> = Vec::new();
-    if !is_archive || state.snapshot.meta.workspace == Workspace::Browser {
-        let mut browser_pending: Vec<String> = state
-            .snapshot
-            .entries
-            .iter()
-            .filter(|e| e.is_image)
-            .map(|e| e.path.clone())
-            .filter(|p| {
-                !state.thumbnails.contains_key(p) && state.thumbnails_loading.insert(p.clone())
-            })
-            .collect();
-        browser_pending.sort();
-        browser_pending.dedup();
-        pending.extend(browser_pending);
+/// Paths that survive a thumbnail-cache prune: in-flight first (never pruned),
+/// then the browser visible range, viewer window, and current selection.
+fn thumbnail_keep_paths(state: &PhotonGui) -> Vec<String> {
+    let mut ordered: Vec<String> = state.thumbnails_loading.iter().cloned().collect();
+    if state.snapshot.meta.workspace == Workspace::Browser {
+        let range = browser_visible_entry_range(state);
+        for entry in &state.snapshot.entries[range] {
+            if entry.is_image {
+                ordered.push(entry.path.clone());
+            }
+        }
     }
-
-    if is_archive {
+    if state.snapshot.meta.viewer_archive.is_some() {
         let center = state.snapshot.meta.viewer_index.unwrap_or(0);
-        let indices = archive_thumbnail_window_indices(
+        for idx in archive_thumbnail_window_indices(
             state.snapshot.viewer_images.len(),
             center,
             ARCHIVE_THUMB_WINDOW_BEFORE,
             ARCHIVE_THUMB_WINDOW_AFTER,
-        );
-        for idx in indices {
-            if let Some(p) = state.snapshot.viewer_images.get(idx)
-                && !state.thumbnails.contains_key(p)
-                && state.thumbnails_loading.insert(p.clone())
-            {
-                pending.push(p.clone());
+        ) {
+            if let Some(p) = state.snapshot.viewer_images.get(idx) {
+                ordered.push(p.clone());
             }
         }
     } else {
-        let mut viewer_pending: Vec<String> = state
-            .snapshot
-            .viewer_images
+        for idx in viewer_thumbnail_window(state) {
+            if let Some(p) = state.snapshot.viewer_images.get(idx) {
+                ordered.push(p.clone());
+            }
+        }
+    }
+    ordered.extend(state.snapshot.meta.selection.iter().cloned());
+    ordered
+}
+
+fn thumbnail_keep_set(
+    ordered: &[String],
+    loading: &BTreeSet<String>,
+    cap: usize,
+) -> BTreeSet<String> {
+    let mut keep: BTreeSet<String> = BTreeSet::new();
+    for path in ordered {
+        if keep.len() >= cap && !loading.contains(path) {
+            continue;
+        }
+        keep.insert(path.clone());
+    }
+    keep
+}
+
+fn prune_thumbnails(state: &mut PhotonGui) {
+    if state.thumbnails.len() <= THUMBNAIL_CACHE_MAX {
+        return;
+    }
+    let ordered = thumbnail_keep_paths(state);
+    let keep = thumbnail_keep_set(&ordered, &state.thumbnails_loading, THUMBNAIL_CACHE_MAX);
+    state.thumbnails.retain(|k, _| keep.contains(k.as_str()));
+}
+
+/// Add candidates until the in-flight cap is reached. Candidates already
+/// cached or loading are skipped so repeated syncs are cheap.
+fn queue_thumbnail_candidates(
+    state: &mut PhotonGui,
+    candidates: impl IntoIterator<Item = String>,
+    pending: &mut Vec<String>,
+) {
+    for path in candidates {
+        if state.thumbnails_loading.len() >= THUMBNAIL_MAX_IN_FLIGHT {
+            break;
+        }
+        if state.thumbnails.contains_key(&path) {
+            continue;
+        }
+        if !state.thumbnails_loading.insert(path.clone()) {
+            continue;
+        }
+        pending.push(path);
+    }
+}
+
+fn schedule_missing_thumbnails(state: &mut PhotonGui) -> Task<Message> {
+    let is_archive = state.snapshot.meta.viewer_archive.is_some();
+    prune_thumbnails(state);
+
+    let workspace = state.snapshot.meta.workspace;
+    let mut pending: Vec<String> = Vec::new();
+
+    // Browser: only the entries currently inside the viewport (plus overscan).
+    if workspace == Workspace::Browser {
+        let range = browser_visible_entry_range(state);
+        let candidates: Vec<String> = state.snapshot.entries[range]
             .iter()
-            .filter(|p| {
-                !state.thumbnails.contains_key(*p) && state.thumbnails_loading.insert((*p).clone())
-            })
+            .filter(|e| e.is_image)
+            .map(|e| e.path.clone())
+            .collect();
+        queue_thumbnail_candidates(state, candidates, &mut pending);
+    }
+
+    if is_archive {
+        let center = state.snapshot.meta.viewer_index.unwrap_or(0);
+        let candidates: Vec<String> = archive_thumbnail_window_indices(
+            state.snapshot.viewer_images.len(),
+            center,
+            ARCHIVE_THUMB_WINDOW_BEFORE,
+            ARCHIVE_THUMB_WINDOW_AFTER,
+        )
+        .into_iter()
+        .filter_map(|idx| state.snapshot.viewer_images.get(idx))
+        .cloned()
+        .collect();
+        queue_thumbnail_candidates(state, candidates, &mut pending);
+    } else if workspace == Workspace::Viewer {
+        // Never enqueue the whole folder for a standalone Viewer.
+        let candidates: Vec<String> = viewer_thumbnail_window(state)
+            .filter_map(|idx| state.snapshot.viewer_images.get(idx))
             .cloned()
             .collect();
-        viewer_pending.sort();
-        viewer_pending.dedup();
-        pending.extend(viewer_pending);
+        queue_thumbnail_candidates(state, candidates, &mut pending);
     }
 
     if pending.is_empty() {
@@ -13533,15 +13662,27 @@ fn window_size_for_image(snap: &UiStateSnapshot, img_w: u32, img_h: u32) -> Size
 
 fn probe_viewer_image_sizes(state: &mut PhotonGui) -> Task<Message> {
     let is_archive = state.snapshot.meta.viewer_archive.is_some();
-    for path in &state.snapshot.viewer_images {
-        if !state.image_sizes.contains_key(path)
-            && (!is_archive || Path::new(path).exists())
-            && let Some(dims) = photon_image::probe_dimensions(Path::new(path))
-        {
-            state.image_sizes.insert(path.clone(), dims);
-        }
+    let total = state.snapshot.viewer_images.len();
+    if total == 0 {
+        return Task::none();
     }
-    if !is_archive || state.snapshot.viewer_images.is_empty() {
+    if !is_archive {
+        // Browser only probes when a viewer image will actually be shown
+        // (e.g. the preview); never walk every sibling in a large folder.
+        if state.snapshot.meta.workspace == Workspace::Browser
+            && state.snapshot.meta.viewer_path.is_none()
+        {
+            return Task::none();
+        }
+        let center = state.snapshot.meta.viewer_index.unwrap_or(0);
+        let range = probe_window(total, center, VIEWER_PROBE_RADIUS, VIEWER_PROBE_RADIUS);
+        for path in &state.snapshot.viewer_images[range] {
+            if !state.image_sizes.contains_key(path)
+                && let Some(dims) = photon_image::probe_dimensions(Path::new(path))
+            {
+                state.image_sizes.insert(path.clone(), dims);
+            }
+        }
         return Task::none();
     }
     let center = state.snapshot.meta.viewer_index.unwrap_or(0);
@@ -16043,6 +16184,41 @@ mod tests {
         assert_eq!(start.len(), 19);
         assert!(start.iter().all(|&i| i < 19));
         assert!(archive_thumbnail_window_indices(0, 0, 10, 18).is_empty());
+    }
+
+    #[test]
+    fn probe_window_is_bounded_and_clamped() {
+        assert_eq!(probe_window(0, 0, 8, 8), 0..0);
+        assert_eq!(probe_window(20, 10, 3, 3), 7..14);
+        // Clamps at both edges instead of wrapping.
+        assert_eq!(probe_window(20, 0, 8, 8), 0..9);
+        assert_eq!(probe_window(20, 19, 8, 8), 11..20);
+        // Center beyond the end is clamped to the last index.
+        assert_eq!(probe_window(20, 999, 2, 2), 17..20);
+        // Window never exceeds the folder, regardless of radius.
+        assert_eq!(probe_window(5, 2, 100, 100), 0..5);
+    }
+
+    #[test]
+    fn thumbnail_keep_set_caps_cache_but_preserves_loading() {
+        let ordered: Vec<String> = ["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let loading: BTreeSet<String> = ["d".to_owned()].into_iter().collect();
+        let keep = thumbnail_keep_set(&ordered, &loading, 2);
+        // First two priorities fill the cap; in-flight `d` is never pruned.
+        assert!(keep.contains("a"));
+        assert!(keep.contains("b"));
+        assert!(keep.contains("d"));
+        assert!(!keep.contains("c"));
+        assert!(!keep.contains("e"));
+
+        // Without loading paths the cap is a strict prefix.
+        let keep = thumbnail_keep_set(&ordered, &BTreeSet::new(), 3);
+        assert_eq!(keep.len(), 3);
+        assert!(keep.contains("c"));
+        assert!(!keep.contains("d"));
     }
 
     #[test]

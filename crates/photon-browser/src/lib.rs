@@ -172,6 +172,10 @@ pub enum BrowserMessage {
     OpenInViewerWindow(String),
     OpenExternally(String),
     EditPath(String),
+    VisibleRangeChanged {
+        start: usize,
+        end: usize,
+    },
 }
 
 pub fn build_browser_toolbar<'a>(
@@ -931,6 +935,90 @@ fn build_browser_filter_bar(
     .into()
 }
 
+/// Number of extra rows rendered outside the viewport when reporting the
+/// visible range, so thumbnails are ready before they scroll into view.
+const VISIBLE_OVERSCAN_ROWS: usize = 2;
+/// Approximate extra height of a grid card below its preview (padding + label).
+const GRID_CARD_META_HEIGHT: f32 = 56.0;
+/// Grid content top padding used by `build_browser_grid`.
+const GRID_CONTENT_TOP: f32 = 12.0;
+/// Approximate list row height (row button + column spacing).
+const LIST_ROW_HEIGHT: f32 = 35.0;
+/// List content top padding used by `build_browser_list`.
+const LIST_CONTENT_TOP: f32 = 8.0;
+
+/// Pure geometry helper: map a vertical scroll offset + viewport height to a
+/// half-open range of entry indices for a fixed-height linear list.
+pub fn visible_linear_range(
+    offset_y: f32,
+    viewport_height: f32,
+    row_height: f32,
+    content_top: f32,
+    len: usize,
+    overscan_rows: usize,
+) -> (usize, usize) {
+    if len == 0 {
+        return (0, 0);
+    }
+    let row_height = row_height.max(1.0);
+    let content_top = content_top.max(0.0);
+    let first_row = ((offset_y - content_top).max(0.0) / row_height).floor() as usize;
+    let last_row = (((offset_y + viewport_height.max(0.0) - content_top).max(0.0)) / row_height)
+        .ceil() as usize;
+    let start_row = first_row.saturating_sub(overscan_rows);
+    let end_row = (last_row + overscan_rows + 1).max(start_row + 1);
+    let start = start_row.min(len);
+    let end = end_row.min(len).max(start);
+    (start, end)
+}
+
+/// Pure geometry helper for the responsive grid. `cols` is the number of cards
+/// per row and `card_width` the resolved card width used by the layout.
+pub fn grid_visible_range(
+    offset_y: f32,
+    viewport_height: f32,
+    card_width: f32,
+    cols: usize,
+    gap: f32,
+    len: usize,
+    overscan_rows: usize,
+) -> (usize, usize) {
+    if len == 0 || cols == 0 {
+        return (0, 0);
+    }
+    let preview_height = (card_width * 0.72).clamp(96.0, 170.0);
+    let tile_height = preview_height + GRID_CARD_META_HEIGHT;
+    let row_height = (tile_height + gap).max(1.0);
+    let (start_row, end_row) = visible_linear_range(
+        offset_y,
+        viewport_height,
+        row_height,
+        GRID_CONTENT_TOP,
+        len.div_ceil(cols),
+        overscan_rows,
+    );
+    let start = (start_row * cols).min(len);
+    let end = (end_row * cols).min(len).max(start);
+    (start, end)
+}
+
+/// Pure geometry helper for the list view.
+pub fn list_visible_range(
+    offset_y: f32,
+    viewport_height: f32,
+    len: usize,
+    overscan_rows: usize,
+) -> (usize, usize) {
+    visible_linear_range(
+        offset_y,
+        viewport_height,
+        LIST_ROW_HEIGHT,
+        LIST_CONTENT_TOP,
+        len,
+        overscan_rows,
+    )
+}
+
 fn build_browser_grid<'a>(
     state: BrowserViewState<'_>,
     entries: &[&Entry],
@@ -964,6 +1052,7 @@ fn build_browser_grid<'a>(
         .collect();
     let min_w = thumb_card_min_width(state.snapshot.meta.layout.browser_thumb_size);
     let gap = 10.0_f32;
+    let total = entries.len();
 
     responsive(move |bounds| {
         let usable = (bounds.width - 24.0).max(min_w);
@@ -987,8 +1076,21 @@ fn build_browser_grid<'a>(
             grid_col = grid_col.push(r);
         }
         scrollable(grid_col)
+            .id(Id::new("browser-grid-scroll"))
             .width(Length::Fill)
             .height(Length::Fill)
+            .on_scroll(move |viewport| {
+                let (start, end) = grid_visible_range(
+                    viewport.absolute_offset().y,
+                    viewport.bounds().height,
+                    card_width,
+                    cols,
+                    gap,
+                    total,
+                    VISIBLE_OVERSCAN_ROWS,
+                );
+                BrowserMessage::VisibleRangeChanged { start, end }
+            })
             .into()
     })
     .width(Length::Fill)
@@ -1029,7 +1131,20 @@ fn build_browser_list<'a>(
             },
         ));
     }
-    scrollable(col).height(Fill).into()
+    let total = entries.len();
+    scrollable(col)
+        .id(Id::new("browser-list-scroll"))
+        .height(Fill)
+        .on_scroll(move |viewport| {
+            let (start, end) = list_visible_range(
+                viewport.absolute_offset().y,
+                viewport.bounds().height,
+                total,
+                VISIBLE_OVERSCAN_ROWS,
+            );
+            BrowserMessage::VisibleRangeChanged { start, end }
+        })
+        .into()
 }
 
 fn build_browser_details<'a>(
@@ -2379,5 +2494,34 @@ mod tests {
         ));
 
         assert!(compile_browser_filter_regex("[unclosed", false).is_err());
+    }
+
+    #[test]
+    fn visible_linear_range_clamps_and_overscans() {
+        assert_eq!(visible_linear_range(0.0, 0.0, 35.0, 8.0, 0, 2), (0, 0));
+        // First screen of 100 rows: ~10 visible + 2 overscan + 1 partial.
+        let (start, end) = visible_linear_range(0.0, 350.0, 35.0, 8.0, 100, 2);
+        assert_eq!(start, 0);
+        assert!(end > 10 && end < 20, "unexpected end {end}");
+        // Scrolled to the bottom: range clamps to len.
+        let (start, end) = visible_linear_range(10_000.0, 350.0, 35.0, 8.0, 100, 2);
+        assert!(start <= end);
+        assert_eq!(end, 100);
+    }
+
+    #[test]
+    fn grid_visible_range_covers_rows_and_clamps() {
+        let (start, end) = grid_visible_range(0.0, 600.0, 180.0, 4, 10.0, 100, 2);
+        assert_eq!(start, 0);
+        assert!(end > 4 && end <= 100);
+        assert_eq!(end % 4, 0);
+        assert_eq!(
+            grid_visible_range(0.0, 600.0, 180.0, 0, 10.0, 100, 2),
+            (0, 0)
+        );
+        assert_eq!(grid_visible_range(0.0, 600.0, 180.0, 4, 10.0, 0, 2), (0, 0));
+        let (start, end) = grid_visible_range(100_000.0, 600.0, 180.0, 4, 10.0, 7, 2);
+        assert!(start <= end);
+        assert_eq!(end, 7);
     }
 }

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AiModelStatus, AiQuickAction, AiSettings, AiTaskState, BatchState, Language, LayerSummary,
-    LayoutState, PluginInfo, SavedTranslation, Theme, TranslateSettings, TranslationResult, UiText,
-    Workspace, default_one_f32,
+    LayoutState, PluginInfo, SavedTranslation, TextLayerData, Theme, TranslateSettings,
+    TranslationResult, UiText, VectorLayerData, Workspace, default_one_f32,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -105,6 +105,10 @@ pub struct EditorState {
     pub adjustments: ColorAdjustments,
     #[serde(default)]
     pub selection: EditorSelectionSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_vector_data: Option<VectorLayerData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_text_data: Option<TextLayerData>,
 }
 
 /// Compact summary of one open Editor document tab published in `UiStateMeta`.

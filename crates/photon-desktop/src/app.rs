@@ -27,7 +27,8 @@ use photon_protocol::{
     Language, LayerEffect, LayerTransformSpec, LiquifyMode, LiveStrokeKind, MoveDirection,
     PluginCapability, PluginInfo, PluginParamKind, PluginParamSpec, PluginParamValue, Query,
     ResizeFilter, ResizeMode, SelectionBooleanOp, SelectionModifyOp, SelectionShape, SortOrder,
-    SystemOpenWindowMode, Theme, TranslateProvider, TranslateSettings, UiStateSnapshot, UiText,
+    SystemOpenWindowMode, Theme, TransformEachSpec, TranslateProvider, TranslateSettings,
+    UiStateSnapshot, UiText, VectorBlendSpec, VectorLayerData, VectorPathOperation,
     ViewerRightPanel, ViewerViewMode, ViewportDenoiseMode, WebtoonFitMode, Workspace,
 };
 use photon_ui::button::{self, ButtonVariant};
@@ -81,7 +82,9 @@ use photon_editor::{
     WatermarkTab, apply_target_control, build_color_picker_dialog, build_editor_add_layer_menu,
     build_editor_canvas_context_menu, build_editor_layer_context_menu,
     build_editor_plugins_menu_entries, build_editor_tab_context_menu, build_editor_toolbar,
-    build_editor_view, build_export_dialog, crop_uv_to_signed, default_curves, format_hex,
+    build_editor_vector_menu_entries, build_editor_view, build_export_dialog,
+    build_export_vector_svg_dialog, build_transform_each_dialog, build_vector_blend_dialog,
+    build_vector_shape_from_draw_commit, crop_uv_to_signed, default_curves, format_hex,
     parse_hex_rgb, rgb_to_color, slider_stepper_control,
 };
 use photon_protocol::DisplayFont;
@@ -160,6 +163,7 @@ pub(crate) enum ActiveMenu {
     EditorEdit,
     EditorImage,
     EditorLayer,
+    EditorVector,
     EditorFilter,
     EditorPlugins,
     EditorSelect,
@@ -200,6 +204,9 @@ pub enum DesktopDialogId {
     PluginParams,
     PluginModels,
     TranslateSettings,
+    TransformEach,
+    VectorBlend,
+    ExportVectorSvg,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -471,6 +478,16 @@ pub(crate) enum InAppDialog {
         plugin_id: String,
     },
     TranslateSettings,
+    TransformEach {
+        spec: TransformEachSpec,
+    },
+    VectorBlend {
+        spec: VectorBlendSpec,
+    },
+    ExportVectorSvg {
+        path: String,
+        error: Option<String>,
+    },
     Alert {
         id: DesktopDialogId,
         title: String,
@@ -1094,6 +1111,8 @@ pub enum Message {
     CopyText(String),
     ViewerTranslate(ViewerMessage),
     EditorAi(EditorMessage),
+    EditorVectorText(EditorMessage),
+    ExportVectorSvgPathPicked(Option<PathBuf>),
     Noop,
 }
 
@@ -2117,6 +2136,15 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         }
         Message::ViewerTranslate(vmsg) => handle_viewer_translate_message(state, vmsg),
         Message::EditorAi(emsg) => handle_editor_ai_message(state, emsg),
+        Message::EditorVectorText(emsg) => handle_editor_vector_text_message(state, emsg),
+        Message::ExportVectorSvgPathPicked(Some(picked)) => {
+            if let Some(InAppDialog::ExportVectorSvg { path, error }) = &mut state.dialog {
+                *path = picked.to_string_lossy().into_owned();
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::ExportVectorSvgPathPicked(None) => Task::none(),
         Message::LayoutCommandCompleted(res) => {
             state.pending_layout_commands = state.pending_layout_commands.saturating_sub(1);
             update(state, Message::CommandCompleted(res))
@@ -4818,6 +4846,37 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     nodes,
                     closed,
                 } => {
+                    let use_vector = state.editor_ui.vector_mode
+                        || state.snapshot.meta.editor.as_ref().is_some_and(|ed| {
+                            !ed.selection.quick_mask_active
+                                && ed
+                                    .layers
+                                    .iter()
+                                    .find(|l| l.id == ed.active_layer_id)
+                                    .is_some_and(|l| l.kind.is_vector() && !l.editing_mask)
+                        });
+                    if use_vector
+                        && let Some(shape) = build_vector_shape_from_draw_commit(
+                            kind,
+                            &points,
+                            &nodes,
+                            closed,
+                            state.editor_ui.shape_fill_mode,
+                            state.editor_ui.fg_color,
+                            state.editor_ui.bg_color,
+                            state.editor_ui.shape_stroke_width,
+                            state.editor_ui.shape_corner_radius,
+                            state.editor_ui.brush_opacity,
+                        )
+                    {
+                        return dispatch_to_core(
+                            state.core.clone(),
+                            Command::EditorAddVectorShape {
+                                layer_id: None,
+                                shape,
+                            },
+                        );
+                    }
                     return dispatch_to_core(
                         state.core.clone(),
                         Command::EditorDrawShape {
@@ -4897,6 +4956,140 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 }
                 CanvasEvent::TransformCancel => {
                     return update(state, Message::EditorTransformCancel);
+                }
+                CanvasEvent::VectorSelectShape {
+                    shape_id,
+                    node_index,
+                } => {
+                    state.editor_ui.selected_vector_node = node_index;
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorVectorPathOp {
+                            layer_id: None,
+                            shape_id: Some(shape_id),
+                            op: VectorPathOperation::SelectShapes {
+                                shape_ids: vec![shape_id],
+                            },
+                        },
+                    );
+                }
+                CanvasEvent::VectorMoveNode {
+                    shape_id,
+                    node_index,
+                    anchor,
+                } => {
+                    state.editor_ui.selected_vector_node = Some(node_index);
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorVectorPathOp {
+                            layer_id: None,
+                            shape_id: Some(shape_id),
+                            op: VectorPathOperation::MoveNodeAnchor {
+                                index: node_index,
+                                anchor,
+                            },
+                        },
+                    );
+                }
+                CanvasEvent::VectorMoveHandle {
+                    shape_id,
+                    node_index,
+                    handle,
+                    position,
+                    mode,
+                } => {
+                    state.editor_ui.selected_vector_node = Some(node_index);
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorVectorPathOp {
+                            layer_id: None,
+                            shape_id: Some(shape_id),
+                            op: VectorPathOperation::MoveNodeHandle {
+                                index: node_index,
+                                handle,
+                                position,
+                                mode,
+                            },
+                        },
+                    );
+                }
+                CanvasEvent::VectorAddNodeAtPoint {
+                    shape_id,
+                    point,
+                    max_distance,
+                } => {
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorVectorPathOp {
+                            layer_id: None,
+                            shape_id: Some(shape_id),
+                            op: VectorPathOperation::AddNodeAtPoint {
+                                point,
+                                max_distance,
+                            },
+                        },
+                    );
+                }
+                CanvasEvent::VectorDeleteNode {
+                    shape_id,
+                    node_index,
+                } => {
+                    state.editor_ui.selected_vector_node = None;
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorVectorPathOp {
+                            layer_id: None,
+                            shape_id: Some(shape_id),
+                            op: VectorPathOperation::DeleteNode { index: node_index },
+                        },
+                    );
+                }
+                CanvasEvent::VectorTranslateShape { shape_id, dx, dy } => {
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorVectorPathOp {
+                            layer_id: None,
+                            shape_id: Some(shape_id),
+                            op: VectorPathOperation::TranslateShape { dx, dy },
+                        },
+                    );
+                }
+                CanvasEvent::TextCanvasClick { x, y } => {
+                    if let Some(ed) = &state.snapshot.meta.editor {
+                        if let Some(mut existing) = ed.active_text_data.clone() {
+                            existing.x = x;
+                            existing.y = y;
+                            state.editor_ui.text_draft = existing.clone();
+                            return dispatch_to_core(
+                                state.core.clone(),
+                                Command::EditorUpdateTextLayer {
+                                    id: None,
+                                    data: existing,
+                                },
+                            );
+                        } else {
+                            let mut data = state.editor_ui.text_draft.clone();
+                            data.x = x;
+                            data.y = y;
+                            if data.text.trim().is_empty() {
+                                data.text = "Text".to_owned();
+                            }
+                            let fg = state.editor_ui.fg_color;
+                            if data.color == [24, 24, 27] || data.color == [0, 0, 0] {
+                                data.color = fg;
+                            }
+                            state.editor_ui.text_draft = data.clone();
+                            let next_idx = ed.layers.len() + 1;
+                            return dispatch_to_core(
+                                state.core.clone(),
+                                Command::EditorAddTextLayer {
+                                    name: format!("Text {next_idx}"),
+                                    data,
+                                },
+                            );
+                        }
+                    }
+                    return Task::none();
                 }
             }
             sync_ui_tree_task(state)
@@ -5251,6 +5444,52 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                         (state.editor_ui.fg_color, false)
                     }
                 }
+                ColorPickerTarget::VectorShapeFill => {
+                    let col = state
+                        .snapshot
+                        .meta
+                        .editor
+                        .as_ref()
+                        .and_then(|e| e.active_vector_data.as_ref())
+                        .and_then(|v| {
+                            v.selected_shape_ids
+                                .first()
+                                .and_then(|id| v.shape(*id))
+                                .or_else(|| v.shapes.last())
+                        })
+                        .map(|s| match s.fill {
+                            Some(color) => (color, false),
+                            None => (state.editor_ui.fg_color, true),
+                        });
+                    col.unwrap_or((state.editor_ui.fg_color, false))
+                }
+                ColorPickerTarget::VectorShapeStroke => {
+                    let col = state
+                        .snapshot
+                        .meta
+                        .editor
+                        .as_ref()
+                        .and_then(|e| e.active_vector_data.as_ref())
+                        .and_then(|v| {
+                            v.selected_shape_ids
+                                .first()
+                                .and_then(|id| v.shape(*id))
+                                .or_else(|| v.shapes.last())
+                        })
+                        .map(|s| (s.stroke.color, !s.stroke.is_visible()));
+                    col.unwrap_or((state.editor_ui.fg_color, false))
+                }
+                ColorPickerTarget::TextLayerColor => {
+                    let col = state
+                        .snapshot
+                        .meta
+                        .editor
+                        .as_ref()
+                        .and_then(|e| e.active_text_data.as_ref())
+                        .map(|t| t.color)
+                        .unwrap_or(state.editor_ui.text_draft.color);
+                    (col, false)
+                }
             };
             state.dialog = Some(InAppDialog::ColorPicker {
                 target,
@@ -5462,6 +5701,81 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                         } else if stop.alpha <= 0.01 {
                             stop.alpha = 1.0;
                         }
+                    }
+                    Task::none()
+                }
+                ColorPickerTarget::VectorShapeFill => {
+                    if let Some(mut shape) = state
+                        .snapshot
+                        .meta
+                        .editor
+                        .as_ref()
+                        .and_then(|e| e.active_vector_data.as_ref())
+                        .and_then(|v| {
+                            v.selected_shape_ids
+                                .first()
+                                .and_then(|id| v.shape(*id))
+                                .or_else(|| v.shapes.last())
+                        })
+                        .cloned()
+                    {
+                        shape.fill = if transparent { None } else { Some([r, g, b]) };
+                        return dispatch_to_core(
+                            state.core.clone(),
+                            Command::EditorUpdateVectorShape {
+                                layer_id: None,
+                                shape,
+                            },
+                        );
+                    }
+                    Task::none()
+                }
+                ColorPickerTarget::VectorShapeStroke => {
+                    if let Some(mut shape) = state
+                        .snapshot
+                        .meta
+                        .editor
+                        .as_ref()
+                        .and_then(|e| e.active_vector_data.as_ref())
+                        .and_then(|v| {
+                            v.selected_shape_ids
+                                .first()
+                                .and_then(|id| v.shape(*id))
+                                .or_else(|| v.shapes.last())
+                        })
+                        .cloned()
+                    {
+                        shape.stroke.color = [r, g, b];
+                        if transparent {
+                            shape.stroke.width = 0.0;
+                        } else if !shape.stroke.is_visible() {
+                            shape.stroke.width = state.editor_ui.shape_stroke_width.max(1.0);
+                        }
+                        return dispatch_to_core(
+                            state.core.clone(),
+                            Command::EditorUpdateVectorShape {
+                                layer_id: None,
+                                shape,
+                            },
+                        );
+                    }
+                    Task::none()
+                }
+                ColorPickerTarget::TextLayerColor => {
+                    let rgb = [r, g, b];
+                    state.editor_ui.text_draft.color = rgb;
+                    if let Some(mut data) = state
+                        .snapshot
+                        .meta
+                        .editor
+                        .as_ref()
+                        .and_then(|e| e.active_text_data.clone())
+                    {
+                        data.color = rgb;
+                        return dispatch_to_core(
+                            state.core.clone(),
+                            Command::EditorUpdateTextLayer { id: None, data },
+                        );
                     }
                     Task::none()
                 }
@@ -7765,8 +8079,7 @@ fn dispatch_editor_shortcut(state: &mut PhotonGui, action: EditorShortcutAction)
             update(state, Message::EditorSelectTool(EditorTool::BezierPen))
         }
         EditorShortcutAction::ToolPathSelect => {
-            // Path/Node Selection tool lands in Phase 3; focus BezierPen for now.
-            update(state, Message::EditorSelectTool(EditorTool::BezierPen))
+            update(state, Message::EditorSelectTool(EditorTool::PathSelect))
         }
         EditorShortcutAction::ToolShape => update(
             state,
@@ -7783,12 +8096,7 @@ fn dispatch_editor_shortcut(state: &mut PhotonGui, action: EditorShortcutAction)
             update(state, Message::EditorSelectTool(next))
         }
         EditorShortcutAction::ToolText => {
-            // Non-destructive Text tool lands in Phase 3.
-            show_toast(
-                state,
-                tr(state.snapshot.meta.language, "tool-text-soon"),
-                ToastKind::Info,
-            )
+            update(state, Message::EditorSelectTool(EditorTool::Text))
         }
         EditorShortcutAction::ToolHealingBrush => {
             update(state, Message::EditorSelectTool(EditorTool::HealingBrush))
@@ -9884,8 +10192,15 @@ fn build_active_menu(
                 ],
             )
         }
+        (Workspace::Editor, ActiveMenu::EditorVector) => (
+            Some(190.0),
+            build_editor_vector_menu_entries(state.editor_view_state())
+                .into_iter()
+                .map(|e| e.map(Message::Editor))
+                .collect(),
+        ),
         (Workspace::Editor, ActiveMenu::EditorFilter) => (
-            Some(208.0),
+            Some(236.0),
             vec![
                 MenuEntry::Item(
                     MenuItem::new(
@@ -11478,6 +11793,13 @@ pub(crate) fn default_window_state_for(id: DesktopDialogId) -> DialogWindowState
         DesktopDialogId::TranslateSettings => DialogWindowState::new(560.0, 520.0)
             .min_size(420.0, 360.0)
             .max_size(880.0, 840.0),
+        DesktopDialogId::TransformEach => DialogWindowState::new(460.0, 520.0)
+            .min_size(380.0, 420.0)
+            .max_size(720.0, 820.0),
+        DesktopDialogId::VectorBlend => DialogWindowState::new(400.0, 210.0).min_size(340.0, 180.0),
+        DesktopDialogId::ExportVectorSvg => {
+            DialogWindowState::new(460.0, 210.0).min_size(360.0, 180.0)
+        }
     }
 }
 
@@ -11637,6 +11959,9 @@ fn dialog_id_for_in_app(dialog: &InAppDialog) -> DesktopDialogId {
         InAppDialog::PluginParams { .. } => DesktopDialogId::PluginParams,
         InAppDialog::PluginModels { .. } => DesktopDialogId::PluginModels,
         InAppDialog::TranslateSettings => DesktopDialogId::TranslateSettings,
+        InAppDialog::TransformEach { .. } => DesktopDialogId::TransformEach,
+        InAppDialog::VectorBlend { .. } => DesktopDialogId::VectorBlend,
+        InAppDialog::ExportVectorSvg { .. } => DesktopDialogId::ExportVectorSvg,
         InAppDialog::Alert { id, .. } => *id,
     }
 }
@@ -13399,6 +13724,30 @@ fn build_in_app_dialog<'a>(
                 theme,
             )
         }
+        InAppDialog::TransformEach { spec } => dialog_spec_to_managed(
+            id,
+            map_editor_dialog_spec(build_transform_each_dialog(lang, spec)),
+            default_window_state_for(id),
+            overlay,
+            lang,
+            theme,
+        ),
+        InAppDialog::VectorBlend { spec } => dialog_spec_to_managed(
+            id,
+            map_editor_dialog_spec(build_vector_blend_dialog(lang, spec)),
+            default_window_state_for(id),
+            overlay,
+            lang,
+            theme,
+        ),
+        InAppDialog::ExportVectorSvg { path, error } => dialog_spec_to_managed(
+            id,
+            map_editor_dialog_spec(build_export_vector_svg_dialog(lang, path, error.as_deref())),
+            default_window_state_for(id),
+            overlay,
+            lang,
+            theme,
+        ),
         InAppDialog::Alert { title, message, .. } => dialog_spec_to_managed(
             id,
             alert_dialog_spec(
@@ -13599,6 +13948,7 @@ fn map_editor_message(msg: EditorMessage) -> Message {
                 EditorMenuKind::Edit => ActiveMenu::EditorEdit,
                 EditorMenuKind::Image => ActiveMenu::EditorImage,
                 EditorMenuKind::Layer => ActiveMenu::EditorLayer,
+                EditorMenuKind::Vector => ActiveMenu::EditorVector,
                 EditorMenuKind::Filter => ActiveMenu::EditorFilter,
                 EditorMenuKind::Plugins => ActiveMenu::EditorPlugins,
                 EditorMenuKind::Select => ActiveMenu::EditorSelect,
@@ -13616,6 +13966,7 @@ fn map_editor_message(msg: EditorMessage) -> Message {
                 EditorMenuKind::Edit => ActiveMenu::EditorEdit,
                 EditorMenuKind::Image => ActiveMenu::EditorImage,
                 EditorMenuKind::Layer => ActiveMenu::EditorLayer,
+                EditorMenuKind::Vector => ActiveMenu::EditorVector,
                 EditorMenuKind::Filter => ActiveMenu::EditorFilter,
                 EditorMenuKind::Plugins => ActiveMenu::EditorPlugins,
                 EditorMenuKind::Select => ActiveMenu::EditorSelect,
@@ -13804,6 +14155,24 @@ fn map_editor_message(msg: EditorMessage) -> Message {
         | EditorMessage::AiSetCaptionDraft(_)
         | EditorMessage::AiRunCaption
         | EditorMessage::AiSaveCaption(_)) => Message::EditorAi(other),
+        other @ (EditorMessage::EditorSetVectorMode(_)
+        | EditorMessage::EditorSetShapeCornerRadius(_)
+        | EditorMessage::EditorSelectVectorNode(_)
+        | EditorMessage::EditorSetVectorSimplifyTolerance(_)
+        | EditorMessage::EditorSetVectorSmoothTension(_)
+        | EditorMessage::EditorUpdateActiveVectorShape(_)
+        | EditorMessage::OpenTransformEachDialog
+        | EditorMessage::TransformEachSetSpec(_)
+        | EditorMessage::ConfirmTransformEach
+        | EditorMessage::OpenVectorBlendDialog
+        | EditorMessage::VectorBlendSetSpec(_)
+        | EditorMessage::ConfirmVectorBlend
+        | EditorMessage::OpenExportVectorSvgDialog
+        | EditorMessage::PickExportVectorSvgDialog
+        | EditorMessage::ExportVectorSvgPathChanged(_)
+        | EditorMessage::ConfirmExportVectorSvg
+        | EditorMessage::EditorSetTextDraft(_)
+        | EditorMessage::EditorAddOrUpdateTextLayer(_)) => Message::EditorVectorText(other),
     }
 }
 
@@ -13918,6 +14287,7 @@ impl PhotonGui {
             Some(ActiveMenu::EditorEdit) => Some(EditorMenuKind::Edit),
             Some(ActiveMenu::EditorImage) => Some(EditorMenuKind::Image),
             Some(ActiveMenu::EditorLayer) => Some(EditorMenuKind::Layer),
+            Some(ActiveMenu::EditorVector) => Some(EditorMenuKind::Vector),
             Some(ActiveMenu::EditorFilter) => Some(EditorMenuKind::Filter),
             Some(ActiveMenu::EditorPlugins) => Some(EditorMenuKind::Plugins),
             Some(ActiveMenu::EditorSelect) => Some(EditorMenuKind::Select),
@@ -14367,6 +14737,10 @@ fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) -> Task<Mes
             update(state, Message::EditorSelectTool(EditorTool::DrawPolyline))
         }
         "editor.tool.bezier_pen" => update(state, Message::EditorSelectTool(EditorTool::BezierPen)),
+        "editor.tool.path_select" => {
+            update(state, Message::EditorSelectTool(EditorTool::PathSelect))
+        }
+        "editor.tool.text" => update(state, Message::EditorSelectTool(EditorTool::Text)),
         "editor.tool.paint_bucket" => {
             update(state, Message::EditorSelectTool(EditorTool::PaintBucket))
         }
@@ -14542,6 +14916,99 @@ fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) -> Task<Mes
             .unwrap_or_else(Task::none),
         "editor.menu.layer.flatten" => {
             dispatch_to_core(state.core.clone(), Command::EditorLayerFlatten)
+        }
+        "editor.menu.vector" => update(state, Message::ToggleMenu(ActiveMenu::EditorVector)),
+        "editor.menu.vector.new_layer" => {
+            let next_idx = state
+                .snapshot
+                .meta
+                .editor
+                .as_ref()
+                .map_or(1, |e| e.layers.len() + 1);
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorAddVectorLayer {
+                    name: format!("Vector {next_idx}"),
+                    data: VectorLayerData::new(),
+                },
+            )
+        }
+        "editor.menu.vector.convert_to_path" => dispatch_to_core(
+            state.core.clone(),
+            Command::EditorConvertShapeToPath {
+                layer_id: None,
+                shape_id: None,
+            },
+        ),
+        "editor.menu.vector.join_path" => dispatch_to_core(
+            state.core.clone(),
+            Command::EditorVectorPathOp {
+                layer_id: None,
+                shape_id: None,
+                op: VectorPathOperation::JoinPaths {
+                    second_shape_id: None,
+                    tolerance: 24.0,
+                },
+            },
+        ),
+        "editor.menu.vector.split_path" => dispatch_to_core(
+            state.core.clone(),
+            Command::EditorVectorPathOp {
+                layer_id: None,
+                shape_id: None,
+                op: VectorPathOperation::SplitAtNode {
+                    index: state.editor_ui.selected_vector_node.unwrap_or(1),
+                },
+            },
+        ),
+        "editor.menu.vector.close_open_path" => dispatch_to_core(
+            state.core.clone(),
+            Command::EditorVectorPathOp {
+                layer_id: None,
+                shape_id: None,
+                op: VectorPathOperation::ToggleClosed,
+            },
+        ),
+        "editor.menu.vector.reverse_path" => dispatch_to_core(
+            state.core.clone(),
+            Command::EditorVectorPathOp {
+                layer_id: None,
+                shape_id: None,
+                op: VectorPathOperation::ReversePath,
+            },
+        ),
+        "editor.menu.vector.simplify_path" => dispatch_to_core(
+            state.core.clone(),
+            Command::EditorVectorPathOp {
+                layer_id: None,
+                shape_id: None,
+                op: VectorPathOperation::Simplify {
+                    tolerance: state.editor_ui.vector_simplify_tolerance,
+                },
+            },
+        ),
+        "editor.menu.vector.smooth_path" => dispatch_to_core(
+            state.core.clone(),
+            Command::EditorVectorPathOp {
+                layer_id: None,
+                shape_id: None,
+                op: VectorPathOperation::Smooth {
+                    tension: state.editor_ui.vector_smooth_tension,
+                },
+            },
+        ),
+        "editor.menu.vector.transform_each" => {
+            handle_editor_vector_text_message(state, EditorMessage::OpenTransformEachDialog)
+        }
+        "editor.menu.vector.blend" => {
+            handle_editor_vector_text_message(state, EditorMessage::OpenVectorBlendDialog)
+        }
+        "editor.menu.vector.rasterize" => dispatch_to_core(
+            state.core.clone(),
+            Command::EditorRasterizeLayer { id: None },
+        ),
+        "editor.menu.vector.export_svg" => {
+            handle_editor_vector_text_message(state, EditorMessage::OpenExportVectorSvgDialog)
         }
         "editor.menu.view" => update(state, Message::ToggleMenu(ActiveMenu::EditorView)),
         "editor.menu.view.zoom_in" => update(state, Message::ZoomStep(1.25)),
@@ -15012,6 +15479,7 @@ fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) -> Task<Mes
         | "editor.layer.context_menu.flatten"
         | "editor.layer.context_menu.toggle_visible"
         | "editor.layer.context_menu.toggle_locked"
+        | "editor.layer.context_menu.rasterize"
         | "editor.layer.context_menu.delete" => {
             let Some(ed) = state.snapshot.meta.editor.clone() else {
                 return Task::none();
@@ -15094,6 +15562,12 @@ fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) -> Task<Mes
                         blend_mode: None,
                         offset_x: None,
                         offset_y: None,
+                    }),
+                ),
+                "editor.layer.context_menu.rasterize" => update(
+                    state,
+                    Message::ContextMenuDispatch(Command::EditorRasterizeLayer {
+                        id: Some(layer.id),
                     }),
                 ),
                 "editor.layer.context_menu.delete" => update(
@@ -17289,6 +17763,254 @@ fn handle_editor_ai_message(state: &mut PhotonGui, msg: EditorMessage) -> Task<M
     }
 }
 
+fn handle_editor_vector_text_message(state: &mut PhotonGui, msg: EditorMessage) -> Task<Message> {
+    match msg {
+        EditorMessage::EditorSetVectorMode(enabled) => {
+            state.editor_ui.vector_mode = enabled;
+            Task::none()
+        }
+        EditorMessage::EditorSetShapeCornerRadius(radius) => {
+            state.editor_ui.shape_corner_radius = radius.clamp(0.0, 120.0);
+            Task::none()
+        }
+        EditorMessage::EditorSelectVectorNode(idx) => {
+            state.editor_ui.selected_vector_node = idx;
+            Task::none()
+        }
+        EditorMessage::EditorSetVectorSimplifyTolerance(tol) => {
+            state.editor_ui.vector_simplify_tolerance = tol.clamp(0.5, 50.0);
+            Task::none()
+        }
+        EditorMessage::EditorSetVectorSmoothTension(tension) => {
+            state.editor_ui.vector_smooth_tension = tension.clamp(0.05, 1.0);
+            Task::none()
+        }
+        EditorMessage::EditorUpdateActiveVectorShape(shape) => dispatch_to_core(
+            state.core.clone(),
+            Command::EditorUpdateVectorShape {
+                layer_id: None,
+                shape,
+            },
+        ),
+        EditorMessage::OpenTransformEachDialog => {
+            state.active_menu = None;
+            state.context_menu = None;
+            state.dialog = Some(InAppDialog::TransformEach {
+                spec: state.editor_ui.transform_each_spec,
+            });
+            open_dialog_window(state, DesktopDialogId::TransformEach);
+            Task::none()
+        }
+        EditorMessage::TransformEachSetSpec(spec) => {
+            state.editor_ui.transform_each_spec = spec;
+            if let Some(InAppDialog::TransformEach { spec: dlg_spec }) = &mut state.dialog {
+                *dlg_spec = spec;
+            }
+            Task::none()
+        }
+        EditorMessage::ConfirmTransformEach => {
+            let spec = match state.dialog.take() {
+                Some(InAppDialog::TransformEach { spec }) => spec,
+                other => {
+                    state.dialog = other;
+                    state.editor_ui.transform_each_spec
+                }
+            };
+            state.editor_ui.transform_each_spec = spec;
+            state.dialog_manager.close(&DesktopDialogId::TransformEach);
+            let active_layer_id = state
+                .snapshot
+                .meta
+                .editor
+                .as_ref()
+                .map(|e| e.active_layer_id)
+                .into_iter()
+                .collect();
+            let shape_ids = state
+                .snapshot
+                .meta
+                .editor
+                .as_ref()
+                .and_then(|e| e.active_vector_data.as_ref())
+                .map(|v| {
+                    if !v.selected_shape_ids.is_empty() {
+                        v.selected_shape_ids.clone()
+                    } else {
+                        v.shapes.iter().map(|s| s.id).collect()
+                    }
+                })
+                .unwrap_or_default();
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorTransformEach {
+                    layer_ids: active_layer_id,
+                    shape_ids,
+                    spec,
+                },
+            )
+        }
+        EditorMessage::OpenVectorBlendDialog => {
+            state.active_menu = None;
+            state.context_menu = None;
+            state.dialog = Some(InAppDialog::VectorBlend {
+                spec: state.editor_ui.vector_blend_spec,
+            });
+            open_dialog_window(state, DesktopDialogId::VectorBlend);
+            Task::none()
+        }
+        EditorMessage::VectorBlendSetSpec(spec) => {
+            state.editor_ui.vector_blend_spec = spec;
+            if let Some(InAppDialog::VectorBlend { spec: dlg_spec }) = &mut state.dialog {
+                *dlg_spec = spec;
+            }
+            Task::none()
+        }
+        EditorMessage::ConfirmVectorBlend => {
+            let mut spec = match state.dialog.take() {
+                Some(InAppDialog::VectorBlend { spec }) => spec,
+                other => {
+                    state.dialog = other;
+                    state.editor_ui.vector_blend_spec
+                }
+            };
+            state.editor_ui.vector_blend_spec = spec;
+            state.dialog_manager.close(&DesktopDialogId::VectorBlend);
+            let Some((first, second)) = state
+                .snapshot
+                .meta
+                .editor
+                .as_ref()
+                .and_then(|e| e.active_vector_data.as_ref())
+                .and_then(|v| {
+                    if v.selected_shape_ids.len() >= 2 {
+                        Some((v.selected_shape_ids[0], v.selected_shape_ids[1]))
+                    } else if v.shapes.len() >= 2 {
+                        let n = v.shapes.len();
+                        Some((v.shapes[n - 2].id, v.shapes[n - 1].id))
+                    } else {
+                        None
+                    }
+                })
+            else {
+                return Task::none();
+            };
+            spec.start_shape_id = first;
+            spec.end_shape_id = second;
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorVectorBlend {
+                    layer_id: None,
+                    spec,
+                },
+            )
+        }
+        EditorMessage::OpenExportVectorSvgDialog => {
+            state.active_menu = None;
+            state.context_menu = None;
+            if let Some(doc) = &state.snapshot.meta.editor {
+                let p = Path::new(&doc.path);
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("vector");
+                let default_out = p
+                    .parent()
+                    .map(|dir| dir.join(format!("{stem}.svg")))
+                    .unwrap_or_else(|| PathBuf::from(format!("{stem}.svg")));
+                state.dialog = Some(InAppDialog::ExportVectorSvg {
+                    path: default_out.to_string_lossy().into_owned(),
+                    error: None,
+                });
+                open_dialog_window(state, DesktopDialogId::ExportVectorSvg);
+            }
+            Task::none()
+        }
+        EditorMessage::PickExportVectorSvgDialog => {
+            let title = tr(state.snapshot.meta.language, "menu-vector-export-svg");
+            let current = match &state.dialog {
+                Some(InAppDialog::ExportVectorSvg { path, .. }) => PathBuf::from(path),
+                _ => PathBuf::new(),
+            };
+            let start = current.parent().map(Path::to_path_buf);
+            let name = current
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(ToOwned::to_owned);
+            Task::perform(
+                async move {
+                    let filters = [photon_dialogs::FileFilter {
+                        name: "SVG Vector",
+                        extensions: &["svg"],
+                    }];
+                    photon_dialogs::save_file(&title, start, name.as_deref(), &filters).await
+                },
+                Message::ExportVectorSvgPathPicked,
+            )
+        }
+        EditorMessage::ExportVectorSvgPathChanged(val) => {
+            if let Some(InAppDialog::ExportVectorSvg { path, error }) = &mut state.dialog {
+                *path = val;
+                *error = None;
+            }
+            Task::none()
+        }
+        EditorMessage::ConfirmExportVectorSvg => {
+            let Some(InAppDialog::ExportVectorSvg { path, .. }) = state.dialog.clone() else {
+                return Task::none();
+            };
+            let clean = path.trim().to_owned();
+            if clean.is_empty() {
+                if let Some(InAppDialog::ExportVectorSvg { error, .. }) = &mut state.dialog {
+                    *error = Some(tr(state.snapshot.meta.language, "dialog-error-title"));
+                }
+                return Task::none();
+            }
+            state.dialog = None;
+            state
+                .dialog_manager
+                .close(&DesktopDialogId::ExportVectorSvg);
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorExportVectorSvg {
+                    layer_id: None,
+                    path: clean,
+                },
+            )
+        }
+        EditorMessage::EditorSetTextDraft(data) => {
+            state.editor_ui.text_draft = data;
+            Task::none()
+        }
+        EditorMessage::EditorAddOrUpdateTextLayer(data) => {
+            state.editor_ui.text_draft = data.clone();
+            if state
+                .snapshot
+                .meta
+                .editor
+                .as_ref()
+                .is_some_and(|e| e.active_text_data.is_some())
+            {
+                dispatch_to_core(
+                    state.core.clone(),
+                    Command::EditorUpdateTextLayer { id: None, data },
+                )
+            } else {
+                let next_idx = state
+                    .snapshot
+                    .meta
+                    .editor
+                    .as_ref()
+                    .map_or(1, |e| e.layers.len() + 1);
+                dispatch_to_core(
+                    state.core.clone(),
+                    Command::EditorAddTextLayer {
+                        name: format!("Text {next_idx}"),
+                        data,
+                    },
+                )
+            }
+        }
+        _ => Task::none(),
+    }
+}
+
 fn write_png_bytes_to_clipboard(png_bytes: &[u8]) -> bool {
     use std::io::Write;
     use std::process::{Command as ProcessCommand, Stdio};
@@ -18205,6 +18927,86 @@ mod tests {
             let vi = display_font_label(Language::Vietnamese, font);
             assert!(!en.is_empty());
             assert!(!vi.is_empty());
+        }
+    }
+
+    #[test]
+    fn phase3_dialogs_and_ui_tree_expose_vector_menu_and_tools() {
+        let te = default_window_state_for(DesktopDialogId::TransformEach);
+        assert_eq!(te.width, 460.0);
+        let vb = default_window_state_for(DesktopDialogId::VectorBlend);
+        assert_eq!(vb.width, 400.0);
+        let svg = default_window_state_for(DesktopDialogId::ExportVectorSvg);
+        assert_eq!(svg.width, 460.0);
+
+        assert_eq!(
+            dialog_id_for_in_app(&InAppDialog::TransformEach {
+                spec: TransformEachSpec::default(),
+            }),
+            DesktopDialogId::TransformEach
+        );
+        assert_eq!(
+            dialog_id_for_in_app(&InAppDialog::VectorBlend {
+                spec: VectorBlendSpec::default(),
+            }),
+            DesktopDialogId::VectorBlend
+        );
+        assert_eq!(
+            dialog_id_for_in_app(&InAppDialog::ExportVectorSvg {
+                path: "/tmp/out.svg".to_owned(),
+                error: None,
+            }),
+            DesktopDialogId::ExportVectorSvg
+        );
+
+        let core = photon_core::Core::new(true, true);
+        let mut snap = core.snapshot();
+        snap.meta.workspace = Workspace::Editor;
+        let tree = build_ui_tree(
+            &snap,
+            1,
+            Size::new(1280.0, 800.0),
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            "wgpu",
+            &ViewerUiPresentation {
+                view_mode: ViewerViewMode::Single,
+                info_open: false,
+                adjustments_open: false,
+                filmstrip_open: false,
+                is_fullscreen: false,
+                color_popover_open: false,
+                translate_open: false,
+            },
+            &EditorUiState::default(),
+            None,
+            false,
+            "general",
+        );
+        for required_id in [
+            "editor.tool.path_select",
+            "editor.tool.text",
+            "editor.menu.vector",
+            "editor.menu.vector.new_layer",
+            "editor.menu.vector.convert_to_path",
+            "editor.menu.vector.join_path",
+            "editor.menu.vector.split_path",
+            "editor.menu.vector.close_open_path",
+            "editor.menu.vector.reverse_path",
+            "editor.menu.vector.simplify_path",
+            "editor.menu.vector.smooth_path",
+            "editor.menu.vector.transform_each",
+            "editor.menu.vector.blend",
+            "editor.menu.vector.rasterize",
+            "editor.menu.vector.export_svg",
+            "editor.layer.context_menu.rasterize",
+        ] {
+            assert!(
+                tree.widgets.iter().any(|w| w.id == required_id),
+                "missing semantic widget id: {required_id}"
+            );
         }
     }
 }

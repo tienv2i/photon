@@ -153,6 +153,7 @@ fn view(state: &Gallery) -> Element<'_, Msg> {
         layer_row(LayerRowSpec {
             name: "Foreground".into(),
             subtitle: Some("1920×1080 · Normal 100%".into()),
+            kind_badge: None,
             active: true,
             visible: true,
             locked: false,

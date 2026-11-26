@@ -121,6 +121,8 @@ pub enum Icon {
     Paste,
     BookOpen,
     PanelsTopLeft,
+    PathSelect,
+    Text,
 }
 
 impl Icon {
@@ -473,6 +475,12 @@ impl Icon {
             }
             Self::PanelsTopLeft => {
                 r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>"##
+            }
+            Self::PathSelect => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4l6.5 15.5 2.4-5.4 5.4-2.4L4 4z"/><rect x="16" y="16" width="4" height="4" rx="0.8"/><path d="M13 13l3 3"/></svg>"##
+            }
+            Self::Text => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>"##
             }
         }
     }

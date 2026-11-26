@@ -617,6 +617,89 @@ impl Default for VectorBlendSpec {
     }
 }
 
+const fn default_half_f32() -> f32 {
+    0.5
+}
+
+const fn default_add_node_max_dist() -> f32 {
+    16.0
+}
+
+const fn default_join_tolerance() -> f32 {
+    12.0
+}
+
+const fn default_simplify_tolerance() -> f32 {
+    2.0
+}
+
+const fn default_smooth_tension() -> f32 {
+    0.33
+}
+
+/// Non-destructive path and node mutation applied by `Command::EditorVectorPathOp`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum VectorPathOperation {
+    AddNodeOnSegment {
+        segment_index: usize,
+        #[serde(default = "default_half_f32")]
+        t: f32,
+    },
+    AddNodeAtPoint {
+        point: [f32; 2],
+        #[serde(default = "default_add_node_max_dist")]
+        max_distance: f32,
+    },
+    DeleteNode {
+        index: usize,
+    },
+    MoveNodeAnchor {
+        index: usize,
+        anchor: [f32; 2],
+    },
+    MoveNodeHandle {
+        index: usize,
+        handle: VectorHandleKind,
+        position: [f32; 2],
+        #[serde(default)]
+        mode: VectorNodeMode,
+    },
+    SplitAtNode {
+        index: usize,
+    },
+    JoinPaths {
+        #[serde(default)]
+        second_shape_id: Option<u64>,
+        #[serde(default = "default_join_tolerance")]
+        tolerance: f32,
+    },
+    SetClosed {
+        closed: bool,
+    },
+    ToggleClosed,
+    ReversePath,
+    SetNodeMode {
+        index: usize,
+        mode: VectorNodeMode,
+    },
+    Simplify {
+        #[serde(default = "default_simplify_tolerance")]
+        tolerance: f32,
+    },
+    Smooth {
+        #[serde(default = "default_smooth_tension")]
+        tension: f32,
+    },
+    TranslateShape {
+        dx: f32,
+        dy: f32,
+    },
+    SelectShapes {
+        shape_ids: Vec<u64>,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -47,9 +47,15 @@ pub mod clipboard_paste;
 pub mod panel_splitter;
 pub mod shortcuts;
 pub mod tabs;
+pub mod text_ui;
+pub mod vector_ui;
 
 pub use clipboard_paste::{SmartPasteFitMode, SmartPasteState};
 pub use tabs::{TabCloseScope, build_editor_tab_context_menu};
+pub use vector_ui::{
+    build_editor_vector_menu_entries, build_export_vector_svg_dialog, build_transform_each_dialog,
+    build_vector_blend_dialog, build_vector_shape_from_draw_commit,
+};
 
 use iced::widget::container as iced_container;
 use iced::widget::image as iced_image;
@@ -71,6 +77,7 @@ pub enum EditorMenuKind {
     Edit,
     Image,
     Layer,
+    Vector,
     Select,
     Filter,
     Plugins,
@@ -284,6 +291,24 @@ pub enum EditorMessage {
     OpenNewDocumentDialog,
     OpenExternally(String),
     OpenFileDialog,
+    EditorSetVectorMode(bool),
+    EditorSetShapeCornerRadius(f32),
+    EditorSelectVectorNode(Option<usize>),
+    EditorSetVectorSimplifyTolerance(f32),
+    EditorSetVectorSmoothTension(f32),
+    EditorUpdateActiveVectorShape(photon_protocol::VectorShape),
+    OpenTransformEachDialog,
+    TransformEachSetSpec(photon_protocol::TransformEachSpec),
+    ConfirmTransformEach,
+    OpenVectorBlendDialog,
+    VectorBlendSetSpec(photon_protocol::VectorBlendSpec),
+    ConfirmVectorBlend,
+    OpenExportVectorSvgDialog,
+    PickExportVectorSvgDialog,
+    ExportVectorSvgPathChanged(String),
+    ConfirmExportVectorSvg,
+    EditorSetTextDraft(photon_protocol::TextLayerData),
+    EditorAddOrUpdateTextLayer(photon_protocol::TextLayerData),
 }
 use photon_canvas::{CanvasTool, ImageCanvasProgram, default_viewport_bg_rgb};
 
@@ -331,6 +356,8 @@ pub enum EditorTool {
     DrawPolygon,
     DrawPolyline,
     BezierPen,
+    PathSelect,
+    Text,
     PaintBucket,
     Gradient,
     HealingBrush,
@@ -405,6 +432,8 @@ impl EditorTool {
             Self::DrawPolygon => Icon::DrawPolygon,
             Self::DrawPolyline => Icon::DrawPolyline,
             Self::BezierPen => Icon::BezierPen,
+            Self::PathSelect => Icon::PathSelect,
+            Self::Text => Icon::Text,
             Self::PaintBucket => Icon::PaintBucket,
             Self::Gradient => Icon::Gradient,
             Self::HealingBrush => Icon::HealingBrush,
@@ -433,6 +462,8 @@ impl EditorTool {
             Self::DrawPolygon => "tool-draw-polygon",
             Self::DrawPolyline => "tool-draw-polyline",
             Self::BezierPen => "tool-bezier-pen",
+            Self::PathSelect => "tool-path-select",
+            Self::Text => "tool-text",
             Self::PaintBucket => "tool-paint-bucket",
             Self::Gradient => "tool-gradient",
             Self::HealingBrush => "tool-healing-brush",
@@ -472,6 +503,8 @@ impl EditorTool {
             Self::DrawPolygon => CanvasTool::DrawPolygon,
             Self::DrawPolyline => CanvasTool::DrawPolyline,
             Self::BezierPen => CanvasTool::BezierPen,
+            Self::PathSelect => CanvasTool::PathSelect,
+            Self::Text => CanvasTool::Text,
             Self::PaintBucket => CanvasTool::PaintBucket,
             Self::Gradient => CanvasTool::Gradient,
             Self::Transform => CanvasTool::Transform,
@@ -536,6 +569,9 @@ pub enum ColorPickerTarget {
     CanvasSizeFill,
     RotateFill,
     GradientStop(usize),
+    VectorShapeFill,
+    VectorShapeStroke,
+    TextLayerColor,
 }
 
 #[derive(Debug, Clone)]
@@ -909,6 +945,14 @@ pub struct EditorUiState {
     pub ai_caption_suffix: String,
     pub ai_caption_exclude: String,
     pub ai_caption_draft: String,
+    pub vector_mode: bool,
+    pub shape_corner_radius: f32,
+    pub selected_vector_node: Option<usize>,
+    pub vector_simplify_tolerance: f32,
+    pub vector_smooth_tension: f32,
+    pub transform_each_spec: photon_protocol::TransformEachSpec,
+    pub vector_blend_spec: photon_protocol::VectorBlendSpec,
+    pub text_draft: photon_protocol::TextLayerData,
 }
 
 impl EditorUiState {
@@ -1171,6 +1215,14 @@ impl Default for EditorUiState {
             ai_caption_suffix: String::new(),
             ai_caption_exclude: String::new(),
             ai_caption_draft: String::new(),
+            vector_mode: false,
+            shape_corner_radius: 0.0,
+            selected_vector_node: None,
+            vector_simplify_tolerance: 2.0,
+            vector_smooth_tension: 0.33,
+            transform_each_spec: photon_protocol::TransformEachSpec::default(),
+            vector_blend_spec: photon_protocol::VectorBlendSpec::default(),
+            text_draft: photon_protocol::TextLayerData::default(),
         }
     }
 }
@@ -1306,6 +1358,7 @@ pub fn build_editor_toolbar<'a>(
             trigger(tr(lang, "menu-edit"), EditorMenuKind::Edit),
             trigger(tr(lang, "menu-image"), EditorMenuKind::Image),
             trigger(tr(lang, "menu-layer"), EditorMenuKind::Layer),
+            trigger(tr(lang, "menu-vector"), EditorMenuKind::Vector),
             trigger(tr(lang, "menu-select"), EditorMenuKind::Select),
             trigger(tr(lang, "menu-filter"), EditorMenuKind::Filter),
             trigger(tr(lang, "menu-plugins"), EditorMenuKind::Plugins),
@@ -1556,6 +1609,8 @@ pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMe
             healing_source_px: state.editor_ui.healing_source_px,
             transform_preview,
             gradient_preview,
+            active_vector_layer: ed.active_vector_data.clone(),
+            selected_vector_node: state.editor_ui.selected_vector_node,
         })
         .width(Fill)
         .height(Fill),
@@ -1874,6 +1929,23 @@ fn build_tool_rail(state: EditorViewState<'_>, lang: Language) -> Element<'_, Ed
                 true,
                 Some(EditorMessage::EditorSelectTool(EditorTool::BezierPen)),
                 tr(lang, "tooltip-tool-bezier-pen"),
+            ),
+            tool_rail_button_tipped(
+                Icon::PathSelect,
+                active_tool == EditorTool::PathSelect,
+                true,
+                Some(EditorMessage::EditorSelectTool(EditorTool::PathSelect)),
+                tr(lang, "tooltip-tool-path-select"),
+            ),
+        ]
+        .spacing(4),
+        row![
+            tool_rail_button_tipped(
+                Icon::Text,
+                active_tool == EditorTool::Text,
+                true,
+                Some(EditorMessage::EditorSelectTool(EditorTool::Text)),
+                tr(lang, "tooltip-tool-text"),
             ),
             tool_rail_button_tipped(
                 Icon::PaintBucket,
@@ -2632,9 +2704,14 @@ fn build_tool_options_card<'a>(
                     1.0_f32,
                     format!("{:.0} px", ui.shape_stroke_width),
                     EditorMessage::EditorSetShapeStrokeWidth,
+                ))
+                .push(vector_ui::build_vector_shape_extra_controls(
+                    state, ed, lang,
                 ));
             Some(section_card(tr(lang, ui.tool.label_key()), body))
         }
+        EditorTool::PathSelect => Some(vector_ui::build_path_select_tool_options(state, ed, lang)),
+        EditorTool::Text => Some(text_ui::build_text_tool_options(state, ed, lang)),
         EditorTool::PaintBucket => {
             let body = column![
                 slider_stepper_control(
@@ -3018,6 +3095,12 @@ fn build_tool_options_card<'a>(
         EditorTool::RemoveBg => Some(build_ai_rembg_tool_options(state, lang)),
         EditorTool::Watermark => Some(build_ai_watermark_tool_options(state, lang)),
         EditorTool::Caption => Some(build_ai_caption_tool_options(state, lang)),
+        EditorTool::Pointer if ed.active_vector_data.is_some() => {
+            Some(vector_ui::build_path_select_tool_options(state, ed, lang))
+        }
+        EditorTool::Pointer if ed.active_text_data.is_some() => {
+            Some(text_ui::build_text_tool_options(state, ed, lang))
+        }
         _ => None,
     }
 }
@@ -4760,6 +4843,7 @@ fn build_layers_panel<'a>(
         let row_el = layer_row(LayerRowSpec {
             name: layer.name.clone(),
             subtitle,
+            kind_badge: layer.kind.badge(),
             active: is_active,
             visible: layer.visible,
             locked: layer.locked,
@@ -5188,6 +5272,9 @@ pub fn build_color_picker_dialog<'a>(
         | ColorPickerTarget::CanvasSizeFill
         | ColorPickerTarget::RotateFill => tr(lang, "label-canvas-bg"),
         ColorPickerTarget::GradientStop(_) => tr(lang, "label-gradient-stops"),
+        ColorPickerTarget::VectorShapeFill => tr(lang, "shape-fill-fill"),
+        ColorPickerTarget::VectorShapeStroke => tr(lang, "shape-fill-stroke"),
+        ColorPickerTarget::TextLayerColor => tr(lang, "label-text-color"),
     };
 
     let mut footer = row![].spacing(8).align_y(Alignment::Center);
@@ -5745,6 +5832,16 @@ pub fn build_editor_layer_context_menu<'a>(
         ),
         MenuEntry::Item(
             MenuItem::new(
+                tr(lang, "action-layer-rasterize"),
+                EditorMessage::ContextMenuDispatch(Command::EditorRasterizeLayer {
+                    id: Some(layer_id),
+                }),
+            )
+            .icon(Icon::Layers)
+            .enabled(!layer.locked && !layer.kind.is_raster()),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
                 tr(lang, "action-layer-delete"),
                 EditorMessage::ContextMenuDispatch(Command::EditorLayerDelete { id: layer_id }),
             )
@@ -5776,6 +5873,26 @@ pub fn build_editor_add_layer_menu<'a>(
                 }),
             )
             .icon(Icon::Brush),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-layer-add-vector"),
+                EditorMessage::Dispatch(Command::EditorAddVectorLayer {
+                    name: format!("Vector {next_idx}"),
+                    data: photon_protocol::VectorLayerData::new(),
+                }),
+            )
+            .icon(Icon::BezierPen),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-layer-add-text"),
+                EditorMessage::Dispatch(Command::EditorAddTextLayer {
+                    name: format!("Text {next_idx}"),
+                    data: state.editor_ui.text_draft.clone(),
+                }),
+            )
+            .icon(Icon::Text),
         ),
         MenuEntry::Separator,
         MenuEntry::Header(tr(lang, "action-layer-add-filter")),
@@ -6301,5 +6418,45 @@ mod tests {
         assert!((left_edge.frac - 0.0).abs() < 1e-4);
         let right_edge = scrollbar_axis_metrics(dw2, 800.0, -mx.max_pan).unwrap();
         assert!((right_edge.frac - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn phase3_vector_and_text_tools_and_shape_builder() {
+        assert_eq!(
+            EditorTool::PathSelect.as_canvas_tool(),
+            CanvasTool::PathSelect
+        );
+        assert_eq!(EditorTool::Text.as_canvas_tool(), CanvasTool::Text);
+        assert_eq!(EditorTool::PathSelect.icon(), Icon::PathSelect);
+        assert_eq!(EditorTool::Text.icon(), Icon::Text);
+
+        let shape = build_vector_shape_from_draw_commit(
+            photon_protocol::DrawShapeKind::Rect,
+            &[[10.0, 20.0], [110.0, 70.0]],
+            &[],
+            true,
+            ShapeFillMode::StrokeAndFill,
+            [255, 0, 0],
+            Some([0, 255, 0]),
+            4.0,
+            12.0,
+            0.8,
+        )
+        .expect("vector rect shape");
+        assert_eq!(shape.fill, Some([0, 255, 0]));
+        assert_eq!(shape.stroke.color, [255, 0, 0]);
+        assert!((shape.stroke.width - 4.0).abs() < 1e-4);
+        match shape.geometry {
+            photon_protocol::VectorGeometry::Rect {
+                x,
+                y,
+                w,
+                h,
+                corner_radius,
+            } => {
+                assert_eq!((x, y, w, h, corner_radius), (10.0, 20.0, 100.0, 50.0, 12.0));
+            }
+            other => panic!("expected rect geometry, got {other:?}"),
+        }
     }
 }

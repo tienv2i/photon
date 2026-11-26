@@ -555,6 +555,80 @@ pub enum Command {
     EditorSelectionClearPixels,
     EditorSelectionDuplicateLayer,
     EditorCropToSelection,
+    EditorAddVectorLayer {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        data: crate::VectorLayerData,
+    },
+    EditorAddVectorShape {
+        #[serde(default)]
+        layer_id: Option<u64>,
+        shape: crate::VectorShape,
+    },
+    EditorUpdateVectorShape {
+        #[serde(default)]
+        layer_id: Option<u64>,
+        shape: crate::VectorShape,
+    },
+    EditorUpdateVectorPathNodes {
+        #[serde(default)]
+        layer_id: Option<u64>,
+        shape_id: u64,
+        nodes: Vec<crate::VectorPathNode>,
+        #[serde(default)]
+        closed: Option<bool>,
+    },
+    EditorDeleteVectorShape {
+        #[serde(default)]
+        layer_id: Option<u64>,
+        shape_id: u64,
+    },
+    EditorConvertShapeToPath {
+        #[serde(default)]
+        layer_id: Option<u64>,
+        #[serde(default)]
+        shape_id: Option<u64>,
+    },
+    EditorVectorPathOp {
+        #[serde(default)]
+        layer_id: Option<u64>,
+        #[serde(default)]
+        shape_id: Option<u64>,
+        op: crate::VectorPathOperation,
+    },
+    EditorTransformEach {
+        #[serde(default)]
+        layer_ids: Vec<u64>,
+        #[serde(default)]
+        shape_ids: Vec<u64>,
+        spec: crate::TransformEachSpec,
+    },
+    EditorVectorBlend {
+        #[serde(default)]
+        layer_id: Option<u64>,
+        spec: crate::VectorBlendSpec,
+    },
+    EditorExportVectorSvg {
+        #[serde(default)]
+        layer_id: Option<u64>,
+        path: String,
+    },
+    EditorAddTextLayer {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        data: crate::TextLayerData,
+    },
+    EditorUpdateTextLayer {
+        #[serde(default)]
+        id: Option<u64>,
+        data: crate::TextLayerData,
+    },
+    EditorRasterizeLayer {
+        #[serde(default)]
+        id: Option<u64>,
+    },
     BatchRun {
         operation: BatchOperation,
         source: BatchSource,
@@ -885,6 +959,19 @@ impl Command {
             Self::EditorSelectionClearPixels => "editor_selection_clear_pixels",
             Self::EditorSelectionDuplicateLayer => "editor_selection_duplicate_layer",
             Self::EditorCropToSelection => "editor_crop_to_selection",
+            Self::EditorAddVectorLayer { .. } => "editor_add_vector_layer",
+            Self::EditorAddVectorShape { .. } => "editor_add_vector_shape",
+            Self::EditorUpdateVectorShape { .. } => "editor_update_vector_shape",
+            Self::EditorUpdateVectorPathNodes { .. } => "editor_update_vector_path_nodes",
+            Self::EditorDeleteVectorShape { .. } => "editor_delete_vector_shape",
+            Self::EditorConvertShapeToPath { .. } => "editor_convert_shape_to_path",
+            Self::EditorVectorPathOp { .. } => "editor_vector_path_op",
+            Self::EditorTransformEach { .. } => "editor_transform_each",
+            Self::EditorVectorBlend { .. } => "editor_vector_blend",
+            Self::EditorExportVectorSvg { .. } => "editor_export_vector_svg",
+            Self::EditorAddTextLayer { .. } => "editor_add_text_layer",
+            Self::EditorUpdateTextLayer { .. } => "editor_update_text_layer",
+            Self::EditorRasterizeLayer { .. } => "editor_rasterize_layer",
             Self::BatchRun { .. } => "batch_run",
             Self::BatchCancel => "batch_cancel",
             Self::AddFavorite { .. } => "add_favorite",

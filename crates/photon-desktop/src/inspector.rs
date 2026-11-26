@@ -1076,6 +1076,12 @@ pub fn build_ui_tree(
                     EditorTool::BezierPen,
                 ),
                 (
+                    "editor.tool.path_select",
+                    "tool-path-select",
+                    EditorTool::PathSelect,
+                ),
+                ("editor.tool.text", "tool-text", EditorTool::Text),
+                (
                     "editor.tool.paint_bucket",
                     "tool-paint-bucket",
                     EditorTool::PaintBucket,
@@ -1430,6 +1436,96 @@ pub fn build_ui_tree(
                     "editor.menu.layer.flatten",
                     "action-layer-flatten",
                     has_doc && layer_count > 1,
+                ),
+            ] {
+                widgets.push(SemanticWidgetNode {
+                    id: id.to_owned(),
+                    role: "menu_item".to_owned(),
+                    label: tr(lang, label_key),
+                    workspace: ws,
+                    enabled,
+                    visible: true,
+                    bounds: None,
+                    value: None,
+                });
+            }
+            let active_vector_data = ed.and_then(|e| e.active_vector_data.as_ref());
+            let has_vector_layer = active_vector_data.is_some();
+            let has_vector_shape = active_vector_data.is_some_and(|v| !v.shapes.is_empty());
+            let has_two_vector_shapes = active_vector_data.is_some_and(|v| v.shapes.len() >= 2);
+            let active_non_raster = ed
+                .and_then(|e| e.layers.iter().find(|l| l.id == e.active_layer_id))
+                .is_some_and(|l| !l.locked && !l.kind.is_raster());
+            widgets.push(SemanticWidgetNode {
+                id: "editor.menu.vector".to_owned(),
+                role: "menu_button".to_owned(),
+                label: tr(lang, "menu-vector"),
+                workspace: ws,
+                enabled: has_doc,
+                visible: true,
+                bounds: None,
+                value: None,
+            });
+            for (id, label_key, enabled) in [
+                (
+                    "editor.menu.vector.new_layer",
+                    "menu-vector-new-layer",
+                    has_doc,
+                ),
+                (
+                    "editor.menu.vector.convert_to_path",
+                    "menu-vector-convert-to-path",
+                    has_vector_shape,
+                ),
+                (
+                    "editor.menu.vector.join_path",
+                    "menu-vector-join-path",
+                    has_two_vector_shapes,
+                ),
+                (
+                    "editor.menu.vector.split_path",
+                    "menu-vector-split-path",
+                    has_vector_shape,
+                ),
+                (
+                    "editor.menu.vector.close_open_path",
+                    "menu-vector-close-open-path",
+                    has_vector_shape,
+                ),
+                (
+                    "editor.menu.vector.reverse_path",
+                    "menu-vector-reverse-path",
+                    has_vector_shape,
+                ),
+                (
+                    "editor.menu.vector.simplify_path",
+                    "menu-vector-simplify-path",
+                    has_vector_shape,
+                ),
+                (
+                    "editor.menu.vector.smooth_path",
+                    "menu-vector-smooth-path",
+                    has_vector_shape,
+                ),
+                (
+                    "editor.menu.vector.transform_each",
+                    "menu-vector-transform-each",
+                    has_doc,
+                ),
+                (
+                    "editor.menu.vector.blend",
+                    "menu-vector-blend",
+                    has_two_vector_shapes,
+                ),
+                (
+                    "editor.menu.vector.rasterize",
+                    "action-layer-rasterize",
+                    active_non_raster,
+                ),
+                (
+                    "editor.menu.vector.export_svg",
+                    "menu-vector-export-svg",
+                    has_vector_layer,
                 ),
             ] {
                 widgets.push(SemanticWidgetNode {
@@ -2000,6 +2096,11 @@ pub fn build_ui_tree(
                         "action-layer-lock"
                     },
                     target_layer.is_some(),
+                ),
+                (
+                    "rasterize",
+                    "action-layer-rasterize",
+                    target_layer.is_some_and(|l| !l.locked && !l.kind.is_raster()),
                 ),
                 ("delete", "action-layer-delete", can_delete),
             ] {

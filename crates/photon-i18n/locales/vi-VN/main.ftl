@@ -1068,3 +1068,74 @@ smart-paste-dismiss = Ẩn
 tool-fill-group = Chuyển sắc / Đổ màu
 tool-path-select-soon = Chọn đường dẫn (A)
 tool-text-soon = Công cụ chữ (T)
+
+# Phase 3: Lớp Vector, Công cụ đường dẫn, Lớp chữ, Biến đổi từng đối tượng, Hòa trộn Vector & Xuất SVG
+menu-vector = Vector
+menu-vector-new-layer = Tạo lớp Vector mới
+menu-vector-convert-to-path = Chuyển hình thành đường dẫn
+menu-vector-join-path = Nối đường dẫn
+menu-vector-split-path = Tách đường dẫn
+menu-vector-close-open-path = Đóng / Mở đường dẫn
+menu-vector-reverse-path = Đảo chiều đường dẫn
+menu-vector-simplify-path = Đơn giản hóa đường dẫn
+menu-vector-smooth-path = Làm mượt đường dẫn
+menu-vector-transform-each = Biến đổi từng đối tượng…
+menu-vector-blend = Hòa trộn hình (Blend)…
+menu-vector-export-svg = Xuất SVG…
+
+tool-path-select = Chọn đường dẫn
+tooltip-tool-path-select = Công cụ chọn đường dẫn & nút (A)
+tool-text = Công cụ chữ
+tooltip-tool-text = Công cụ tạo lớp chữ (T)
+
+action-layer-add-vector = Lớp Vector
+action-layer-add-text = Lớp chữ
+action-layer-rasterize = Chuyển sang điểm ảnh (Rasterize)
+action-delete-shape = Xóa hình
+
+label-vector-shape-mode = Lớp Vector không phá hủy
+label-corner-radius = Bo góc
+hint-vector-no-active-layer = Chọn hoặc tạo Lớp Vector để chỉnh sửa đường dẫn và nút không phá hủy.
+label-vector-shapes = Số hình Vector
+label-vector-node = Nút
+node-mode-corner = Góc nhọn
+node-mode-smooth = Mượt
+node-mode-symmetric = Đối xứng
+label-simplify-tolerance = Độ dung sai đơn giản
+label-smooth-tension = Độ căng làm mượt
+
+dialog-transform-each-title = Biến đổi từng đối tượng
+label-repeat-steps = Số bước lặp
+label-reflect-x = Lật ngang (X)
+label-reflect-y = Lật dọc (Y)
+label-apply-to-duplicate = Áp dụng lên bản sao
+
+dialog-vector-blend-title = Hòa trộn hình Vector
+hint-vector-blend = Nội suy các hình trung gian giữa hai hình vector trên lớp hiện tại.
+label-blend-steps = Số bước trung gian
+
+label-text-content = Nội dung chữ
+placeholder-text-content = Nhập nội dung chữ…
+label-font-family = Phông chữ
+label-font-size = Cỡ chữ
+label-line-height = Chiều cao dòng
+label-text-color = Màu chữ
+label-text-bold = Đậm
+label-text-italic = Nghiêng
+align-left = Trái
+align-center = Giữa
+align-right = Phải
+
+op-add-vector-layer = Thêm lớp Vector
+op-add-vector-shape = Thêm hình Vector
+op-update-vector-shape = Cập nhật hình Vector
+op-delete-vector-shape = Xóa hình Vector
+op-convert-to-path = Chuyển hình thành đường dẫn
+op-vector-path-op = Thao tác đường dẫn Vector
+op-transform-each = Biến đổi từng đối tượng
+op-vector-blend = Hòa trộn Vector
+op-add-text-layer = Thêm lớp chữ
+op-update-text-layer = Cập nhật lớp chữ
+op-rasterize-layer = Chuyển sang điểm ảnh (Rasterize)
+status-vector-svg-exported = Đã xuất SVG tới { $path }
+

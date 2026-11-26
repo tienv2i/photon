@@ -4,14 +4,21 @@ use std::sync::Arc;
 
 use image::{Rgba, RgbaImage};
 use photon_protocol::{
-    BlendMode, LayerEffect, LayerKind, LayerSummary, TextLayerData, UiText, VectorLayerData,
-    VectorPathNode, VectorShape,
+    BlendMode, CanvasAnchor, LayerEffect, LayerKind, LayerSummary, LayerTransformSpec,
+    TextLayerData, TransformEachSpec, UiText, VectorBlendSpec, VectorGeometry, VectorLayerData,
+    VectorPathNode, VectorPathOperation, VectorShape,
 };
 
 use crate::ImageError;
 use crate::selection::SelectionMask;
 use crate::text::rasterize_text_layer;
-use crate::vector::{convert_shape_to_path, render_vector_layer};
+use crate::vector::{
+    add_node_at_closest_point, add_node_on_segment, apply_blend_to_layer,
+    apply_transform_each_to_layer, convert_shape_to_path, delete_node, geometry_to_bezier_path,
+    join_shapes, move_node_anchor, move_node_handle, render_vector_layer, reverse_shape_path,
+    set_node_mode, set_path_closed, simplify_shape, smooth_shape, split_shape_at_node,
+    toggle_path_closed, transform_shape_once,
+};
 
 /// One raster, vector, or text layer in a document stack.
 ///
@@ -310,6 +317,20 @@ pub enum LayerOperation {
         layer_id: u64,
         shape_id: u64,
     },
+    VectorPathOp {
+        layer_id: u64,
+        shape_id: Option<u64>,
+        op: VectorPathOperation,
+    },
+    TransformEach {
+        layer_ids: Vec<u64>,
+        shape_ids: Vec<u64>,
+        spec: TransformEachSpec,
+    },
+    VectorBlend {
+        layer_id: u64,
+        spec: VectorBlendSpec,
+    },
     AddTextLayer {
         name: String,
         data: TextLayerData,
@@ -367,6 +388,9 @@ impl LayerOperation {
             | Self::UpdateVectorPathNodes { .. }
             | Self::DeleteVectorShape { .. }
             | Self::ConvertShapeToPath { .. }
+            | Self::VectorPathOp { .. }
+            | Self::TransformEach { .. }
+            | Self::VectorBlend { .. }
             | Self::UpdateTextLayer { .. }
             | Self::RasterizeLayer { .. } => UiText::new("op_layer_props"),
             Self::Duplicate { .. } => UiText::new("op_layer_duplicate"),
@@ -999,7 +1023,348 @@ impl LayerStack {
                 let Some(shape) = vdata.shape_mut(*shape_id) else {
                     return Err(ImageError::coded("vector_shape_not_found"));
                 };
-                Ok(convert_shape_to_path(shape))
+                let changed = convert_shape_to_path(shape);
+                if changed {
+                    let (cw, ch) = (self.canvas_width, self.canvas_height);
+                    self.layers[idx].refresh_cached_pixels(cw, ch);
+                }
+                Ok(changed)
+            }
+            LayerOperation::VectorPathOp {
+                layer_id,
+                shape_id,
+                op,
+            } => {
+                let Some(idx) = self.index_of(*layer_id) else {
+                    return Err(ImageError::coded("layer_not_found"));
+                };
+                if self.layers[idx].locked {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                let Some(vdata) = &mut self.layers[idx].vector_data else {
+                    return Err(ImageError::coded("not_a_vector_layer"));
+                };
+                if let VectorPathOperation::SelectShapes { shape_ids } = op {
+                    let valid: Vec<u64> = shape_ids
+                        .iter()
+                        .copied()
+                        .filter(|&sid| vdata.shape(sid).is_some())
+                        .collect();
+                    if vdata.selected_shape_ids == valid {
+                        return Ok(false);
+                    }
+                    vdata.selected_shape_ids = valid;
+                    return Ok(true);
+                }
+                let Some(sid) = shape_id
+                    .or_else(|| vdata.selected_shape_ids.last().copied())
+                    .or_else(|| vdata.shapes.last().map(|s| s.id))
+                else {
+                    return Err(ImageError::coded("vector_shape_not_found"));
+                };
+                let changed = match op {
+                    VectorPathOperation::AddNodeOnSegment { segment_index, t } => {
+                        let Some(shape) = vdata.shape_mut(sid) else {
+                            return Err(ImageError::coded("vector_shape_not_found"));
+                        };
+                        let (mut nodes, closed) = geometry_to_bezier_path(&shape.geometry);
+                        if add_node_on_segment(&mut nodes, closed, *segment_index, *t).is_some() {
+                            shape.geometry = VectorGeometry::Path { nodes, closed };
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    VectorPathOperation::AddNodeAtPoint {
+                        point,
+                        max_distance,
+                    } => {
+                        let Some(shape) = vdata.shape_mut(sid) else {
+                            return Err(ImageError::coded("vector_shape_not_found"));
+                        };
+                        let (mut nodes, closed) = geometry_to_bezier_path(&shape.geometry);
+                        if add_node_at_closest_point(&mut nodes, closed, *point, *max_distance)
+                            .is_some()
+                        {
+                            shape.geometry = VectorGeometry::Path { nodes, closed };
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    VectorPathOperation::DeleteNode { index } => {
+                        let Some(shape) = vdata.shape_mut(sid) else {
+                            return Err(ImageError::coded("vector_shape_not_found"));
+                        };
+                        let (mut nodes, closed) = geometry_to_bezier_path(&shape.geometry);
+                        if nodes.len() <= 2 || delete_node(&mut nodes, *index).is_none() {
+                            false
+                        } else {
+                            shape.geometry = VectorGeometry::Path { nodes, closed };
+                            true
+                        }
+                    }
+                    VectorPathOperation::MoveNodeAnchor { index, anchor } => {
+                        let Some(shape) = vdata.shape_mut(sid) else {
+                            return Err(ImageError::coded("vector_shape_not_found"));
+                        };
+                        let (mut nodes, closed) = geometry_to_bezier_path(&shape.geometry);
+                        if move_node_anchor(&mut nodes, *index, *anchor) {
+                            shape.geometry = VectorGeometry::Path { nodes, closed };
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    VectorPathOperation::MoveNodeHandle {
+                        index,
+                        handle,
+                        position,
+                        mode,
+                    } => {
+                        let Some(shape) = vdata.shape_mut(sid) else {
+                            return Err(ImageError::coded("vector_shape_not_found"));
+                        };
+                        let (mut nodes, closed) = geometry_to_bezier_path(&shape.geometry);
+                        if move_node_handle(&mut nodes, *index, *handle, *position, *mode) {
+                            shape.geometry = VectorGeometry::Path { nodes, closed };
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    VectorPathOperation::SplitAtNode { index } => {
+                        let Some(pos) = vdata.index_of(sid) else {
+                            return Err(ImageError::coded("vector_shape_not_found"));
+                        };
+                        let mut next_id = vdata
+                            .next_shape_id
+                            .max(vdata.shapes.iter().map(|s| s.id).max().unwrap_or(0) + 1);
+                        let parts = split_shape_at_node(&vdata.shapes[pos], *index, &mut next_id);
+                        vdata.next_shape_id = next_id;
+                        if parts.len() == 1 && parts[0] == vdata.shapes[pos] {
+                            false
+                        } else {
+                            let new_ids: Vec<u64> = parts.iter().map(|s| s.id).collect();
+                            vdata.shapes.splice(pos..=pos, parts);
+                            vdata.selected_shape_ids = new_ids;
+                            true
+                        }
+                    }
+                    VectorPathOperation::JoinPaths {
+                        second_shape_id,
+                        tolerance,
+                    } => {
+                        let Some(second_id) = second_shape_id
+                            .or_else(|| {
+                                vdata
+                                    .selected_shape_ids
+                                    .iter()
+                                    .copied()
+                                    .find(|&id| id != sid)
+                            })
+                            .or_else(|| {
+                                vdata
+                                    .shapes
+                                    .iter()
+                                    .rev()
+                                    .map(|s| s.id)
+                                    .find(|&id| id != sid)
+                            })
+                        else {
+                            return Ok(false);
+                        };
+                        if second_id == sid {
+                            return Ok(false);
+                        }
+                        let Some(shape_a) = vdata.shape(sid).cloned() else {
+                            return Err(ImageError::coded("vector_shape_not_found"));
+                        };
+                        let Some(shape_b) = vdata.shape(second_id).cloned() else {
+                            return Err(ImageError::coded("vector_shape_not_found"));
+                        };
+                        let joined = join_shapes(&shape_a, &shape_b, *tolerance);
+                        if let Some(target) = vdata.shape_mut(sid) {
+                            *target = joined;
+                        }
+                        vdata.remove_shape(second_id);
+                        vdata.selected_shape_ids = vec![sid];
+                        true
+                    }
+                    VectorPathOperation::SetClosed { closed } => {
+                        let Some(shape) = vdata.shape_mut(sid) else {
+                            return Err(ImageError::coded("vector_shape_not_found"));
+                        };
+                        set_path_closed(&mut shape.geometry, *closed)
+                    }
+                    VectorPathOperation::ToggleClosed => {
+                        let Some(shape) = vdata.shape_mut(sid) else {
+                            return Err(ImageError::coded("vector_shape_not_found"));
+                        };
+                        toggle_path_closed(&mut shape.geometry);
+                        true
+                    }
+                    VectorPathOperation::ReversePath => {
+                        let Some(shape) = vdata.shape_mut(sid) else {
+                            return Err(ImageError::coded("vector_shape_not_found"));
+                        };
+                        reverse_shape_path(shape)
+                    }
+                    VectorPathOperation::SetNodeMode { index, mode } => {
+                        let Some(shape) = vdata.shape_mut(sid) else {
+                            return Err(ImageError::coded("vector_shape_not_found"));
+                        };
+                        let (mut nodes, closed) = geometry_to_bezier_path(&shape.geometry);
+                        if set_node_mode(&mut nodes, closed, *index, *mode) {
+                            shape.geometry = VectorGeometry::Path { nodes, closed };
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    VectorPathOperation::Simplify { tolerance } => {
+                        let Some(shape) = vdata.shape_mut(sid) else {
+                            return Err(ImageError::coded("vector_shape_not_found"));
+                        };
+                        simplify_shape(shape, *tolerance)
+                    }
+                    VectorPathOperation::Smooth { tension } => {
+                        let Some(shape) = vdata.shape_mut(sid) else {
+                            return Err(ImageError::coded("vector_shape_not_found"));
+                        };
+                        smooth_shape(shape, *tension)
+                    }
+                    VectorPathOperation::TranslateShape { dx, dy } => {
+                        if dx.abs() < 1e-4 && dy.abs() < 1e-4 {
+                            false
+                        } else {
+                            let Some(shape) = vdata.shape_mut(sid) else {
+                                return Err(ImageError::coded("vector_shape_not_found"));
+                            };
+                            let step_spec = TransformEachSpec {
+                                translate_x: *dx,
+                                translate_y: *dy,
+                                ..TransformEachSpec::default()
+                            };
+                            *shape = transform_shape_once(shape, &step_spec);
+                            true
+                        }
+                    }
+                    VectorPathOperation::SelectShapes { .. } => false,
+                };
+                if changed {
+                    let (cw, ch) = (self.canvas_width, self.canvas_height);
+                    self.layers[idx].refresh_cached_pixels(cw, ch);
+                }
+                Ok(changed)
+            }
+            LayerOperation::TransformEach {
+                layer_ids,
+                shape_ids,
+                spec,
+            } => {
+                if spec.is_identity() {
+                    return Ok(false);
+                }
+                let (cw, ch) = (self.canvas_width, self.canvas_height);
+                // Vector-shape mode when `shape_ids` are provided or the single target/active layer is a Vector layer.
+                let single_target_id = match layer_ids.as_slice() {
+                    [] => Some(self.active_layer_id),
+                    [only] => Some(*only),
+                    _ => None,
+                };
+                if let Some(tid) = single_target_id
+                    && let Some(idx) = self.index_of(tid)
+                    && self.layers[idx].is_vector()
+                {
+                    if self.layers[idx].locked {
+                        return Err(ImageError::coded("layer_locked"));
+                    }
+                    if let Some(vdata) = &mut self.layers[idx].vector_data {
+                        if vdata.is_empty() {
+                            return Ok(false);
+                        }
+                        let targets = (!shape_ids.is_empty()).then_some(shape_ids.as_slice());
+                        apply_transform_each_to_layer(vdata, targets, spec);
+                    }
+                    self.layers[idx].refresh_cached_pixels(cw, ch);
+                    return Ok(true);
+                }
+
+                // Multi-layer / Raster & Text layer Transform Each mode.
+                let targets: Vec<u64> = if !layer_ids.is_empty() {
+                    layer_ids.clone()
+                } else {
+                    let unlocked: Vec<u64> = self
+                        .layers
+                        .iter()
+                        .filter(|l| !l.locked && l.visible)
+                        .map(|l| l.id)
+                        .collect();
+                    if unlocked.is_empty() {
+                        vec![self.active_layer_id]
+                    } else {
+                        unlocked
+                    }
+                };
+                let steps = spec.repeat_steps.max(1);
+                let mut any_changed = false;
+                for tid in targets {
+                    let Some(idx) = self.index_of(tid) else {
+                        continue;
+                    };
+                    if self.layers[idx].locked {
+                        continue;
+                    }
+                    if spec.apply_to_duplicate {
+                        let base_layer = self.layers[idx].clone();
+                        let mut cur = base_layer.clone();
+                        let mut insert_pos = idx + 1;
+                        for step in 1..=steps {
+                            cur = transform_single_layer_once(&cur, spec, cw, ch);
+                            let new_id = self.next_id;
+                            self.next_id += 1;
+                            let mut dup = cur.clone();
+                            dup.id = new_id;
+                            dup.name = if steps == 1 {
+                                format!("{} copy", base_layer.name)
+                            } else {
+                                format!("{} copy {step}", base_layer.name)
+                            };
+                            self.layers.insert(insert_pos, dup);
+                            insert_pos += 1;
+                            self.active_layer_id = new_id;
+                            any_changed = true;
+                        }
+                    } else {
+                        let mut cur = self.layers[idx].clone();
+                        for _ in 0..steps {
+                            cur = transform_single_layer_once(&cur, spec, cw, ch);
+                        }
+                        self.layers[idx] = cur;
+                        any_changed = true;
+                    }
+                }
+                Ok(any_changed)
+            }
+            LayerOperation::VectorBlend { layer_id, spec } => {
+                let Some(idx) = self.index_of(*layer_id) else {
+                    return Err(ImageError::coded("layer_not_found"));
+                };
+                if self.layers[idx].locked {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                let Some(vdata) = &mut self.layers[idx].vector_data else {
+                    return Err(ImageError::coded("not_a_vector_layer"));
+                };
+                let created = apply_blend_to_layer(vdata, spec)?;
+                if created.is_empty() {
+                    return Ok(false);
+                }
+                vdata.selected_shape_ids = created;
+                let (cw, ch) = (self.canvas_width, self.canvas_height);
+                self.layers[idx].refresh_cached_pixels(cw, ch);
+                Ok(true)
             }
             LayerOperation::AddTextLayer { name, data } => {
                 self.add_text_layer(name, data.clone());
@@ -1024,6 +1389,81 @@ impl LayerStack {
             LayerOperation::RasterizeLayer { id } => self.rasterize_layer(*id),
         }
     }
+}
+
+fn anchor_pivot_uv(anchor: CanvasAnchor) -> (f32, f32) {
+    let px = match anchor {
+        CanvasAnchor::TopLeft | CanvasAnchor::Left | CanvasAnchor::BottomLeft => 0.0,
+        CanvasAnchor::Top | CanvasAnchor::Center | CanvasAnchor::Bottom => 0.5,
+        CanvasAnchor::TopRight | CanvasAnchor::Right | CanvasAnchor::BottomRight => 1.0,
+    };
+    let py = match anchor {
+        CanvasAnchor::TopLeft | CanvasAnchor::Top | CanvasAnchor::TopRight => 0.0,
+        CanvasAnchor::Left | CanvasAnchor::Center | CanvasAnchor::Right => 0.5,
+        CanvasAnchor::BottomLeft | CanvasAnchor::Bottom | CanvasAnchor::BottomRight => 1.0,
+    };
+    (px, py)
+}
+
+fn transform_single_layer_once(
+    layer: &Layer,
+    spec: &TransformEachSpec,
+    canvas_w: u32,
+    canvas_h: u32,
+) -> Layer {
+    let mut out = layer.clone();
+    let one_step = TransformEachSpec {
+        repeat_steps: 1,
+        apply_to_duplicate: false,
+        ..*spec
+    };
+    if let Some(ref mut vdata) = out.vector_data {
+        apply_transform_each_to_layer(vdata, None, &one_step);
+        out.refresh_cached_pixels(canvas_w, canvas_h);
+        return out;
+    }
+    if let Some(ref mut tdata) = out.text_data {
+        let scale = ((spec.scale_x.abs() + spec.scale_y.abs()) * 0.5).max(0.1);
+        tdata.font_size = (tdata.font_size * scale).clamp(4.0, 512.0);
+        tdata.x += spec.translate_x;
+        tdata.y += spec.translate_y;
+        out.refresh_cached_pixels(canvas_w, canvas_h);
+        return out;
+    }
+
+    let (pivot_x, pivot_y) = anchor_pivot_uv(spec.anchor);
+    let lt = LayerTransformSpec {
+        translate_x: spec.translate_x,
+        translate_y: spec.translate_y,
+        scale_x: spec.scale_x,
+        scale_y: spec.scale_y,
+        rotation_deg: spec.rotation_deg,
+        flip_h: spec.reflect_x,
+        flip_v: spec.reflect_y,
+        pivot_x,
+        pivot_y,
+    };
+    let (lw, lh) = out.dimensions();
+    let (next_px, dx, dy) = crate::pixels::transform_rgba_affine(&out.pixels, &lt);
+    out.pixels = Arc::new(next_px);
+    out.offset_x += dx;
+    out.offset_y += dy;
+    if let Some(orig) = &out.original {
+        let (next_orig, _, _) = crate::pixels::transform_rgba_affine(orig, &lt);
+        out.original = Some(Arc::new(next_orig));
+    }
+    if let Some(mask) = &out.mask
+        && mask.len() == (lw as usize) * (lh as usize)
+    {
+        if out.mask_linked {
+            let (next_mask, _, _, _, _) = crate::pixels::transform_mask_affine(mask, lw, lh, &lt);
+            out.mask = Some(Arc::new(next_mask));
+        } else {
+            out.mask_offset_x -= dx;
+            out.mask_offset_y -= dy;
+        }
+    }
+    out
 }
 
 /// Composite all visible layers in `stack` onto a `canvas_width x canvas_height` RGBA buffer.

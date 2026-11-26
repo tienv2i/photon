@@ -1068,3 +1068,74 @@ smart-paste-dismiss = Dismiss
 tool-fill-group = Gradient / Paint Bucket
 tool-path-select-soon = Path Selection (A)
 tool-text-soon = Text Tool (T)
+
+# Phase 3: Vector Layer, Path Tools, Text Layer, Transform Each, Vector Blend & SVG Export
+menu-vector = Vector
+menu-vector-new-layer = New Vector Layer
+menu-vector-convert-to-path = Convert Shape to Path
+menu-vector-join-path = Join Path
+menu-vector-split-path = Split Path
+menu-vector-close-open-path = Close / Open Path
+menu-vector-reverse-path = Reverse Path
+menu-vector-simplify-path = Simplify Path
+menu-vector-smooth-path = Smooth Path
+menu-vector-transform-each = Transform Each…
+menu-vector-blend = Blend…
+menu-vector-export-svg = Export SVG…
+
+tool-path-select = Path Selection
+tooltip-tool-path-select = Path & Node Selection Tool (A)
+tool-text = Text Tool
+tooltip-tool-text = Text Layer Tool (T)
+
+action-layer-add-vector = Vector Layer
+action-layer-add-text = Text Layer
+action-layer-rasterize = Rasterize Layer
+action-delete-shape = Delete Shape
+
+label-vector-shape-mode = Non-Destructive Vector Layer
+label-corner-radius = Corner Radius
+hint-vector-no-active-layer = Select or create a Vector Layer to edit paths and nodes non-destructively.
+label-vector-shapes = Vector Shapes
+label-vector-node = Node
+node-mode-corner = Corner
+node-mode-smooth = Smooth
+node-mode-symmetric = Symmetric
+label-simplify-tolerance = Simplify Tolerance
+label-smooth-tension = Smooth Tension
+
+dialog-transform-each-title = Transform Each
+label-repeat-steps = Repeat Steps
+label-reflect-x = Reflect Horizontal (X)
+label-reflect-y = Reflect Vertical (Y)
+label-apply-to-duplicate = Apply to Duplicate
+
+dialog-vector-blend-title = Vector Blend
+hint-vector-blend = Interpolate intermediate shapes between two vector shapes on the active layer.
+label-blend-steps = Blend Steps
+
+label-text-content = Text Content
+placeholder-text-content = Enter text…
+label-font-family = Font Family
+label-font-size = Font Size
+label-line-height = Line Height
+label-text-color = Text Color
+label-text-bold = Bold
+label-text-italic = Italic
+align-left = Left
+align-center = Center
+align-right = Right
+
+op-add-vector-layer = Add Vector Layer
+op-add-vector-shape = Add Vector Shape
+op-update-vector-shape = Update Vector Shape
+op-delete-vector-shape = Delete Vector Shape
+op-convert-to-path = Convert Shape to Path
+op-vector-path-op = Vector Path Operation
+op-transform-each = Transform Each
+op-vector-blend = Vector Blend
+op-add-text-layer = Add Text Layer
+op-update-text-layer = Update Text Layer
+op-rasterize-layer = Rasterize Layer
+status-vector-svg-exported = Exported SVG to { $path }
+

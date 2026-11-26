@@ -959,6 +959,7 @@ pub fn dimension_ratio_grid<'a, M: Clone + 'a>(spec: DimensionRatioSpec<'a, M>) 
 pub struct LayerRowSpec<'a, M> {
     pub name: String,
     pub subtitle: Option<String>,
+    pub kind_badge: Option<&'static str>,
     pub active: bool,
     pub visible: bool,
     pub locked: bool,
@@ -1060,7 +1061,31 @@ pub fn layer_row<'a, M: Clone + 'a>(spec: LayerRowSpec<'a, M>) -> Element<'a, M>
         }
         ti.into()
     } else {
-        let mut label_col = column![
+        let mut title_row = row![].spacing(5).align_y(Alignment::Center);
+        if let Some(badge) = spec.kind_badge {
+            title_row = title_row.push(
+                container(text(badge).size(10).style(|theme| {
+                    let t = PaletteTokens::for_theme(theme);
+                    text::Style {
+                        color: Some(t.accent_text),
+                    }
+                }))
+                .padding([1, 5])
+                .style(|theme| {
+                    let t = PaletteTokens::for_theme(theme);
+                    container::Style {
+                        background: Some(t.accent.into()),
+                        border: Border {
+                            color: t.accent,
+                            width: 1.0,
+                            radius: 3.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                }),
+            );
+        }
+        title_row = title_row.push(
             text(spec.name)
                 .size(TEXT_SIZE_CONTROL)
                 .wrapping(text::Wrapping::None)
@@ -1074,9 +1099,8 @@ pub fn layer_row<'a, M: Clone + 'a>(spec: LayerRowSpec<'a, M>) -> Element<'a, M>
                         }),
                     }
                 }),
-        ]
-        .spacing(1)
-        .width(Length::Fill);
+        );
+        let mut label_col = column![title_row].spacing(1).width(Length::Fill);
         if let Some(sub) = spec.subtitle {
             label_col = label_col.push(text(sub).size(10).wrapping(text::Wrapping::None).style(
                 |theme| {

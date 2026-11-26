@@ -7,6 +7,7 @@
 
 mod gpu;
 mod transform;
+pub mod vector_overlay;
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -19,7 +20,8 @@ use iced::widget::shader::{self, Action};
 use iced::{Event, Rectangle};
 use photon_protocol::{
     BlendMode, CanvasAntiAliasingMode, ColorAdjustments, DrawShapeKind, GradientKind,
-    GradientRepeat, GradientStop, LayerTransformSpec, VectorPathNode, ViewportDenoiseMode,
+    GradientRepeat, GradientStop, LayerTransformSpec, VectorHandleKind, VectorLayerData,
+    VectorNodeMode, VectorPathNode, ViewportDenoiseMode,
 };
 
 pub use gpu::{ImageQuadPrimitive, ImageShaderPipeline, MAX_GPU_TEXTURE_DIM};
@@ -27,6 +29,10 @@ pub use transform::{
     TransformDragMode, TransformHandle, TransformPreview, apply_transform_drag,
     hit_test_transform_handle, transform_doc_to_local, transform_handle_positions,
     transform_local_to_doc, transform_obb_corners,
+};
+pub use vector_overlay::{
+    VectorDragKind, VectorDragState, VectorHit, apply_live_vector_drag, geometry_to_bezier_nodes,
+    hit_test_vector_layer,
 };
 
 #[derive(Debug, Clone)]
@@ -77,6 +83,8 @@ pub enum CanvasTool {
     DrawPolygon,
     DrawPolyline,
     BezierPen,
+    PathSelect,
+    Text,
     PaintBucket,
     Gradient,
     Transform,
@@ -177,6 +185,7 @@ pub struct CanvasInteractionState {
     pub bezier_nodes: Vec<VectorPathNode>,
     pub bezier_dragging_handle: bool,
     pub stabilizer_pos_px: Option<[f32; 2]>,
+    pub vector_drag: Option<VectorDragState>,
 }
 
 /// Default studio canvas/viewport backdrop RGB matching `PaletteTokens::bg_canvas`.
@@ -267,6 +276,40 @@ pub enum CanvasEvent {
     TransformUpdated(LayerTransformSpec),
     TransformCommit,
     TransformCancel,
+    VectorSelectShape {
+        shape_id: u64,
+        node_index: Option<usize>,
+    },
+    VectorMoveNode {
+        shape_id: u64,
+        node_index: usize,
+        anchor: [f32; 2],
+    },
+    VectorMoveHandle {
+        shape_id: u64,
+        node_index: usize,
+        handle: VectorHandleKind,
+        position: [f32; 2],
+        mode: VectorNodeMode,
+    },
+    VectorAddNodeAtPoint {
+        shape_id: u64,
+        point: [f32; 2],
+        max_distance: f32,
+    },
+    VectorDeleteNode {
+        shape_id: u64,
+        node_index: usize,
+    },
+    VectorTranslateShape {
+        shape_id: u64,
+        dx: f32,
+        dy: f32,
+    },
+    TextCanvasClick {
+        x: f32,
+        y: f32,
+    },
     ResetFit,
 }
 
@@ -309,6 +352,8 @@ pub struct ImageCanvasProgram {
     pub healing_source_px: Option<[f32; 2]>,
     pub transform_preview: Option<TransformPreview>,
     pub gradient_preview: Option<GradientPreview>,
+    pub active_vector_layer: Option<VectorLayerData>,
+    pub selected_vector_node: Option<usize>,
 }
 
 impl Default for ImageCanvasProgram {
@@ -346,6 +391,8 @@ impl Default for ImageCanvasProgram {
             healing_source_px: None,
             transform_preview: None,
             gradient_preview: None,
+            active_vector_layer: None,
+            selected_vector_node: None,
         }
     }
 }
@@ -1096,6 +1143,26 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                         state.draw_current_px = None;
                         return Some(Action::request_redraw());
                     }
+                    Key::Named(Named::Backspace | Named::Delete)
+                        if self.tool == CanvasTool::PathSelect =>
+                    {
+                        if let (Some(vdata), Some(node_idx)) =
+                            (&self.active_vector_layer, self.selected_vector_node)
+                            && let Some(sid) = vdata
+                                .selected_shape_ids
+                                .last()
+                                .copied()
+                                .or_else(|| vdata.shapes.last().map(|s| s.id))
+                        {
+                            return Some(
+                                Action::publish(CanvasEvent::VectorDeleteNode {
+                                    shape_id: sid,
+                                    node_index: node_idx,
+                                })
+                                .and_capture(),
+                            );
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1260,6 +1327,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             | CanvasTool::Zoom
                             | CanvasTool::HealingBrush
                             | CanvasTool::Transform
+                            | CanvasTool::PathSelect
                     )
                     && let Some(pos) = cursor.position()
                     && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
@@ -1556,6 +1624,143 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             return Some(Action::capture());
                         }
                     }
+                    CanvasTool::PathSelect => {
+                        if let Some(pos) = cursor.position()
+                            && let Some([px, py]) = self.screen_to_image_px_unclamped(pos, bounds)
+                            && let Some(ref vdata) = self.active_vector_layer
+                        {
+                            let is_double = check_double_click(state, pos);
+                            state.last_click_time = Some(Instant::now());
+                            state.last_click_pos = Some(pos);
+                            let pt = [px as f32, py as f32];
+                            let doc_per_screen = self
+                                .fit_geometry(bounds)
+                                .map(|(_, _, drawn_w, _, fw, _)| (fw / drawn_w.max(1.0)).max(1e-4))
+                                .unwrap_or(1.0);
+                            let hit_radius = 9.0 * doc_per_screen;
+                            if let Some(hit) = hit_test_vector_layer(vdata, pt, hit_radius) {
+                                match hit {
+                                    VectorHit::Handle {
+                                        shape_id,
+                                        node_index,
+                                        handle,
+                                        mode,
+                                    } => {
+                                        let eff_mode = if state.modifiers.alt() {
+                                            VectorNodeMode::Corner
+                                        } else {
+                                            mode
+                                        };
+                                        state.vector_drag = Some(VectorDragState {
+                                            kind: VectorDragKind::Handle {
+                                                shape_id,
+                                                node_index,
+                                                handle,
+                                                mode: eff_mode,
+                                            },
+                                            start_px: pt,
+                                            current_px: pt,
+                                        });
+                                        return Some(
+                                            Action::publish(CanvasEvent::VectorSelectShape {
+                                                shape_id,
+                                                node_index: Some(node_index),
+                                            })
+                                            .and_capture(),
+                                        );
+                                    }
+                                    VectorHit::Anchor {
+                                        shape_id,
+                                        node_index,
+                                    } => {
+                                        let kind = if state.modifiers.alt() {
+                                            VectorDragKind::Handle {
+                                                shape_id,
+                                                node_index,
+                                                handle: VectorHandleKind::HandleOut,
+                                                mode: VectorNodeMode::Symmetric,
+                                            }
+                                        } else {
+                                            VectorDragKind::Anchor {
+                                                shape_id,
+                                                node_index,
+                                            }
+                                        };
+                                        state.vector_drag = Some(VectorDragState {
+                                            kind,
+                                            start_px: pt,
+                                            current_px: pt,
+                                        });
+                                        return Some(
+                                            Action::publish(CanvasEvent::VectorSelectShape {
+                                                shape_id,
+                                                node_index: Some(node_index),
+                                            })
+                                            .and_capture(),
+                                        );
+                                    }
+                                    VectorHit::Segment { shape_id } => {
+                                        if is_double
+                                            || state.modifiers.control()
+                                            || state.modifiers.logo()
+                                        {
+                                            return Some(
+                                                Action::publish(
+                                                    CanvasEvent::VectorAddNodeAtPoint {
+                                                        shape_id,
+                                                        point: pt,
+                                                        max_distance: hit_radius * 2.0,
+                                                    },
+                                                )
+                                                .and_capture(),
+                                            );
+                                        }
+                                        state.vector_drag = Some(VectorDragState {
+                                            kind: VectorDragKind::TranslateShape { shape_id },
+                                            start_px: pt,
+                                            current_px: pt,
+                                        });
+                                        return Some(
+                                            Action::publish(CanvasEvent::VectorSelectShape {
+                                                shape_id,
+                                                node_index: None,
+                                            })
+                                            .and_capture(),
+                                        );
+                                    }
+                                    VectorHit::ShapeBody { shape_id } => {
+                                        state.vector_drag = Some(VectorDragState {
+                                            kind: VectorDragKind::TranslateShape { shape_id },
+                                            start_px: pt,
+                                            current_px: pt,
+                                        });
+                                        return Some(
+                                            Action::publish(CanvasEvent::VectorSelectShape {
+                                                shape_id,
+                                                node_index: None,
+                                            })
+                                            .and_capture(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        return None;
+                    }
+                    CanvasTool::Text => {
+                        if let Some(pos) = cursor.position()
+                            && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
+                        {
+                            return Some(
+                                Action::publish(CanvasEvent::TextCanvasClick {
+                                    x: px as f32,
+                                    y: py as f32,
+                                })
+                                .and_capture(),
+                            );
+                        }
+                        return None;
+                    }
                     CanvasTool::PaintBucket => {
                         if let Some(pos) = cursor.position()
                             && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
@@ -1602,6 +1807,39 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     state.transform_start_spec = None;
                     state.transform_live_spec = None;
                     return Some(Action::capture());
+                }
+                if let Some(drag) = state.vector_drag.take() {
+                    let dx = drag.current_px[0] - drag.start_px[0];
+                    let dy = drag.current_px[1] - drag.start_px[1];
+                    if dx.hypot(dy) > 0.25 {
+                        let ev = match drag.kind {
+                            VectorDragKind::Anchor {
+                                shape_id,
+                                node_index,
+                            } => CanvasEvent::VectorMoveNode {
+                                shape_id,
+                                node_index,
+                                anchor: drag.current_px,
+                            },
+                            VectorDragKind::Handle {
+                                shape_id,
+                                node_index,
+                                handle,
+                                mode,
+                            } => CanvasEvent::VectorMoveHandle {
+                                shape_id,
+                                node_index,
+                                handle,
+                                position: drag.current_px,
+                                mode,
+                            },
+                            VectorDragKind::TranslateShape { shape_id } => {
+                                CanvasEvent::VectorTranslateShape { shape_id, dx, dy }
+                            }
+                        };
+                        return Some(Action::publish(ev).and_capture());
+                    }
+                    return Some(Action::request_redraw());
                 }
                 if state.painting {
                     state.painting = false;
@@ -1759,6 +1997,14 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
             Event::Mouse(mouse::Event::CursorMoved { position }) if state.dragging_split => {
                 let frac = ((position.x - bounds.x) / bounds.width.max(1.0)).clamp(0.02, 0.98);
                 return Some(Action::publish(CanvasEvent::CompareSplitChanged(frac)).and_capture());
+            }
+            Event::Mouse(mouse::Event::CursorMoved { position }) if state.vector_drag.is_some() => {
+                if let Some([px, py]) = self.screen_to_image_px_unclamped(*position, bounds)
+                    && let Some(ref mut drag) = state.vector_drag
+                {
+                    drag.current_px = [px as f32, py as f32];
+                    return Some(Action::request_redraw());
+                }
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) if state.transform_dragging => {
                 if let (Some(tp), Some(mode), Some(anchor), Some(start_spec), Some([px, py])) = (
@@ -2093,6 +2339,8 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     | CanvasTool::DrawPolygon
                     | CanvasTool::DrawPolyline
                     | CanvasTool::BezierPen
+                    | CanvasTool::PathSelect
+                    | CanvasTool::Text
                     | CanvasTool::PaintBucket
                     | CanvasTool::Gradient
             )
@@ -2727,6 +2975,9 @@ impl ImageCanvasProgram {
                 _ => {}
             }
         }
+
+        // Active Vector Layer 1px path outlines, anchor squares, and Bezier handle tangents
+        self.append_active_vector_layer_overlay(state, &mut lines, &mut tris, bounds);
 
         if !state.selecting
             || state.select_points_px.is_empty()

@@ -480,6 +480,8 @@ impl Core {
                         can_reselect: doc.selection().can_reselect(),
                         selection_revision: doc.selection_revision,
                     },
+                    active_vector_data: doc.stack().active_layer().vector_data.clone(),
+                    active_text_data: doc.stack().active_layer().text_data.clone(),
                 }
             }),
             editor_tabs,
@@ -1296,20 +1298,44 @@ impl Core {
                 color,
                 radius,
                 opacity,
-            } => self.apply_editor_op(
-                EditOp::DrawShape {
-                    kind: *kind,
-                    points: points.clone(),
-                    nodes: nodes.clone(),
-                    fill_mode: *fill_mode,
-                    closed: *closed,
-                    color: color.unwrap_or([0, 0, 0]),
-                    radius: radius.unwrap_or(3.0),
-                    opacity: opacity.unwrap_or(1.0),
-                    brush: photon_protocol::BrushSettings::default(),
-                },
-                ApplyTarget::ActiveLayer,
-            ),
+            } => {
+                let active_vector_layer_id = self.editor.as_ref().and_then(|doc| {
+                    let active = doc.stack().active_layer();
+                    (active.is_vector()
+                        && !active.editing_mask
+                        && !doc.stack().selection.quick_mask_active)
+                        .then_some(doc.stack().active_layer_id)
+                });
+                if let Some(layer_id) = active_vector_layer_id
+                    && let Some(shape) = draw_shape_to_vector_shape(
+                        *kind,
+                        points,
+                        nodes,
+                        *fill_mode,
+                        *closed,
+                        color.unwrap_or([0, 0, 0]),
+                        radius.unwrap_or(3.0),
+                        opacity.unwrap_or(1.0),
+                    )
+                {
+                    self.apply_layer_op(LayerOperation::AddVectorShape { layer_id, shape })
+                } else {
+                    self.apply_editor_op(
+                        EditOp::DrawShape {
+                            kind: *kind,
+                            points: points.clone(),
+                            nodes: nodes.clone(),
+                            fill_mode: *fill_mode,
+                            closed: *closed,
+                            color: color.unwrap_or([0, 0, 0]),
+                            radius: radius.unwrap_or(3.0),
+                            opacity: opacity.unwrap_or(1.0),
+                            brush: photon_protocol::BrushSettings::default(),
+                        },
+                        ApplyTarget::ActiveLayer,
+                    )
+                }
+            }
             Command::EditorFloodFill {
                 x,
                 y,
@@ -1602,6 +1628,198 @@ impl Core {
                 let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
                 doc.crop_to_selection().map_err(map_image_err)?;
                 Ok((None, None))
+            }
+            Command::EditorAddVectorLayer { name, data } => {
+                self.apply_layer_op(LayerOperation::AddVectorLayer {
+                    name: name.clone(),
+                    data: data.clone(),
+                })
+            }
+            Command::EditorAddVectorShape { layer_id, shape } => {
+                let target_layer_id = {
+                    let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                    match layer_id {
+                        Some(id) => Some(*id),
+                        None if doc.stack().active_layer().is_vector() => {
+                            Some(doc.stack().active_layer_id)
+                        }
+                        None => None,
+                    }
+                };
+                match target_layer_id {
+                    Some(lid) => self.apply_layer_op(LayerOperation::AddVectorShape {
+                        layer_id: lid,
+                        shape: shape.clone(),
+                    }),
+                    None => {
+                        let vdata =
+                            photon_protocol::VectorLayerData::from_shapes(vec![shape.clone()]);
+                        self.apply_layer_op(LayerOperation::AddVectorLayer {
+                            name: String::new(),
+                            data: vdata,
+                        })
+                    }
+                }
+            }
+            Command::EditorUpdateVectorShape { layer_id, shape } => {
+                let lid = {
+                    let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                    layer_id.unwrap_or(doc.stack().active_layer_id)
+                };
+                self.apply_layer_op(LayerOperation::UpdateVectorShape {
+                    layer_id: lid,
+                    shape: shape.clone(),
+                })
+            }
+            Command::EditorUpdateVectorPathNodes {
+                layer_id,
+                shape_id,
+                nodes,
+                closed,
+            } => {
+                let lid = {
+                    let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                    layer_id.unwrap_or(doc.stack().active_layer_id)
+                };
+                self.apply_layer_op(LayerOperation::UpdateVectorPathNodes {
+                    layer_id: lid,
+                    shape_id: *shape_id,
+                    nodes: nodes.clone(),
+                    closed: *closed,
+                })
+            }
+            Command::EditorDeleteVectorShape { layer_id, shape_id } => {
+                let lid = {
+                    let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                    layer_id.unwrap_or(doc.stack().active_layer_id)
+                };
+                self.apply_layer_op(LayerOperation::DeleteVectorShape {
+                    layer_id: lid,
+                    shape_id: *shape_id,
+                })
+            }
+            Command::EditorConvertShapeToPath { layer_id, shape_id } => {
+                let (lid, sid) = {
+                    let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                    let lid = layer_id.unwrap_or(doc.stack().active_layer_id);
+                    let Some(idx) = doc.stack().index_of(lid) else {
+                        return Err(ProtocolError::line(
+                            "layer_not_found",
+                            UiText::new("layer_not_found"),
+                        ));
+                    };
+                    let Some(vdata) = &doc.stack().layers[idx].vector_data else {
+                        return Err(ProtocolError::new(
+                            "not_a_vector_layer",
+                            "active layer is not a vector layer",
+                        ));
+                    };
+                    let sid = shape_id
+                        .or_else(|| vdata.selected_shape_ids.last().copied())
+                        .or_else(|| vdata.shapes.last().map(|s| s.id))
+                        .ok_or_else(|| {
+                            ProtocolError::new(
+                                "vector_shape_not_found",
+                                "no vector shape found on layer",
+                            )
+                        })?;
+                    (lid, sid)
+                };
+                self.apply_layer_op(LayerOperation::ConvertShapeToPath {
+                    layer_id: lid,
+                    shape_id: sid,
+                })
+            }
+            Command::EditorVectorPathOp {
+                layer_id,
+                shape_id,
+                op,
+            } => {
+                let lid = {
+                    let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                    layer_id.unwrap_or(doc.stack().active_layer_id)
+                };
+                self.apply_layer_op(LayerOperation::VectorPathOp {
+                    layer_id: lid,
+                    shape_id: *shape_id,
+                    op: op.clone(),
+                })
+            }
+            Command::EditorTransformEach {
+                layer_ids,
+                shape_ids,
+                spec,
+            } => self.apply_layer_op(LayerOperation::TransformEach {
+                layer_ids: layer_ids.clone(),
+                shape_ids: shape_ids.clone(),
+                spec: *spec,
+            }),
+            Command::EditorVectorBlend { layer_id, spec } => {
+                let lid = {
+                    let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                    layer_id.unwrap_or(doc.stack().active_layer_id)
+                };
+                self.apply_layer_op(LayerOperation::VectorBlend {
+                    layer_id: lid,
+                    spec: *spec,
+                })
+            }
+            Command::EditorExportVectorSvg { layer_id, path } => {
+                let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                let lid = layer_id.unwrap_or(doc.stack().active_layer_id);
+                let Some(idx) = doc.stack().index_of(lid) else {
+                    return Err(ProtocolError::line(
+                        "layer_not_found",
+                        UiText::new("layer_not_found"),
+                    ));
+                };
+                let Some(vdata) = &doc.stack().layers[idx].vector_data else {
+                    return Err(ProtocolError::new(
+                        "not_a_vector_layer",
+                        "active layer is not a vector layer",
+                    ));
+                };
+                let (cw, ch) = doc.dimensions();
+                let svg = photon_image::vector::vector_layer_to_svg(vdata, cw, ch);
+                let out_path = Path::new(path);
+                if let Some(parent) = out_path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| ProtocolError::new("io_error", e.to_string()))?;
+                }
+                fs::write(out_path, svg)
+                    .map_err(|e| ProtocolError::new("io_error", e.to_string()))?;
+                Ok((
+                    Some(UiText::with(
+                        "editor_exported",
+                        [("path", out_path.to_string_lossy().into_owned())],
+                    )),
+                    Some(serde_json::json!({ "path": out_path })),
+                ))
+            }
+            Command::EditorAddTextLayer { name, data } => {
+                self.apply_layer_op(LayerOperation::AddTextLayer {
+                    name: name.clone(),
+                    data: data.clone(),
+                })
+            }
+            Command::EditorUpdateTextLayer { id, data } => {
+                let lid = {
+                    let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                    id.unwrap_or(doc.stack().active_layer_id)
+                };
+                self.apply_layer_op(LayerOperation::UpdateTextLayer {
+                    id: lid,
+                    data: data.clone(),
+                })
+            }
+            Command::EditorRasterizeLayer { id } => {
+                let lid = {
+                    let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                    id.unwrap_or(doc.stack().active_layer_id)
+                };
+                self.apply_layer_op(LayerOperation::RasterizeLayer { id: lid })
             }
             Command::BatchRun {
                 operation,
@@ -3404,6 +3622,91 @@ impl Core {
             ),
         ))
     }
+}
+
+fn draw_shape_to_vector_shape(
+    kind: photon_protocol::DrawShapeKind,
+    points: &[[f32; 2]],
+    nodes: &[photon_protocol::VectorPathNode],
+    fill_mode: photon_protocol::ShapeFillMode,
+    closed: bool,
+    color: [u8; 3],
+    radius: f32,
+    opacity: f32,
+) -> Option<photon_protocol::VectorShape> {
+    use photon_protocol::{
+        DrawShapeKind, ShapeFillMode, VectorPathNode, VectorShape, VectorStroke,
+    };
+
+    let stroke_width = match fill_mode {
+        ShapeFillMode::Fill if kind != DrawShapeKind::Line && kind != DrawShapeKind::Polyline => {
+            0.0
+        }
+        _ => (radius * 2.0).max(1.0),
+    };
+    let fill = match fill_mode {
+        ShapeFillMode::Stroke => None,
+        ShapeFillMode::Fill | ShapeFillMode::StrokeAndFill => Some(color),
+    };
+    let stroke = VectorStroke::new(color, stroke_width);
+
+    let mut shape = match kind {
+        DrawShapeKind::Rect => {
+            if points.len() < 2 {
+                return None;
+            }
+            let x0 = points[0][0].min(points[1][0]);
+            let y0 = points[0][1].min(points[1][1]);
+            let w = (points[1][0] - points[0][0]).abs().max(1.0);
+            let h = (points[1][1] - points[0][1]).abs().max(1.0);
+            VectorShape::new_rect(0, "Rectangle", x0, y0, w, h, 0.0, fill, stroke)
+        }
+        DrawShapeKind::Ellipse => {
+            if points.len() < 2 {
+                return None;
+            }
+            let cx = (points[0][0] + points[1][0]) * 0.5;
+            let cy = (points[0][1] + points[1][1]) * 0.5;
+            let rx = ((points[1][0] - points[0][0]).abs() * 0.5).max(0.5);
+            let ry = ((points[1][1] - points[0][1]).abs() * 0.5).max(0.5);
+            VectorShape::new_ellipse(0, "Ellipse", cx, cy, rx, ry, fill, stroke)
+        }
+        DrawShapeKind::Line => {
+            if points.len() < 2 {
+                return None;
+            }
+            VectorShape::new_polygon(
+                0,
+                "Line",
+                points.to_vec(),
+                false,
+                None,
+                VectorStroke::new(color, (radius * 2.0).max(1.0)),
+            )
+        }
+        DrawShapeKind::Polygon | DrawShapeKind::Polyline => {
+            if points.len() < 2 {
+                return None;
+            }
+            let is_closed = kind == DrawShapeKind::Polygon && closed;
+            let eff_fill = if is_closed { fill } else { None };
+            VectorShape::new_polygon(0, "Polygon", points.to_vec(), is_closed, eff_fill, stroke)
+        }
+        DrawShapeKind::BezierPath => {
+            let vnodes: Vec<VectorPathNode> = if !nodes.is_empty() {
+                nodes.to_vec()
+            } else {
+                points.iter().map(|&p| VectorPathNode::corner(p)).collect()
+            };
+            if vnodes.len() < 2 {
+                return None;
+            }
+            let eff_fill = if closed { fill } else { None };
+            VectorShape::new_path(0, "Path", vnodes, closed, eff_fill, stroke)
+        }
+    };
+    shape.opacity = opacity.clamp(0.0, 1.0);
+    Some(shape)
 }
 
 fn encode_rgba_to_png(img: &RgbaImage) -> Result<Vec<u8>, ProtocolError> {
@@ -5473,5 +5776,286 @@ for line in sys.stdin:
         assert_eq!(data["canvasWidth"], 100);
         assert_eq!(data["canvasHeight"], 80);
         assert!(data["layerId"].as_u64().is_some());
+    }
+
+    #[test]
+    fn phase3_vector_and_text_commands_execute_and_undo() {
+        use photon_protocol::{
+            CanvasAnchor, DrawShapeKind, LayerKind, ShapeFillMode, TextAlign, TextLayerData,
+            TransformEachSpec, VectorBlendSpec, VectorGeometry, VectorLayerData,
+            VectorPathOperation, VectorShape, VectorStroke,
+        };
+
+        let mut core = Core::new(true, true);
+        assert!(
+            core.dispatch(Envelope::new(
+                "v0",
+                ClientKind::Cli,
+                Command::EditorNew {
+                    width: 200,
+                    height: 160,
+                    background: [255, 255, 255, 255],
+                },
+            ))
+            .ok
+        );
+
+        // 1. Add Vector Layer
+        assert!(
+            core.dispatch(Envelope::new(
+                "v1",
+                ClientKind::Cli,
+                Command::EditorAddVectorLayer {
+                    name: "Vector 1".to_owned(),
+                    data: VectorLayerData::new(),
+                },
+            ))
+            .ok
+        );
+        let ed = core.meta().editor.expect("editor");
+        assert_eq!(ed.layers.last().unwrap().kind, LayerKind::Vector);
+        assert!(ed.active_vector_data.is_some());
+
+        // 2. Drawing with Shape tool creates a non-destructive VectorShape
+        assert!(
+            core.dispatch(Envelope::new(
+                "v2",
+                ClientKind::Cli,
+                Command::EditorDrawShape {
+                    kind: DrawShapeKind::Rect,
+                    points: vec![[20.0, 20.0], [80.0, 60.0]],
+                    nodes: Vec::new(),
+                    fill_mode: ShapeFillMode::StrokeAndFill,
+                    closed: true,
+                    color: Some([200, 40, 40]),
+                    radius: Some(2.0),
+                    opacity: Some(1.0),
+                },
+            ))
+            .ok
+        );
+        let vdata = core.meta().editor.unwrap().active_vector_data.unwrap();
+        assert_eq!(vdata.shapes.len(), 1);
+        let first_id = vdata.shapes[0].id;
+        assert!(matches!(
+            vdata.shapes[0].geometry,
+            VectorGeometry::Rect { .. }
+        ));
+
+        // 3. Convert Shape to Path + Path ops (ToggleClosed, Reverse, Simplify, Smooth)
+        assert!(
+            core.dispatch(Envelope::new(
+                "v3",
+                ClientKind::Cli,
+                Command::EditorConvertShapeToPath {
+                    layer_id: None,
+                    shape_id: Some(first_id),
+                },
+            ))
+            .ok
+        );
+        assert!(matches!(
+            core.meta()
+                .editor
+                .unwrap()
+                .active_vector_data
+                .unwrap()
+                .shape(first_id)
+                .unwrap()
+                .geometry,
+            VectorGeometry::Path { .. }
+        ));
+        assert!(
+            core.dispatch(Envelope::new(
+                "v4",
+                ClientKind::Cli,
+                Command::EditorVectorPathOp {
+                    layer_id: None,
+                    shape_id: Some(first_id),
+                    op: VectorPathOperation::ReversePath,
+                },
+            ))
+            .ok
+        );
+
+        // 4. Add a second rect & Vector Blend
+        let rect2 = VectorShape::new_rect(
+            0,
+            "Rect 2",
+            100.0,
+            80.0,
+            60.0,
+            40.0,
+            0.0,
+            Some([40, 80, 200]),
+            VectorStroke::new([0, 0, 0], 2.0),
+        );
+        assert!(
+            core.dispatch(Envelope::new(
+                "v5",
+                ClientKind::Cli,
+                Command::EditorAddVectorShape {
+                    layer_id: None,
+                    shape: rect2,
+                },
+            ))
+            .ok
+        );
+        let shapes = core
+            .meta()
+            .editor
+            .unwrap()
+            .active_vector_data
+            .unwrap()
+            .shapes;
+        assert_eq!(shapes.len(), 2);
+        let s2_id = shapes[1].id;
+
+        assert!(
+            core.dispatch(Envelope::new(
+                "v6",
+                ClientKind::Cli,
+                Command::EditorVectorBlend {
+                    layer_id: None,
+                    spec: VectorBlendSpec {
+                        start_shape_id: first_id,
+                        end_shape_id: s2_id,
+                        steps: 3,
+                    },
+                },
+            ))
+            .ok
+        );
+        assert_eq!(
+            core.meta()
+                .editor
+                .unwrap()
+                .active_vector_data
+                .unwrap()
+                .shapes
+                .len(),
+            5
+        );
+
+        // 5. Transform Each with repeat_steps + apply_to_duplicate
+        assert!(
+            core.dispatch(Envelope::new(
+                "v7",
+                ClientKind::Cli,
+                Command::EditorTransformEach {
+                    layer_ids: Vec::new(),
+                    shape_ids: vec![s2_id],
+                    spec: TransformEachSpec {
+                        scale_x: 1.0,
+                        scale_y: 1.0,
+                        rotation_deg: 0.0,
+                        translate_x: 10.0,
+                        translate_y: 5.0,
+                        reflect_x: false,
+                        reflect_y: false,
+                        anchor: CanvasAnchor::Center,
+                        repeat_steps: 2,
+                        apply_to_duplicate: true,
+                    },
+                },
+            ))
+            .ok
+        );
+        assert_eq!(
+            core.meta()
+                .editor
+                .unwrap()
+                .active_vector_data
+                .unwrap()
+                .shapes
+                .len(),
+            7
+        );
+
+        // 6. Export Vector SVG
+        let svg_out = std::env::temp_dir().join(format!("photon-test-{}.svg", std::process::id()));
+        let _ = fs::remove_file(&svg_out);
+        assert!(
+            core.dispatch(Envelope::new(
+                "v8",
+                ClientKind::Cli,
+                Command::EditorExportVectorSvg {
+                    layer_id: None,
+                    path: svg_out.to_string_lossy().into_owned(),
+                },
+            ))
+            .ok
+        );
+        let svg_txt = fs::read_to_string(&svg_out).expect("exported svg");
+        assert!(svg_txt.contains("<svg"));
+        let _ = fs::remove_file(&svg_out);
+
+        // 7. Add & Update Text Layer, then Rasterize & Undo
+        assert!(
+            core.dispatch(Envelope::new(
+                "t1",
+                ClientKind::Cli,
+                Command::EditorAddTextLayer {
+                    name: "Heading".to_owned(),
+                    data: TextLayerData {
+                        text: "Hello Vector".to_owned(),
+                        font_size: 28.0,
+                        align: TextAlign::Center,
+                        x: 100.0,
+                        y: 80.0,
+                        ..TextLayerData::default()
+                    },
+                },
+            ))
+            .ok
+        );
+        let text_ed = core.meta().editor.unwrap();
+        assert_eq!(text_ed.layers.last().unwrap().kind, LayerKind::Text);
+        assert_eq!(
+            text_ed.active_text_data.as_ref().unwrap().text,
+            "Hello Vector"
+        );
+
+        assert!(
+            core.dispatch(Envelope::new(
+                "t2",
+                ClientKind::Cli,
+                Command::EditorUpdateTextLayer {
+                    id: None,
+                    data: TextLayerData {
+                        text: "Updated".to_owned(),
+                        bold: true,
+                        ..TextLayerData::default()
+                    },
+                },
+            ))
+            .ok
+        );
+        assert_eq!(
+            core.meta().editor.unwrap().active_text_data.unwrap().text,
+            "Updated"
+        );
+
+        assert!(
+            core.dispatch(Envelope::new(
+                "t3",
+                ClientKind::Cli,
+                Command::EditorRasterizeLayer { id: None },
+            ))
+            .ok
+        );
+        let rast_ed = core.meta().editor.unwrap();
+        assert_eq!(rast_ed.layers.last().unwrap().kind, LayerKind::Raster);
+        assert!(rast_ed.active_text_data.is_none());
+
+        // Undo restores Text Layer non-destructively
+        assert!(
+            core.dispatch(Envelope::new("t4", ClientKind::Cli, Command::EditorUndo))
+                .ok
+        );
+        assert_eq!(
+            core.meta().editor.unwrap().layers.last().unwrap().kind,
+            LayerKind::Text
+        );
     }
 }

@@ -23,6 +23,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_white_rgba() -> [u8; 4] {
+    [255, 255, 255, 255]
+}
+
 fn default_ai_auto_unload_secs() -> u32 {
     60
 }
@@ -134,6 +138,9 @@ pub enum Command {
     OpenFiles {
         paths: Vec<String>,
     },
+    OpenArchive {
+        path: String,
+    },
     OpenFolder {
         path: String,
     },
@@ -181,6 +188,15 @@ pub enum Command {
         path: String,
     },
     EditorOpen {
+        path: String,
+    },
+    EditorNew {
+        width: u32,
+        height: u32,
+        #[serde(default = "default_white_rgba")]
+        background: [u8; 4],
+    },
+    OpenInEditorOrUnsupported {
         path: String,
     },
     EditorResize {
@@ -765,6 +781,7 @@ impl Command {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::OpenFiles { .. } => "open_files",
+            Self::OpenArchive { .. } => "open_archive",
             Self::OpenFolder { .. } => "open_folder",
             Self::Navigate { .. } => "navigate",
             Self::Refresh => "refresh",
@@ -783,6 +800,8 @@ impl Command {
             Self::ViewerPrevious => "viewer_previous",
             Self::ViewerOpen { .. } => "viewer_open",
             Self::EditorOpen { .. } => "editor_open",
+            Self::EditorNew { .. } => "editor_new",
+            Self::OpenInEditorOrUnsupported { .. } => "open_in_editor_or_unsupported",
             Self::EditorResize { .. } => "editor_resize",
             Self::EditorCrop { .. } => "editor_crop",
             Self::EditorRotate { .. } => "editor_rotate",

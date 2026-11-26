@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Name=Photon (Viewer)
+Name[vi]=Photon (Trình xem)
+GenericName=Image Viewer
+GenericName[vi]=Trình xem ảnh
+Comment=Open image in standalone Photon Viewer
+Comment[vi]=Mở ảnh trong Trình xem Photon độc lập
+Exec=@BINDIR@/photon --viewer-window %F
+TryExec=@BINDIR@/photon
+Icon=io.github.tienv2i.Photon
+NoDisplay=true
+Terminal=false
+Categories=Graphics;Viewer;Photography;
+Keywords=photo;image;picture;viewer;manga;manhwa;
+MimeType=@MIMETYPES@
+StartupWMClass=io.github.tienv2i.Photon.Viewer
+StartupNotify=true

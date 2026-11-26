@@ -109,15 +109,24 @@ where
     let on_close = spec.on_close.clone();
     let on_noop = spec.on_noop.clone();
 
-    let frame_card = build_dialog_frame(rect, viewport, user_resized, margin, spec, header_strip);
+    let frame_card = build_dialog_frame(
+        rect,
+        viewport,
+        user_moved,
+        user_resized,
+        margin,
+        spec,
+        header_strip,
+    );
 
     // Only the dialog card itself is wrapped in `opaque(...)`; the full-viewport positioning
     // wrapper leaves empty space pass-through for `Floating` and `Cutout` modes.
+    let safe_margin = margin.max(0.0);
     let positioned = if !user_moved && !user_resized {
         container(opaque(frame_card))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
-            .padding(margin.max(0.0))
+            .padding(safe_margin)
     } else {
         container(opaque(frame_card))
             .width(Length::Fill)
@@ -127,8 +136,8 @@ where
             .padding(Padding {
                 top: rect.y.max(0.0),
                 left: rect.x.max(0.0),
-                right: 0.0,
-                bottom: 0.0,
+                right: safe_margin,
+                bottom: safe_margin,
             })
     };
 
@@ -143,9 +152,35 @@ where
     )
 }
 
+/// Compute `(max_card_height, max_body_height)` for a managed dialog frame so the header,
+/// optional header strip, scrollable body, and footer stay within the viewport.
+pub fn resolve_card_and_body_limits(
+    viewport: Size,
+    rect: Rectangle,
+    user_moved: bool,
+    user_resized: bool,
+    margin: f32,
+    has_header_strip: bool,
+    has_footer: bool,
+) -> (f32, f32) {
+    let m = margin.max(0.0);
+    let max_card_h = if user_resized {
+        rect.height.max(160.0)
+    } else if user_moved {
+        (viewport.height - rect.y.max(0.0) - m).max(160.0)
+    } else {
+        (viewport.height - m * 2.0).max(160.0)
+    };
+    let footer_reserve = if has_footer { 60.0 } else { 0.0 };
+    let header_strip_reserve = if has_header_strip { 56.0 } else { 0.0 };
+    let max_body_h = (max_card_h - 44.0 - footer_reserve - header_strip_reserve).max(60.0);
+    (max_card_h, max_body_h)
+}
+
 fn build_dialog_frame<'a, Id, M>(
     rect: Rectangle,
     viewport: Size,
+    user_moved: bool,
     user_resized: bool,
     margin: f32,
     spec: ManagedDialogSpec<'a, Id, M>,
@@ -236,7 +271,16 @@ where
     };
 
     let has_header_strip = header_strip.is_some();
-    let max_card_h = (viewport.height - margin.max(0.0) * 2.0).max(160.0);
+    let has_footer = spec.footer.is_some();
+    let (max_card_h, max_body_h) = resolve_card_and_body_limits(
+        viewport,
+        rect,
+        user_moved,
+        user_resized,
+        margin,
+        has_header_strip,
+        has_footer,
+    );
     let body_scroll = scrollable(container(spec.body).padding(14).width(Length::Fill))
         .width(Length::Fill)
         .height(if user_resized {
@@ -248,9 +292,6 @@ where
     let body_el: Element<'a, M> = if user_resized {
         body_scroll.into()
     } else {
-        let footer_reserve = if spec.footer.is_some() { 54.0 } else { 0.0 };
-        let header_strip_reserve = if has_header_strip { 48.0 } else { 0.0 };
-        let max_body_h = (max_card_h - 44.0 - footer_reserve - header_strip_reserve).max(60.0);
         container(body_scroll)
             .width(Length::Fill)
             .height(Length::Shrink)
@@ -336,44 +377,53 @@ where
         row![
             make_handle(
                 ResizeEdge::NW,
-                Length::Fixed(12.0),
-                Length::Fixed(6.0),
+                Length::Fixed(10.0),
+                Length::Fixed(4.0),
                 false
             ),
-            make_handle(ResizeEdge::N, Length::Fill, Length::Fixed(5.0), false),
+            make_handle(ResizeEdge::N, Length::Fill, Length::Fixed(4.0), false),
             make_handle(
                 ResizeEdge::NE,
-                Length::Fixed(12.0),
-                Length::Fixed(6.0),
+                Length::Fixed(10.0),
+                Length::Fixed(4.0),
                 false
             ),
         ]
         .width(Length::Fill)
-        .height(Length::Fixed(6.0)),
+        .height(Length::Fixed(4.0)),
         row![
-            make_handle(ResizeEdge::W, Length::Fixed(6.0), Length::Fill, false),
+            make_handle(ResizeEdge::W, Length::Fixed(5.0), Length::Fill, false),
             Space::new().width(Length::Fill).height(Length::Fill),
-            make_handle(ResizeEdge::E, Length::Fixed(6.0), Length::Fill, false),
+            // Keep the top-right 36px below the 4px NE handle clear so the close button in the
+            // 40px header is never overlapped by the East resize edge.
+            column![
+                Space::new()
+                    .width(Length::Fixed(5.0))
+                    .height(Length::Fixed(36.0)),
+                make_handle(ResizeEdge::E, Length::Fixed(5.0), Length::Fill, false),
+            ]
+            .width(Length::Fixed(5.0))
+            .height(Length::Fill),
         ]
         .width(Length::Fill)
         .height(Length::Fill),
         row![
             make_handle(
                 ResizeEdge::SW,
-                Length::Fixed(14.0),
-                Length::Fixed(8.0),
+                Length::Fixed(12.0),
+                Length::Fixed(5.0),
                 false
             ),
-            make_handle(ResizeEdge::S, Length::Fill, Length::Fixed(7.0), false),
+            make_handle(ResizeEdge::S, Length::Fill, Length::Fixed(5.0), false),
             make_handle(
                 ResizeEdge::SE,
-                Length::Fixed(16.0),
-                Length::Fixed(14.0),
+                Length::Fixed(12.0),
+                Length::Fixed(12.0),
                 true
             ),
         ]
         .width(Length::Fill)
-        .height(Length::Fixed(14.0))
+        .height(Length::Fixed(12.0))
         .align_y(Alignment::End),
     ]
     .width(Length::Fill)
@@ -581,5 +631,32 @@ where
         } else {
             mouse::Interaction::None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn card_and_body_limits_clamp_for_centered_moved_and_resized_states() {
+        let vp = Size::new(1200.0, 800.0);
+        let rect = Rectangle::new(Point::new(300.0, 500.0), Size::new(500.0, 400.0));
+
+        // Centered: full viewport minus 2*margin
+        let (card_c, body_c) =
+            resolve_card_and_body_limits(vp, rect, false, false, 16.0, true, true);
+        assert_eq!(card_c, 768.0);
+        assert_eq!(body_c, 768.0 - 44.0 - 60.0 - 56.0);
+
+        // User moved without resizing: bounded by remaining space from rect.y to bottom margin
+        let (card_m, body_m) =
+            resolve_card_and_body_limits(vp, rect, true, false, 16.0, false, true);
+        assert_eq!(card_m, 284.0);
+        assert_eq!(body_m, 284.0 - 44.0 - 60.0);
+
+        // User resized: uses explicit rect.height
+        let (card_r, _) = resolve_card_and_body_limits(vp, rect, true, true, 16.0, false, false);
+        assert_eq!(card_r, 400.0);
     }
 }

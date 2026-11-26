@@ -1,12 +1,14 @@
 //! Qt-independent image decoding, header probing, multi-layer compositing,
 //! parallel pixel operations, liquify warps, and non-destructive editor document pipeline.
 
+pub mod archive;
 pub mod codec;
 pub mod document;
 pub mod drawing;
 pub mod healing;
 pub mod layer;
 pub mod liquify;
+mod native_codecs;
 pub mod ora;
 pub mod pixels;
 pub mod selection;

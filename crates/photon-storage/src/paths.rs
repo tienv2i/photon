@@ -92,6 +92,10 @@ impl AppPaths {
         self.runtime_dir.join("viewers")
     }
 
+    pub fn editor_socket_path(&self) -> PathBuf {
+        self.runtime_dir.join("editor.sock")
+    }
+
     pub fn ensure_viewers_dir(&self) -> std::io::Result<PathBuf> {
         let dir = self.viewers_dir();
         std::fs::create_dir_all(&dir)?;

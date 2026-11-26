@@ -1210,6 +1210,9 @@ mod tests {
                 ai_task: None,
                 editor_caption: None,
                 has_pixel_clipboard: false,
+                viewer_archive: None,
+                editor_unsupported: None,
+                editor_source_is_virtual: false,
             },
             entries: vec![Entry {
                 name: "a.png".to_owned(),

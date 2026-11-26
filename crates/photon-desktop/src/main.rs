@@ -10,10 +10,10 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use photon_core::{Core, CoreRuntime};
 use photon_ipc::{
-    IpcRequest, ViewerInstanceInfo, acquire_viewer_path_lock, find_live_viewer_for_path,
-    register_viewer_instance, send_once, serve, viewer_socket_path,
+    IpcRequest, IpcResponse, ViewerInstanceInfo, acquire_viewer_path_lock,
+    find_live_viewer_for_path, register_viewer_instance, send_once, serve, viewer_socket_path,
 };
-use photon_protocol::{ClientKind, Command, Envelope, Language};
+use photon_protocol::{ClientKind, Command, Envelope, Language, Query};
 use photon_storage::logging::{initialize, log_shutdown, log_startup};
 use photon_storage::{AppIdentity, AppPaths, Config, UiState};
 
@@ -60,6 +60,10 @@ struct Cli {
     #[arg(long, hide = true)]
     viewer_window: bool,
 
+    /// Start in Editor workspace (optionally opening positional FILE)
+    #[arg(long)]
+    edit: bool,
+
     #[command(subcommand)]
     sub: Option<Sub>,
 
@@ -73,8 +77,8 @@ enum Sub {
     Browse { dir: Option<PathBuf> },
     /// Start in Viewer workspace for FILE...
     View { files: Vec<PathBuf> },
-    /// Start in Editor workspace for FILE
-    Edit { file: PathBuf },
+    /// Start in Editor workspace for optional FILE
+    Edit { file: Option<PathBuf> },
 }
 
 fn main() {
@@ -111,31 +115,45 @@ fn main() {
     }
 
     let mut initial_cmd = resolve_initial_command(&cli);
-    let standalone_viewer = !cli.headless
-        && (cli.viewer_window || matches!(initial_cmd, Some(Command::OpenFiles { .. })));
+    let is_sub_edit = matches!(cli.sub, Some(Sub::Edit { .. }));
+    let route = compute_launch_route(
+        cli.headless,
+        cli.new_window,
+        cli.viewer_window,
+        cli.edit,
+        is_sub_edit,
+        initial_cmd.as_ref(),
+    );
+    let standalone_viewer = route == LaunchRoute::StandaloneViewer;
+    let standalone_editor = route == LaunchRoute::StandaloneEditor;
     let opened_with_files = matches!(
         initial_cmd,
-        Some(Command::OpenFiles { .. } | Command::EditorOpen { .. })
+        Some(Command::OpenFiles { .. } | Command::OpenArchive { .. } | Command::EditorOpen { .. })
     );
 
     if standalone_viewer {
-        if let Some(Command::OpenFiles {
-            paths: ref raw_files,
-        }) = initial_cmd.clone()
+        let raw_files: Option<Vec<String>> = match &initial_cmd {
+            Some(Command::OpenFiles { paths }) => Some(paths.clone()),
+            Some(Command::OpenArchive { path }) => Some(vec![path.clone()]),
+            _ => None,
+        };
+        if let Some(raw_files) = raw_files
             && !cli.viewer_window
             && !cli.new_window
         {
             let mut to_open = Vec::new();
             for raw in raw_files {
-                let canon = canonicalize_path_str(raw);
+                let canon = canonicalize_path_str(&raw);
                 let _lock = acquire_viewer_path_lock(&paths, &canon, Duration::from_secs(2));
                 if let Some(matched) = find_live_viewer_for_path(&paths, &canon) {
                     let _ = try_forward_to_running(&matched.info.socket_path, Command::FocusWindow);
+                } else if main_instance_viewing_path(&paths.socket_path, &canon) {
+                    let _ = try_forward_to_running(&paths.socket_path, Command::FocusWindow);
                 } else {
-                    to_open.push(raw.clone());
+                    to_open.push(raw);
                 }
             }
-            if to_open.is_empty() && !raw_files.is_empty() {
+            if to_open.is_empty() {
                 return;
             }
             if to_open.len() > 1 {
@@ -143,17 +161,35 @@ fn main() {
                     spawn_viewer_window_child(extra, cli.safe_mode, cli.lang.as_deref());
                 }
             }
-            if let Some(first) = to_open.into_iter().next() {
+            if matches!(initial_cmd, Some(Command::OpenFiles { .. }))
+                && let Some(first) = to_open.into_iter().next()
+            {
                 initial_cmd = Some(Command::OpenFiles { paths: vec![first] });
             }
         }
-    } else if !cli.new_window
-        && !cli.headless
-        && let Some(cmd) = initial_cmd.clone()
-        && try_forward_to_running(&paths.socket_path, cmd)
-    {
-        let _ = try_forward_to_running(&paths.socket_path, Command::FocusWindow);
-        return;
+    } else if standalone_editor {
+        let editor_sock = paths.editor_socket_path();
+        let forward_cmd = initial_cmd.clone().unwrap_or(Command::FocusWindow);
+        if try_forward_to_running(&editor_sock, forward_cmd) {
+            if initial_cmd.is_some() {
+                let _ = try_forward_to_running(&editor_sock, Command::FocusWindow);
+            }
+            return;
+        }
+        let _ = std::fs::remove_file(&editor_sock);
+        if initial_cmd.is_none() {
+            initial_cmd = Some(Command::SetWorkspace {
+                workspace: photon_protocol::Workspace::Editor,
+            });
+        }
+    } else if route == LaunchRoute::ForwardOrStartBrowser {
+        let forward_cmd = initial_cmd.clone().unwrap_or(Command::FocusWindow);
+        if try_forward_to_running(&paths.socket_path, forward_cmd) {
+            if initial_cmd.is_some() {
+                let _ = try_forward_to_running(&paths.socket_path, Command::FocusWindow);
+            }
+            return;
+        }
     }
 
     log_startup(&identity, &paths, cli.headless);
@@ -163,7 +199,7 @@ fn main() {
         .build()
         .expect("tokio runtime");
 
-    let mut core = if standalone_viewer {
+    let mut core = if standalone_viewer || standalone_editor {
         Core::new_viewer_ephemeral(cli.headless, cli.safe_mode)
     } else {
         Core::new(cli.headless, cli.safe_mode)
@@ -190,6 +226,8 @@ fn main() {
     let pid = std::process::id();
     let socket_path = if standalone_viewer {
         viewer_socket_path(&paths, pid)
+    } else if standalone_editor {
+        paths.editor_socket_path()
     } else {
         paths.socket_path.clone()
     };
@@ -269,7 +307,13 @@ fn main() {
         unsafe { std::env::set_var("ICED_BACKEND", "wgpu") };
     }
 
-    app::init_globals(handle, gpu_backend, opened_with_files, standalone_viewer);
+    app::init_globals(
+        handle,
+        gpu_backend,
+        opened_with_files,
+        standalone_viewer,
+        standalone_editor,
+    );
 
     if let Err(err) = iced::daemon(app::boot, app::update, app::view)
         .title(app::title)
@@ -294,11 +338,15 @@ fn resolve_initial_command(cli: &Cli) -> Option<Command> {
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect(),
         }),
-        Some(Sub::Edit { file }) => Some(Command::EditorOpen {
-            path: file.to_string_lossy().into_owned(),
+        Some(Sub::Edit { file }) => file.as_ref().map(|f| Command::EditorOpen {
+            path: f.to_string_lossy().into_owned(),
         }),
         _ if !cli.paths.is_empty() => {
-            if cli.paths.len() == 1 && cli.paths[0].is_dir() {
+            if cli.edit {
+                Some(Command::EditorOpen {
+                    path: cli.paths[0].to_string_lossy().into_owned(),
+                })
+            } else if cli.paths.len() == 1 && cli.paths[0].is_dir() {
                 Some(Command::OpenFolder {
                     path: cli.paths[0].to_string_lossy().into_owned(),
                 })
@@ -339,6 +387,39 @@ fn spawn_viewer_window_child(path: &str, safe_mode: bool, lang: Option<&str>) {
     let _ = cmd.spawn();
 }
 
+fn main_instance_viewing_path(socket_path: &Path, canon: &Path) -> bool {
+    if !socket_path.exists() {
+        return false;
+    }
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return false;
+    };
+    rt.block_on(async move {
+        let Ok(IpcResponse::Query { data }) = send_once(
+            socket_path,
+            &IpcRequest::Query {
+                query: Query::State,
+            },
+        )
+        .await
+        else {
+            return false;
+        };
+        let ws = data
+            .get("meta")
+            .and_then(|m| m.get("workspace"))
+            .and_then(|v| v.as_str());
+        let vp = data
+            .get("meta")
+            .and_then(|m| m.get("viewerPath"))
+            .and_then(|v| v.as_str());
+        ws == Some("viewer") && vp.is_some_and(|p| canonicalize_path_str(p) == canon)
+    })
+}
+
 fn try_forward_to_running(socket_path: &Path, command: Command) -> bool {
     if !socket_path.exists() {
         return false;
@@ -359,4 +440,154 @@ fn try_forward_to_running(socket_path: &Path, command: Command) -> bool {
             .await
             .is_ok()
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchRoute {
+    StandaloneViewer,
+    StandaloneEditor,
+    ForwardOrStartBrowser,
+    DirectStart,
+}
+
+fn is_standalone_viewer_command(cmd: Option<&Command>) -> bool {
+    matches!(
+        cmd,
+        Some(Command::OpenFiles { .. } | Command::OpenArchive { .. })
+    )
+}
+
+fn is_standalone_editor_command(cmd: Option<&Command>) -> bool {
+    matches!(
+        cmd,
+        Some(Command::EditorOpen { .. } | Command::OpenInEditorOrUnsupported { .. })
+    )
+}
+
+fn compute_launch_route(
+    headless: bool,
+    new_window: bool,
+    viewer_window: bool,
+    editor_flag: bool,
+    is_sub_edit: bool,
+    initial_cmd: Option<&Command>,
+) -> LaunchRoute {
+    if !headless && (viewer_window || is_standalone_viewer_command(initial_cmd)) {
+        LaunchRoute::StandaloneViewer
+    } else if !headless
+        && !new_window
+        && (editor_flag || is_sub_edit || is_standalone_editor_command(initial_cmd))
+    {
+        LaunchRoute::StandaloneEditor
+    } else if !new_window && !headless {
+        LaunchRoute::ForwardOrStartBrowser
+    } else {
+        LaunchRoute::DirectStart
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standalone_viewer_command_matches_files_and_archives_only() {
+        assert!(is_standalone_viewer_command(Some(&Command::OpenFiles {
+            paths: vec!["/tmp/a.png".to_owned()],
+        })));
+        assert!(is_standalone_viewer_command(Some(&Command::OpenArchive {
+            path: "/tmp/book.cbz".to_owned(),
+        })));
+        assert!(!is_standalone_viewer_command(Some(&Command::OpenFolder {
+            path: "/tmp".to_owned(),
+        })));
+        assert!(!is_standalone_viewer_command(Some(&Command::EditorOpen {
+            path: "/tmp/a.png".to_owned(),
+        })));
+        assert!(!is_standalone_viewer_command(None));
+    }
+
+    #[test]
+    fn launch_routing_enforces_browser_editor_singletons_and_multi_viewer() {
+        // Empty launch (no args) and folder launch route through single-instance Browser.
+        assert_eq!(
+            compute_launch_route(false, false, false, false, false, None),
+            LaunchRoute::ForwardOrStartBrowser
+        );
+        assert_eq!(
+            compute_launch_route(
+                false,
+                false,
+                false,
+                false,
+                false,
+                Some(&Command::OpenFolder {
+                    path: "/tmp".to_owned(),
+                }),
+            ),
+            LaunchRoute::ForwardOrStartBrowser
+        );
+        // `photon edit` (with or without file) and `--edit` route through single-instance Editor.
+        assert_eq!(
+            compute_launch_route(false, false, false, false, true, None),
+            LaunchRoute::StandaloneEditor
+        );
+        assert_eq!(
+            compute_launch_route(false, false, false, true, false, None),
+            LaunchRoute::StandaloneEditor
+        );
+        assert_eq!(
+            compute_launch_route(
+                false,
+                false,
+                false,
+                false,
+                true,
+                Some(&Command::EditorOpen {
+                    path: "/tmp/a.png".to_owned(),
+                }),
+            ),
+            LaunchRoute::StandaloneEditor
+        );
+        // Files and archives open in independent multi-instance Viewer windows.
+        assert_eq!(
+            compute_launch_route(
+                false,
+                false,
+                false,
+                false,
+                false,
+                Some(&Command::OpenFiles {
+                    paths: vec!["/tmp/a.png".to_owned()],
+                }),
+            ),
+            LaunchRoute::StandaloneViewer
+        );
+        assert_eq!(
+            compute_launch_route(
+                false,
+                false,
+                false,
+                false,
+                false,
+                Some(&Command::OpenArchive {
+                    path: "/tmp/manga.pdf".to_owned(),
+                }),
+            ),
+            LaunchRoute::StandaloneViewer
+        );
+        // Explicit --viewer-window forces StandaloneViewer; --new-window / --headless bypass forwarding.
+        assert_eq!(
+            compute_launch_route(false, false, true, false, false, None),
+            LaunchRoute::StandaloneViewer
+        );
+        assert_eq!(
+            compute_launch_route(false, true, false, false, false, None),
+            LaunchRoute::DirectStart
+        );
+        assert_eq!(
+            compute_launch_route(true, false, false, false, false, None),
+            LaunchRoute::DirectStart
+        );
+    }
 }

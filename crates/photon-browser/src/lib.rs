@@ -20,7 +20,7 @@ use photon_panels::{
 };
 use photon_protocol::{
     BrowserLeftPanel, BrowserRightPanel, BrowserSortField, BrowserThumbSize, BrowserViewMode,
-    Command, Entry, MoveDirection, PluginCapability, SortOrder, Workspace,
+    Command, Entry, MoveDirection, PluginCapability, SortOrder,
 };
 use photon_ui::button::{self, ButtonVariant};
 use photon_ui::grid::{BreadcrumbItem, GridCardSpec, breadcrumbs_bar, thumbnail_card};
@@ -34,7 +34,7 @@ use photon_ui::theme::{
     PaletteTokens, RADIUS_SM, TEXT_SIZE_CAPTION, TEXT_SIZE_CONTROL, canvas_backdrop_style,
     card_style, hairline_rule_style, input_style, surface_panel_style,
 };
-use photon_ui::toolbar::{WorkspaceTab, toolbar, workspace_switcher_responsive};
+use photon_ui::toolbar::toolbar;
 use photon_ui::tooltip::{TooltipPosition, with_tooltip, with_tooltip_pos};
 use regex_automata::meta::Regex;
 use regex_automata::util::syntax::Config as RegexSyntaxConfig;
@@ -44,7 +44,6 @@ pub mod batch_dialog;
 use iced::widget::container as iced_container;
 use photon_panels::SidebarOrderState;
 use photon_protocol::UiStateSnapshot;
-use photon_ui::toolbar::workspace_switcher_mode;
 use std::collections::{BTreeSet, HashMap};
 
 use batch_dialog::BatchDialogKind;
@@ -81,7 +80,6 @@ pub struct BrowserViewState<'a> {
     pub browser_filter_regex: bool,
     pub browser_quick_access_open: bool,
     pub browser_quick_access_collapsed: bool,
-    pub quick_access_options_open: bool,
     pub quick_access_editing: bool,
     pub browser_explorer_open: bool,
     pub browser_explorer_collapsed: bool,
@@ -170,9 +168,10 @@ pub enum BrowserMessage {
     ToggleBrowserRightPanelVisible(BrowserRightPanel),
     BrowserRightSplitterDrag(f32),
     BrowserRightSplitterRelease(f32),
-    ToggleQuickAccessOptions,
     ToggleQuickAccessEditing,
     OpenInViewerWindow(String),
+    OpenExternally(String),
+    EditPath(String),
 }
 
 pub fn build_browser_toolbar<'a>(
@@ -249,48 +248,7 @@ pub fn build_browser_toolbar<'a>(
 
     let left = menubar;
 
-    let switcher = workspace_switcher_responsive(
-        vec![
-            WorkspaceTab::new(
-                tr(lang, "workspace-browser"),
-                Icon::Browser,
-                true,
-                BrowserMessage::Dispatch(Command::SetWorkspace {
-                    workspace: Workspace::Browser,
-                }),
-            )
-            .tooltip(tr(lang, "tooltip-workspace-browser")),
-            WorkspaceTab::new(
-                tr(lang, "workspace-viewer"),
-                Icon::Viewer,
-                false,
-                BrowserMessage::Dispatch(Command::SetWorkspace {
-                    workspace: Workspace::Viewer,
-                }),
-            )
-            .tooltip(tr(lang, "tooltip-workspace-viewer")),
-            WorkspaceTab::new(
-                tr(lang, "workspace-editor"),
-                Icon::Editor,
-                false,
-                BrowserMessage::Dispatch(Command::SetWorkspace {
-                    workspace: Workspace::Editor,
-                }),
-            )
-            .tooltip(tr(lang, "tooltip-workspace-editor")),
-        ],
-        workspace_switcher_mode(state.window_size.width),
-        state.active_menu == Some(BrowserMenuKind::WorkspaceSwitcher),
-        Some(BrowserMessage::ToggleMenu(
-            BrowserMenuKind::WorkspaceSwitcher,
-        )),
-    );
-
-    let right = row![switcher, toolbar_divider(), right_utilities]
-        .spacing(8)
-        .align_y(Alignment::Center);
-
-    toolbar(left, right)
+    toolbar(left, right_utilities)
 }
 
 pub fn build_browser_view<'a>(state: BrowserViewState<'a>) -> Element<'a, BrowserMessage> {
@@ -489,9 +447,14 @@ fn build_browser_left_sidebar(
 
         if panel == BrowserLeftPanel::QuickAccess {
             header = header
-                .options_active(state.quick_access_options_open)
-                .options_tooltip(tr(lang, "tooltip-panel-options"))
-                .on_options(Some(BrowserMessage::ToggleQuickAccessOptions));
+                .options_icon(Icon::Editor)
+                .options_active(state.quick_access_editing)
+                .options_tooltip(if state.quick_access_editing {
+                    tr(lang, "action-done-editing")
+                } else {
+                    tr(lang, "action-edit-quick-access")
+                })
+                .on_options(Some(BrowserMessage::ToggleQuickAccessEditing));
         }
 
         stacked = stacked.push(sidebar_panel(
@@ -518,31 +481,6 @@ fn build_quick_access_body(state: BrowserViewState<'_>) -> Element<'_, BrowserMe
     let cursor_pt = state.last_cursor.unwrap_or(iced::Point::new(140.0, 220.0));
 
     let mut quick_col = column![].spacing(4).width(Fill);
-    if state.quick_access_options_open {
-        let edit_label = if state.quick_access_editing {
-            tr(lang, "action-done-editing")
-        } else {
-            tr(lang, "action-edit-quick-access")
-        };
-        let options_strip = container(
-            row![
-                button::labeled(
-                    edit_label,
-                    Some(Icon::Editor),
-                    ButtonVariant::Tab {
-                        active: state.quick_access_editing,
-                    },
-                    Some(BrowserMessage::ToggleQuickAccessEditing),
-                )
-                .width(Fill),
-            ]
-            .spacing(4)
-            .align_y(Alignment::Center),
-        )
-        .padding([2, 2])
-        .width(Fill);
-        quick_col = quick_col.push(options_strip);
-    }
 
     let fav_len = state.snapshot.meta.favorites.len();
     for (idx, fav_path) in state.snapshot.meta.favorites.iter().enumerate() {
@@ -1353,8 +1291,15 @@ fn build_browser_preview_body(state: BrowserViewState<'_>) -> Element<'_, Browse
                 }),
         );
     } else {
+        let icon = if sel.kind == "folder" {
+            Icon::Folder
+        } else if is_archive_path_str(&sel.path) {
+            Icon::BookOpen
+        } else {
+            Icon::Info
+        };
         preview_col = preview_col.push(
-            container(photon_ui::icons::render(Icon::Folder, 36.0, None))
+            container(photon_ui::icons::render(icon, 36.0, None))
                 .width(Fill)
                 .height(Length::Fixed(110.0))
                 .align_x(Alignment::Center)
@@ -1424,6 +1369,67 @@ fn build_browser_preview_body(state: BrowserViewState<'_>) -> Element<'_, Browse
             .width(Fill),
             tr(lang, "action-open-folder"),
         ));
+    } else if is_archive_path_str(&sel.path) {
+        preview_col = preview_col.push(
+            row![
+                with_tooltip(
+                    button::labeled(
+                        tr(lang, "action-open-archive"),
+                        Some(Icon::BookOpen),
+                        ButtonVariant::Primary,
+                        Some(BrowserMessage::Dispatch(Command::OpenArchive {
+                            path: sel.path.clone(),
+                        })),
+                    )
+                    .width(Fill),
+                    tr(lang, "action-open-archive"),
+                ),
+                with_tooltip(
+                    button::labeled(
+                        tr(lang, "action-edit"),
+                        Some(Icon::Editor),
+                        ButtonVariant::Secondary,
+                        Some(BrowserMessage::EditPath(sel.path.clone())),
+                    ),
+                    tr(lang, "tooltip-browser-edit"),
+                ),
+            ]
+            .spacing(6),
+        );
+        preview_col = preview_col.push(
+            button::labeled(
+                tr(lang, "action-open-system"),
+                Some(Icon::Globe),
+                ButtonVariant::Ghost,
+                Some(BrowserMessage::OpenExternally(sel.path.clone())),
+            )
+            .width(Fill),
+        );
+    } else {
+        preview_col = preview_col.push(
+            row![
+                with_tooltip(
+                    button::labeled(
+                        tr(lang, "action-open-system"),
+                        Some(Icon::Globe),
+                        ButtonVariant::Primary,
+                        Some(BrowserMessage::OpenExternally(sel.path.clone())),
+                    )
+                    .width(Fill),
+                    tr(lang, "action-open-system"),
+                ),
+                with_tooltip(
+                    button::labeled(
+                        tr(lang, "action-edit"),
+                        Some(Icon::Editor),
+                        ButtonVariant::Secondary,
+                        Some(BrowserMessage::EditPath(sel.path.clone())),
+                    ),
+                    tr(lang, "tooltip-browser-edit"),
+                ),
+            ]
+            .spacing(6),
+        );
     }
 
     scrollable(preview_col).height(Fill).into()
@@ -1721,23 +1727,39 @@ pub fn build_browser_context_menu_entries<'a>(
             .icon(if is_fav { Icon::PinOff } else { Icon::Star }),
         ));
     } else {
+        let is_arch = is_archive_path_str(entry_path);
+        let open_msg = if is_image {
+            BrowserMessage::OpenInViewerWindow(entry_path.to_owned())
+        } else if is_arch {
+            BrowserMessage::ContextMenuDispatch(Command::OpenArchive {
+                path: entry_path.to_owned(),
+            })
+        } else {
+            BrowserMessage::OpenExternally(entry_path.to_owned())
+        };
+        let edit_msg = if is_image {
+            BrowserMessage::ContextMenuDispatch(Command::EditorOpen {
+                path: entry_path.to_owned(),
+            })
+        } else {
+            BrowserMessage::EditPath(entry_path.to_owned())
+        };
         entries.push(MenuEntry::Item(
-            MenuItem::new(
-                tr(lang, "action-view"),
-                BrowserMessage::OpenInViewerWindow(entry_path.to_owned()),
-            )
-            .icon(Icon::Viewer)
-            .enabled(is_image),
+            MenuItem::new(tr(lang, "action-view"), open_msg).icon(if is_arch {
+                Icon::BookOpen
+            } else {
+                Icon::Viewer
+            }),
+        ));
+        entries.push(MenuEntry::Item(
+            MenuItem::new(tr(lang, "action-edit"), edit_msg).icon(Icon::Editor),
         ));
         entries.push(MenuEntry::Item(
             MenuItem::new(
-                tr(lang, "action-edit"),
-                BrowserMessage::ContextMenuDispatch(Command::EditorOpen {
-                    path: entry_path.to_owned(),
-                }),
+                tr(lang, "action-open-system"),
+                BrowserMessage::OpenExternally(entry_path.to_owned()),
             )
-            .icon(Icon::Editor)
-            .enabled(is_image),
+            .icon(Icon::Globe),
         ));
     }
 
@@ -2130,11 +2152,20 @@ pub fn entry_kind_label(entry: &Entry) -> String {
         .unwrap_or_else(|| "File".to_owned())
 }
 
+fn is_archive_path_str(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(photon_protocol::is_archive_extension)
+}
+
 fn entry_icon(entry: &Entry) -> Icon {
     if entry.is_dir {
         Icon::Folder
     } else if entry.is_image {
         Icon::Image
+    } else if is_archive_path_str(&entry.path) {
+        Icon::BookOpen
     } else {
         Icon::Info
     }

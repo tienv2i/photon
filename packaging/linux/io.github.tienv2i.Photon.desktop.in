@@ -13,5 +13,5 @@ Terminal=false
 Categories=Graphics;Viewer;Photography;
 Keywords=photo;image;picture;viewer;manga;manhwa;browse;
 MimeType=@MIMETYPES@
-StartupWMClass=photon
+StartupWMClass=io.github.tienv2i.Photon
 StartupNotify=true

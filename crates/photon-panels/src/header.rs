@@ -26,6 +26,7 @@ pub struct DraggablePanelHeaderSpec<M> {
     pub compact_tabs: bool,
     pub collapsed: bool,
     pub dragging: bool,
+    pub options_icon: Option<Icon>,
     pub options_active: bool,
     pub drop_indicator: DropIndicator,
     pub drag_tooltip: Option<String>,
@@ -52,6 +53,7 @@ impl<M> Default for DraggablePanelHeaderSpec<M> {
             compact_tabs: false,
             collapsed: false,
             dragging: false,
+            options_icon: None,
             options_active: false,
             drop_indicator: DropIndicator::None,
             drag_tooltip: None,
@@ -129,6 +131,11 @@ impl<M> DraggablePanelHeaderSpec<M> {
 
     pub fn swap_tooltip(mut self, tooltip: impl Into<String>) -> Self {
         self.swap_tooltip = Some(tooltip.into());
+        self
+    }
+
+    pub fn options_icon(mut self, icon: Icon) -> Self {
+        self.options_icon = Some(icon);
         self
     }
 
@@ -274,7 +281,11 @@ pub fn draggable_panel_header<'a, M: Clone + 'a>(
         } else {
             ButtonVariant::Ghost
         };
-        let options_btn = ui_button::compact_icon(Icon::Sliders, variant, Some(options_msg));
+        let options_btn = ui_button::compact_icon(
+            spec.options_icon.unwrap_or(Icon::Sliders),
+            variant,
+            Some(options_msg),
+        );
         header_row = header_row.push(with_optional_tooltip(
             options_btn,
             spec.options_tooltip,

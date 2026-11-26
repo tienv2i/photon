@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use image::RgbaImage;
 use photon_image::LayerOperation;
@@ -22,6 +22,72 @@ use serde_json::{Value, json};
 
 use crate::core::{Core, commit_active_layer_pixels, map_image_err, no_doc_err};
 use crate::translate;
+
+static NEXT_TRANSLATE_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// Returns `true` when `path` has a format extension that external OCR/translate
+/// engines (`tesseract`, `photon.translate`, `photon.ocr.ai`, `photon.ocr.tesseract`)
+/// cannot read directly and must first be rasterized to a temporary PNG.
+pub(crate) fn needs_translate_rasterize(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    !matches!(
+        ext.as_deref(),
+        Some(
+            "png"
+                | "jpg"
+                | "jpeg"
+                | "jpe"
+                | "jfif"
+                | "bmp"
+                | "tif"
+                | "tiff"
+                | "webp"
+                | "pnm"
+                | "pbm"
+                | "pgm"
+                | "ppm"
+        )
+    )
+}
+
+struct TempFileGuard {
+    path: PathBuf,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn rasterize_for_translate(src_path: &Path) -> Result<TempFileGuard, String> {
+    let rgba = photon_image::decode_rgba(src_path).map_err(|e| {
+        format!(
+            "failed to decode {} for OCR/translate: {e}",
+            src_path.display()
+        )
+    })?;
+    let seq = NEXT_TRANSLATE_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path =
+        std::env::temp_dir().join(format!("photon-tr-{}-{}.png", std::process::id(), seq));
+    let guard = TempFileGuard::new(tmp_path.clone());
+    photon_image::codec::save_to(&rgba, &tmp_path)
+        .map_err(|e| format!("failed to write rasterized temp PNG: {e}"))?;
+    Ok(guard)
+}
 
 /// Background AI task plan handed off from `Core::dispatch` to `CoreRuntime`.
 #[derive(Debug, Clone)]
@@ -44,6 +110,7 @@ pub enum PendingAiJob {
         output_path: PathBuf,
         params: Value,
         cancel: Arc<AtomicBool>,
+        libre_post_translate: Option<(String, photon_protocol::TranslateSettings)>,
     },
     BuiltinTranslate {
         task_id: String,
@@ -52,6 +119,7 @@ pub enum PendingAiJob {
         source_lang: String,
         target_lang: String,
         settings: photon_protocol::TranslateSettings,
+        models_dir: PathBuf,
     },
 }
 
@@ -106,8 +174,29 @@ impl PendingAiJob {
                 output_path,
                 params,
                 cancel,
+                libre_post_translate,
                 ..
             } => {
+                let mut _temp_guard: Option<TempFileGuard> = None;
+                let effective_input = if matches!(
+                    action.as_str(),
+                    "viewer.translate" | "viewer.ai_ocr" | "viewer.ocr_copy"
+                ) && needs_translate_rasterize(&input_path)
+                {
+                    match rasterize_for_translate(&input_path) {
+                        Ok(guard) => {
+                            let path = guard.path().to_path_buf();
+                            _temp_guard = Some(guard);
+                            path
+                        }
+                        Err(message) => {
+                            on_event(AiWorkerEvent::Failed { message });
+                            return;
+                        }
+                    }
+                } else {
+                    input_path
+                };
                 run_jsonl_inference_streaming(
                     &plugin,
                     &action,
@@ -115,11 +204,37 @@ impl PendingAiJob {
                     &model_path,
                     device,
                     &models_dir,
-                    &input_path,
+                    &effective_input,
                     &output_path,
                     params,
                     cancel,
-                    on_event,
+                    |ev| match ev {
+                        AiWorkerEvent::InferenceDone {
+                            model_id,
+                            output_path,
+                            device_used,
+                            clipboard_text,
+                            translation: Some(mut tr),
+                            caption_text,
+                            saved_path,
+                        } if libre_post_translate.is_some() => {
+                            let (tgt_lang, settings) = libre_post_translate.as_ref().unwrap();
+                            tr.target_lang = tgt_lang.clone();
+                            match translate::translate_result_blocks(&mut tr, settings) {
+                                Ok(()) => on_event(AiWorkerEvent::InferenceDone {
+                                    model_id,
+                                    output_path,
+                                    device_used,
+                                    clipboard_text,
+                                    translation: Some(tr),
+                                    caption_text,
+                                    saved_path,
+                                }),
+                                Err(message) => on_event(AiWorkerEvent::Failed { message }),
+                            }
+                        }
+                        other => on_event(other),
+                    },
                 );
             }
             Self::BuiltinTranslate {
@@ -128,18 +243,36 @@ impl PendingAiJob {
                 source_lang,
                 target_lang,
                 settings,
+                models_dir,
                 ..
             } => {
                 on_event(AiWorkerEvent::Progress {
                     percent: 25,
                     stage: "Running OCR…".to_owned(),
                 });
+                let mut _temp_guard: Option<TempFileGuard> = None;
+                let effective_image_path = if needs_translate_rasterize(&image_path) {
+                    match rasterize_for_translate(&image_path) {
+                        Ok(guard) => {
+                            let path = guard.path().to_path_buf();
+                            _temp_guard = Some(guard);
+                            path
+                        }
+                        Err(message) => {
+                            on_event(AiWorkerEvent::Failed { message });
+                            return;
+                        }
+                    }
+                } else {
+                    image_path
+                };
                 match translate::run_ocr_and_translate(
-                    &image_path,
+                    &effective_image_path,
                     region,
                     &source_lang,
                     &target_lang,
                     &settings,
+                    Some(&models_dir),
                 ) {
                     Ok(res) => on_event(AiWorkerEvent::InferenceDone {
                         model_id: String::new(),
@@ -757,6 +890,7 @@ impl Core {
             output_path: tmp_out,
             params,
             cancel,
+            libre_post_translate: None,
         });
         Ok((None, Some(json!({ "jobId": task_id }))))
     }
@@ -1122,6 +1256,7 @@ impl Core {
             output_path: PathBuf::new(),
             params,
             cancel,
+            libre_post_translate: None,
         });
         Ok((None, Some(json!({ "jobId": task_id }))))
     }
@@ -1306,6 +1441,7 @@ impl Core {
             output_path: tmp_out,
             params,
             cancel,
+            libre_post_translate: None,
         });
         Ok((None, Some(json!({ "jobId": task_id }))))
     }
@@ -1328,7 +1464,12 @@ impl Core {
         }
 
         let _ = self.refresh_plugins_registry();
-        let ocr_only = target_lang.trim().is_empty();
+        let effective_target = if self.config.translate.provider == TranslateProvider::None {
+            ""
+        } else {
+            target_lang.trim()
+        };
+        let ocr_only = effective_target.is_empty();
         let use_ai_ocr = ocr_engine == "manga_ocr" || ocr_engine == "rapidocr";
         let wanted_action = if use_ai_ocr {
             "viewer.ai_ocr"
@@ -1357,11 +1498,13 @@ impl Core {
             .find_by_action(wanted_action, &self.config.disabled_plugins)
             .cloned();
 
-        // Use built-in Tesseract + LibreTranslate/GoogleWeb runner when LibreTranslate is
-        // selected or when the Tesseract/Translate plugin is not installed yet.
-        let use_builtin = !use_ai_ocr
-            && (self.config.translate.provider == TranslateProvider::LibreTranslate
-                || plugin_opt.is_none());
+        // Use built-in Tesseract runner strictly as a fallback when the
+        // Tesseract/OCR plugin is missing or disabled. When `photon.translate`
+        // is available, even `LibreTranslate` routes through it (with
+        // `targetLang: ""`) so we retain its 2x Lanczos3 / contrast-stretch /
+        // dark-bg polarity-retry + paragraph grouping, then post-translate
+        // blocks via `libre_post_translate`.
+        let use_builtin = !use_ai_ocr && plugin_opt.is_none();
 
         if use_builtin {
             let cancel = Arc::new(AtomicBool::new(false));
@@ -1388,8 +1531,9 @@ impl Core {
                 image_path: src_path,
                 region,
                 source_lang: source_lang.to_owned(),
-                target_lang: target_lang.to_owned(),
+                target_lang: effective_target.to_owned(),
                 settings: self.config.translate.clone(),
+                models_dir,
             });
             return Ok((None, Some(json!({ "jobId": task_id }))));
         }
@@ -1402,11 +1546,23 @@ impl Core {
             )
         })?;
 
+        let libre_post_translate =
+            if !ocr_only && self.config.translate.provider == TranslateProvider::LibreTranslate {
+                Some((effective_target.to_owned(), self.config.translate.clone()))
+            } else {
+                None
+            };
+        let plugin_target_lang = if libre_post_translate.is_some() {
+            ""
+        } else {
+            effective_target
+        };
+
         let mut params = if use_ai_ocr {
             json!({
                 "engine": ocr_engine,
                 "sourceLang": source_lang,
-                "targetLang": target_lang,
+                "targetLang": plugin_target_lang,
                 "modelsDir": models_dir.display().to_string(),
             })
         } else if ocr_only {
@@ -1418,7 +1574,7 @@ impl Core {
         } else {
             json!({
                 "sourceLang": source_lang,
-                "targetLang": target_lang,
+                "targetLang": plugin_target_lang,
                 "modelsDir": models_dir.display().to_string(),
             })
         };
@@ -1460,6 +1616,7 @@ impl Core {
             output_path: PathBuf::new(),
             params,
             cancel,
+            libre_post_translate,
         });
         Ok((None, Some(json!({ "jobId": task_id }))))
     }
@@ -1472,14 +1629,86 @@ impl Core {
         blocks: Vec<TranslationBlock>,
     ) -> Result<(Option<UiText>, Option<Value>), ProtocolError> {
         let img_path = Path::new(path);
-        let saved = translate::save_translation_blocks(img_path, source_lang, target_lang, blocks)
-            .map_err(|e| ProtocolError::new("io_error", e))?;
-        let active_viewer = self
+        if translate::sidecar_path(img_path).is_none() {
+            return Err(ProtocolError::new(
+                "invalid_path",
+                format!("cannot resolve translation sidecar path for '{path}'"),
+            ));
+        }
+
+        let is_active = self
             .viewer_index
             .and_then(|idx| self.viewer_images.get(idx))
-            .map(String::as_str);
-        if active_viewer == Some(path) {
-            self.viewer_saved_translation = saved;
+            .is_some_and(|p| p == path || Path::new(p) == img_path);
+
+        if blocks.is_empty() {
+            translate::delete_sidecar(img_path).map_err(|e| ProtocolError::new("io_error", e))?;
+            if is_active {
+                self.viewer_saved_translation = None;
+            }
+            return Ok((Some(UiText::new("translate_done")), None));
+        }
+
+        let existing = translate::load_sidecar(img_path);
+        let eff_source = if !source_lang.trim().is_empty() {
+            source_lang.trim().to_owned()
+        } else if let Some(prev) = existing
+            .as_ref()
+            .map(|s| s.source_lang.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            prev.to_owned()
+        } else {
+            self.latest_translation
+                .as_ref()
+                .filter(|t| t.path == path || Path::new(&t.path) == img_path)
+                .map(|t| t.source_lang.clone())
+                .unwrap_or_default()
+        };
+        let eff_target = if !target_lang.trim().is_empty() {
+            target_lang.trim().to_owned()
+        } else if let Some(prev) = existing
+            .as_ref()
+            .map(|s| s.target_lang.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            prev.to_owned()
+        } else {
+            self.latest_translation
+                .as_ref()
+                .filter(|t| t.path == path || Path::new(&t.path) == img_path)
+                .map(|t| t.target_lang.clone())
+                .unwrap_or_default()
+        };
+
+        let original_text = blocks
+            .iter()
+            .map(|b| b.original.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let translated_text = blocks
+            .iter()
+            .map(|b| b.translated.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let result = photon_protocol::TranslationResult {
+            path: path.to_owned(),
+            source_lang: eff_source,
+            target_lang: eff_target,
+            original_text,
+            translated_text,
+            blocks: blocks.clone(),
+        };
+        translate::save_sidecar(&result).map_err(|e| ProtocolError::new("io_error", e))?;
+
+        if is_active {
+            self.viewer_saved_translation = Some(photon_protocol::SavedTranslation {
+                path: path.to_owned(),
+                blocks,
+            });
         }
         Ok((Some(UiText::new("translate_done")), None))
     }
@@ -1488,19 +1717,23 @@ impl Core {
         &mut self,
         path: &str,
     ) -> Result<(Option<UiText>, Option<Value>), ProtocolError> {
-        let deleted = translate::delete_sidecar(Path::new(path))
-            .map_err(|e| ProtocolError::new("io_error", e))?;
-        let active_viewer = self
+        let img_path = Path::new(path);
+        if translate::sidecar_path(img_path).is_none() {
+            return Err(ProtocolError::new(
+                "invalid_path",
+                format!("cannot resolve translation sidecar path for '{path}'"),
+            ));
+        }
+        let _deleted =
+            translate::delete_sidecar(img_path).map_err(|e| ProtocolError::new("io_error", e))?;
+        let is_active = self
             .viewer_index
             .and_then(|idx| self.viewer_images.get(idx))
-            .map(String::as_str);
-        if active_viewer == Some(path) {
+            .is_some_and(|p| p == path || Path::new(p) == img_path);
+        if is_active {
             self.viewer_saved_translation = None;
         }
-        Ok((
-            Some(UiText::new(if deleted { "ready" } else { "ready" })),
-            None,
-        ))
+        Ok((Some(UiText::new("ready")), None))
     }
 
     pub(crate) fn set_translate_settings(
@@ -1510,5 +1743,467 @@ impl Core {
         self.config.translate = settings;
         self.persist_config();
         Ok((Some(UiText::new("settings_saved")), None))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_test_image(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 255, 255, 255]));
+        img.save(&path).expect("save test image");
+        path
+    }
+
+    fn install_mock_plugin(plugins_dir: &Path, id: &str, action: &str) {
+        let pdir = plugins_dir.join(id);
+        fs::create_dir_all(&pdir).expect("create plugin dir");
+        let runner = pdir.join("runner.sh");
+        fs::write(&runner, "#!/usr/bin/env sh\nexit 0\n").expect("write runner");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&runner).expect("meta").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&runner, perms).expect("chmod");
+        }
+        let manifest = json!({
+            "apiVersion": 1,
+            "id": id,
+            "name": id,
+            "version": "1.0.0",
+            "entry": {
+                "command": "runner.sh",
+                "args": [],
+                "protocol": "jsonl-stdio"
+            },
+            "capabilities": [
+                {
+                    "action": action,
+                    "workspace": "viewer",
+                    "label": action,
+                    "output": "translation"
+                }
+            ]
+        });
+        fs::write(
+            pdir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).expect("json"),
+        )
+        .expect("write manifest");
+    }
+
+    #[test]
+    fn viewer_translate_uses_plugin_for_libre_when_installed_and_falls_back_when_absent() {
+        let sandbox = std::env::temp_dir().join(format!("photon-ai-libre-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&sandbox);
+        fs::create_dir_all(&sandbox).expect("create sandbox");
+        let img = write_test_image(&sandbox, "page.png");
+        let img_str = img.to_string_lossy().into_owned();
+
+        // 1. Without photon.translate installed -> falls back to BuiltinTranslate.
+        let mut core = Core::for_sandbox(&sandbox);
+        core.config.translate.provider = TranslateProvider::LibreTranslate;
+        core.viewer_translate(&img_str, "jpn", "vi", None, "tesseract")
+            .expect("queue builtin fallback");
+        match core.take_pending_ai().expect("pending job") {
+            PendingAiJob::BuiltinTranslate { target_lang, .. } => {
+                assert_eq!(target_lang, "vi");
+            }
+            other => panic!("expected BuiltinTranslate fallback, got {other:?}"),
+        }
+        core.ai_active_task_id = None;
+        core.ai_cancel = None;
+
+        // 2. With photon.translate installed & enabled -> PluginInference with targetLang=""
+        //    and libre_post_translate=Some(("vi", ...)).
+        let plugins_dir = core.paths.plugins_dir().to_path_buf();
+        install_mock_plugin(&plugins_dir, "photon.translate", "viewer.translate");
+        core.viewer_translate(&img_str, "jpn", "vi", Some([1, 2, 10, 12]), "tesseract")
+            .expect("queue plugin translate");
+        match core.take_pending_ai().expect("pending job") {
+            PendingAiJob::PluginInference {
+                action,
+                params,
+                libre_post_translate,
+                ..
+            } => {
+                assert_eq!(action, "viewer.translate");
+                assert_eq!(params["targetLang"], "");
+                assert_eq!(params["sourceLang"], "jpn");
+                assert_eq!(params["region"]["x"], 1);
+                let (tgt, settings) = libre_post_translate.expect("libre_post_translate set");
+                assert_eq!(tgt, "vi");
+                assert_eq!(settings.provider, TranslateProvider::LibreTranslate);
+            }
+            other => panic!("expected PluginInference, got {other:?}"),
+        }
+        core.ai_active_task_id = None;
+        core.ai_cancel = None;
+
+        // 3. With photon.translate disabled -> falls back to BuiltinTranslate again.
+        core.config
+            .disabled_plugins
+            .push("photon.translate".to_owned());
+        core.viewer_translate(&img_str, "jpn", "vi", None, "tesseract")
+            .expect("queue disabled fallback");
+        assert!(matches!(
+            core.take_pending_ai().expect("pending job"),
+            PendingAiJob::BuiltinTranslate { .. }
+        ));
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn viewer_translate_none_provider_and_empty_target_are_ocr_only() {
+        let sandbox = std::env::temp_dir().join(format!("photon-ai-none-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&sandbox);
+        fs::create_dir_all(&sandbox).expect("create sandbox");
+        let img = write_test_image(&sandbox, "page.png");
+        let img_str = img.to_string_lossy().into_owned();
+
+        let mut core = Core::for_sandbox(&sandbox);
+        let plugins_dir = core.paths.plugins_dir().to_path_buf();
+        install_mock_plugin(&plugins_dir, "photon.ocr", "viewer.ocr_copy");
+        install_mock_plugin(&plugins_dir, "photon.translate", "viewer.translate");
+
+        // TranslateProvider::None overrides non-empty target_lang -> viewer.ocr_copy, no libre post-translate.
+        core.config.translate.provider = TranslateProvider::None;
+        core.viewer_translate(&img_str, "eng", "vi", None, "tesseract")
+            .expect("queue ocr_only");
+        match core.take_pending_ai().expect("pending job") {
+            PendingAiJob::PluginInference {
+                action,
+                params,
+                libre_post_translate,
+                ..
+            } => {
+                assert_eq!(action, "viewer.ocr_copy");
+                assert_eq!(params["returnTranslation"], true);
+                assert!(libre_post_translate.is_none());
+            }
+            other => panic!("expected PluginInference, got {other:?}"),
+        }
+        core.ai_active_task_id = None;
+        core.ai_cancel = None;
+
+        // Empty target_lang with GoogleWeb -> still OCR-only.
+        core.config.translate.provider = TranslateProvider::GoogleWeb;
+        core.viewer_translate(&img_str, "eng", "   ", None, "tesseract")
+            .expect("queue empty target ocr_only");
+        match core.take_pending_ai().expect("pending job") {
+            PendingAiJob::PluginInference {
+                action,
+                libre_post_translate,
+                ..
+            } => {
+                assert_eq!(action, "viewer.ocr_copy");
+                assert!(libre_post_translate.is_none());
+            }
+            other => panic!("expected PluginInference, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn viewer_translate_ai_ocr_routes_through_providers_without_builtin_fallback() {
+        let sandbox = std::env::temp_dir().join(format!("photon-ai-ocr-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&sandbox);
+        fs::create_dir_all(&sandbox).expect("create sandbox");
+        let img = write_test_image(&sandbox, "page.png");
+        let img_str = img.to_string_lossy().into_owned();
+
+        let mut core = Core::for_sandbox(&sandbox);
+        // Missing plugin -> error, never BuiltinTranslate.
+        let err = core
+            .viewer_translate(&img_str, "jpn", "en", None, "manga_ocr")
+            .expect_err("missing ai_ocr plugin should error");
+        assert_eq!(err.code, "plugin_not_found");
+
+        let plugins_dir = core.paths.plugins_dir().to_path_buf();
+        install_mock_plugin(&plugins_dir, "photon.ocr.ai", "viewer.ai_ocr");
+
+        // LibreTranslate -> targetLang="" + libre_post_translate.
+        core.config.translate.provider = TranslateProvider::LibreTranslate;
+        core.viewer_translate(&img_str, "jpn", "en", None, "manga_ocr")
+            .expect("ai_ocr libre");
+        match core.take_pending_ai().expect("pending job") {
+            PendingAiJob::PluginInference {
+                action,
+                params,
+                libre_post_translate,
+                ..
+            } => {
+                assert_eq!(action, "viewer.ai_ocr");
+                assert_eq!(params["engine"], "manga_ocr");
+                assert_eq!(params["targetLang"], "");
+                assert_eq!(libre_post_translate.map(|(t, _)| t), Some("en".to_owned()));
+            }
+            other => panic!("expected PluginInference, got {other:?}"),
+        }
+        core.ai_active_task_id = None;
+        core.ai_cancel = None;
+
+        // GoogleWeb -> targetLang="en" + no libre_post_translate.
+        core.config.translate.provider = TranslateProvider::GoogleWeb;
+        core.viewer_translate(&img_str, "jpn", "en", None, "rapidocr")
+            .expect("ai_ocr google");
+        match core.take_pending_ai().expect("pending job") {
+            PendingAiJob::PluginInference {
+                params,
+                libre_post_translate,
+                ..
+            } => {
+                assert_eq!(params["engine"], "rapidocr");
+                assert_eq!(params["targetLang"], "en");
+                assert!(libre_post_translate.is_none());
+            }
+            other => panic!("expected PluginInference, got {other:?}"),
+        }
+        core.ai_active_task_id = None;
+        core.ai_cancel = None;
+
+        // None -> targetLang="" + no libre_post_translate.
+        core.config.translate.provider = TranslateProvider::None;
+        core.viewer_translate(&img_str, "jpn", "en", None, "manga_ocr")
+            .expect("ai_ocr none");
+        match core.take_pending_ai().expect("pending job") {
+            PendingAiJob::PluginInference {
+                params,
+                libre_post_translate,
+                ..
+            } => {
+                assert_eq!(params["targetLang"], "");
+                assert!(libre_post_translate.is_none());
+            }
+            other => panic!("expected PluginInference, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn viewer_save_translation_preserves_metadata_and_matches_normalized_path() {
+        let sandbox =
+            std::env::temp_dir().join(format!("photon-ai-sidecar-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&sandbox);
+        fs::create_dir_all(&sandbox).expect("create sandbox");
+        let img = write_test_image(&sandbox, "page.png");
+        let img_str = img.to_string_lossy().into_owned();
+        let dot_img_str = sandbox
+            .join(".")
+            .join("page.png")
+            .to_string_lossy()
+            .into_owned();
+
+        let mut core = Core::for_sandbox(&sandbox);
+        core.viewer_images = vec![img_str.clone()];
+        core.viewer_index = Some(0);
+
+        let block1 = TranslationBlock {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 15,
+            original: "こんにちは".into(),
+            translated: "Hello".into(),
+        };
+        core.viewer_save_translation(&img_str, "jpn", "en", vec![block1])
+            .expect("initial save");
+        let loaded = translate::load_sidecar(&img).expect("sidecar exists");
+        assert_eq!(loaded.source_lang, "jpn");
+        assert_eq!(loaded.target_lang, "en");
+        assert_eq!(loaded.original_text, "こんにちは");
+        assert_eq!(loaded.translated_text, "Hello");
+
+        // Re-save with empty source/target and normalized-equivalent path -> preserves langs & updates active state.
+        let block2 = TranslationBlock {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 15,
+            original: "さようなら".into(),
+            translated: "Goodbye".into(),
+        };
+        core.viewer_save_translation(&dot_img_str, "", "", vec![block2])
+            .expect("update save");
+        let loaded2 = translate::load_sidecar(&img).expect("sidecar updated");
+        assert_eq!(loaded2.source_lang, "jpn");
+        assert_eq!(loaded2.target_lang, "en");
+        assert_eq!(loaded2.original_text, "さようなら");
+        assert_eq!(loaded2.translated_text, "Goodbye");
+        assert_eq!(
+            core.viewer_saved_translation
+                .as_ref()
+                .map(|s| s.blocks[0].translated.as_str()),
+            Some("Goodbye")
+        );
+
+        // Delete with empty blocks removes sidecar and clears active state.
+        core.viewer_save_translation(&dot_img_str, "", "", vec![])
+            .expect("empty blocks deletes sidecar");
+        assert!(translate::load_sidecar(&img).is_none());
+        assert!(core.viewer_saved_translation.is_none());
+
+        // Invalid path returns invalid_path error.
+        let err = core
+            .viewer_delete_translation("")
+            .expect_err("empty path should fail");
+        assert_eq!(err.code, "invalid_path");
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn needs_translate_rasterize_detects_non_ocr_formats() {
+        for ext in [
+            "jp2", "j2k", "jpx", "jpf", "heic", "heif", "hif", "avif", "jxl", "kra", "ora", "psd",
+            "svg", "svgz", "exr", "hdr", "qoi", "dds", "ff", "tga", "dng", "cr2", "nef", "JP2",
+        ] {
+            let p = PathBuf::from(format!("/tmp/sample.{ext}"));
+            assert!(
+                needs_translate_rasterize(&p),
+                "expected needs_translate_rasterize=true for .{ext}"
+            );
+        }
+        assert!(needs_translate_rasterize(Path::new("/tmp/no_extension")));
+
+        for ext in [
+            "png", "jpg", "jpeg", "jpe", "jfif", "bmp", "tif", "tiff", "webp", "pnm", "pbm", "pgm",
+            "ppm", "PNG", "JPG", "WEBP",
+        ] {
+            let p = PathBuf::from(format!("/tmp/sample.{ext}"));
+            assert!(
+                !needs_translate_rasterize(&p),
+                "expected needs_translate_rasterize=false for .{ext}"
+            );
+        }
+    }
+
+    #[test]
+    fn rasterize_for_translate_decodes_to_temp_png_and_cleans_up_on_drop() {
+        let sandbox =
+            std::env::temp_dir().join(format!("photon-ai-rasterize-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&sandbox);
+        fs::create_dir_all(&sandbox).expect("create sandbox");
+
+        let tga_path = sandbox.join("sample.tga");
+        let img = image::RgbaImage::from_pixel(16, 12, image::Rgba([12, 34, 56, 255]));
+        img.save(&tga_path).expect("save tga");
+
+        let tmp_path = {
+            let guard = rasterize_for_translate(&tga_path).expect("rasterize tga");
+            let p = guard.path().to_path_buf();
+            assert!(p.is_file(), "temp PNG should exist while guard is alive");
+            assert_eq!(p.extension().and_then(|e| e.to_str()), Some("png"));
+            let decoded = photon_image::decode_rgba(&p).expect("decode temp PNG");
+            assert_eq!(decoded.dimensions(), (16, 12));
+            p
+        };
+        assert!(
+            !tmp_path.exists(),
+            "temp PNG {} should be deleted on TempFileGuard drop",
+            tmp_path.display()
+        );
+
+        // If opj_compress is installed, also verify real .jp2 -> temp PNG rasterization.
+        let jp2_img = image::RgbaImage::from_pixel(64, 64, image::Rgba([12, 34, 56, 255]));
+        let ppm_path = sandbox.join("sample.ppm");
+        image::DynamicImage::ImageRgba8(jp2_img)
+            .to_rgb8()
+            .save(&ppm_path)
+            .expect("save ppm");
+        let jp2_path = sandbox.join("sample.jp2");
+        if let Ok(status) = std::process::Command::new("opj_compress")
+            .arg("-i")
+            .arg(&ppm_path)
+            .arg("-o")
+            .arg(&jp2_path)
+            .status()
+        {
+            if status.success() && jp2_path.is_file() {
+                let jp2_tmp = {
+                    let guard = rasterize_for_translate(&jp2_path).expect("rasterize jp2");
+                    let p = guard.path().to_path_buf();
+                    assert!(p.is_file());
+                    let decoded = photon_image::decode_rgba(&p).expect("decode jp2 temp PNG");
+                    assert_eq!(decoded.dimensions(), (64, 64));
+                    p
+                };
+                assert!(!jp2_tmp.exists(), "jp2 temp PNG should be deleted on drop");
+            }
+        }
+
+        let _ = fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn pending_ai_job_plugin_translate_rasterizes_and_cleans_up_temp_png() {
+        let sandbox =
+            std::env::temp_dir().join(format!("photon-ai-plugin-tr-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&sandbox);
+        fs::create_dir_all(&sandbox).expect("create sandbox");
+
+        let tga_path = sandbox.join("manga_page.tga");
+        let img = image::RgbaImage::from_pixel(24, 20, image::Rgba([255, 255, 255, 255]));
+        img.save(&tga_path).expect("save tga");
+        let tga_str = tga_path.to_string_lossy().into_owned();
+
+        let mut core = Core::for_sandbox(&sandbox);
+        let recorded_path_file = sandbox.join("received_path.txt");
+        let plugins_dir = core.paths.plugins_dir().to_path_buf();
+        install_mock_plugin(&plugins_dir, "photon.translate", "viewer.translate");
+        let runner = plugins_dir.join("photon.translate").join("runner.sh");
+        let script = format!(
+            "#!/usr/bin/env sh\nread -r line\nPATH_VAL=$(printf '%s' \"$line\" | sed -n 's/.*\"input\":\"\\([^\"]*\\)\".*/\\1/p')\nprintf '%s' \"$PATH_VAL\" > \"{}\"\nprintf '{{\"event\":\"done\",\"meta\":{{\"translation\":{{\"path\":\"'$PATH_VAL'\",\"sourceLang\":\"jpn\",\"targetLang\":\"en\",\"originalText\":\"hi\",\"translatedText\":\"hello\",\"blocks\":[]}}}}}}\\n'\n",
+            recorded_path_file.display()
+        );
+        fs::write(&runner, script).expect("write runner");
+
+        core.viewer_translate(&tga_str, "jpn", "en", None, "tesseract")
+            .expect("queue viewer_translate");
+        assert_eq!(
+            core.ai_task.as_ref().map(|t| t.target.as_str()),
+            Some(tga_str.as_str()),
+            "ai_task.target must preserve original source path"
+        );
+
+        let job = core.take_pending_ai().expect("pending job");
+        let mut got_translation = false;
+        let mut events = Vec::new();
+        job.run(|ev| {
+            if let AiWorkerEvent::InferenceDone {
+                translation: Some(_),
+                ..
+            } = ev
+            {
+                got_translation = true;
+            }
+            events.push(format!("{ev:?}"));
+        });
+        assert!(
+            got_translation,
+            "expected InferenceDone with translation, got events: {events:?}"
+        );
+
+        let received = fs::read_to_string(&recorded_path_file).expect("read recorded path");
+        assert_ne!(
+            received, tga_str,
+            "plugin should receive temp PNG, not .tga"
+        );
+        assert!(
+            received.ends_with(".png"),
+            "plugin should receive .png path, got: {received}"
+        );
+        assert!(
+            !Path::new(&received).exists(),
+            "temp PNG {received} should be removed after job finishes"
+        );
+
+        let _ = fs::remove_dir_all(&sandbox);
     }
 }

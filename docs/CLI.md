@@ -4,8 +4,9 @@
 ```sh
 photon                         # Start GUI in Browser workspace (maximized on first run)
 photon browse /path/to/dir     # Open folder in Browser
-photon view /path/to/a.jpg ... # Open image(s) in Viewer
-photon edit /path/to/a.jpg     # Open image directly in Editor
+photon view /path/to/a.jpg ... # Open image(s) or .cbz/.zip/.pdf archive in Viewer
+photon edit [/path/to/a.jpg]   # Open image (or empty Editor) in Editor singleton
+photon --edit [/path/to/a.jpg] # Start in Editor workspace (optionally opening FILE)
 photon /path/to/a.jpg          # Alias for `view`
 photon --headless              # Run Core + Local IPC without GUI window
 photon --safe-mode             # Factory defaults in memory + software renderer (tiny-skia)
@@ -15,6 +16,7 @@ photon --reset-config          # Reset both Settings & UI state (alias: --reset-
 photon --reset-layout --exit   # Apply reset and exit immediately without launching GUI
 photon --lang <en|vi|system>   # Override initial UI language
 photon --new-window [path...]  # Open standalone window instead of forwarding to running instance
+photon --viewer-window [path]  # Internal flag for spawning an independent Viewer process
 ```
 
 ### Environment Variables

@@ -74,11 +74,26 @@ pub struct ViewerTranslateState {
     pub target_lang: String,
     pub picking_region: bool,
     pub show_bubbles: bool,
+    pub frosted_bubbles: bool,
+    pub space_pan_held: bool,
     pub font_scale: f32,
     pub editing_block_idx: Option<usize>,
+    pub show_original_indices: std::collections::BTreeSet<usize>,
     pub blocks: Vec<TranslationBlock>,
+    pub bubble_cache: HashMap<String, Vec<TranslationBlock>>,
+    pub pending_replace_idx: Option<usize>,
+    pub last_was_region: bool,
     pub saved_sidecar: bool,
     pub last_path: Option<String>,
+    pub top_bar_offset: [f32; 2],
+    pub result_card_offset: [f32; 2],
+    pub result_card_visible: bool,
+    pub result_card_show_original: bool,
+    pub active_drag_delta: Option<(usize, [f32; 2])>,
+    pub active_page_path: Option<String>,
+    pub active_drag_page: Option<String>,
+    pub show_original_page_blocks: std::collections::BTreeSet<(String, usize)>,
+    pub webtoon_marquee: Option<(String, [f32; 4])>,
 }
 
 impl Default for ViewerTranslateState {
@@ -91,11 +106,26 @@ impl Default for ViewerTranslateState {
             target_lang: "vi".to_owned(),
             picking_region: false,
             show_bubbles: true,
+            frosted_bubbles: true,
+            space_pan_held: false,
             font_scale: 1.0,
             editing_block_idx: None,
+            show_original_indices: std::collections::BTreeSet::new(),
             blocks: Vec::new(),
+            bubble_cache: HashMap::new(),
+            pending_replace_idx: None,
+            last_was_region: false,
             saved_sidecar: false,
             last_path: None,
+            top_bar_offset: [0.0, 0.0],
+            result_card_offset: [0.0, 0.0],
+            result_card_visible: false,
+            result_card_show_original: false,
+            active_drag_delta: None,
+            active_page_path: None,
+            active_drag_page: None,
+            show_original_page_blocks: std::collections::BTreeSet::new(),
+            webtoon_marquee: None,
         }
     }
 }
@@ -186,6 +216,7 @@ pub enum ViewerMessage {
     SetViewerAdjShadows(f32),
     ResetViewerAdj,
     ViewerAdjOpenInEditor,
+    OpenBrowserWindow,
     WebtoonScrolled(scrollable::Viewport),
     OpenInNewViewerWindow(String),
     ToggleTranslateOverlay,
@@ -198,6 +229,8 @@ pub enum ViewerMessage {
     StartTranslateRegionPick,
     ScanTranslatePage,
     ToggleTranslateBubbles,
+    ToggleTranslateBubbleStyle,
+    ToggleTranslateBlockOriginal(usize),
     SetTranslateFontScale(f32),
     SelectTranslateBlock(Option<usize>),
     UpdateTranslateBlockText(usize, String),
@@ -208,6 +241,30 @@ pub enum ViewerMessage {
     DeleteTranslationSidecar,
     CopyTranslatedText,
     OpenTranslateSettings,
+    BeginDragTranslateBubble(usize),
+    BeginDragTranslateTopBar,
+    BeginDragTranslateResultCard,
+    ResetTranslateTopBarPos,
+    ResetTranslateResultCardPos,
+    DismissTranslateResultCard,
+    NextTranslateBubble,
+    ToggleTranslateResultCardOriginal(bool),
+    BeginDragTranslatePageBubble(String, usize),
+    SelectTranslatePageBlock(String, usize),
+    ToggleTranslatePageBlockOriginal(String, usize),
+    RetryTranslatePageBlock(String, usize),
+    RemoveTranslatePageBlock(String, usize),
+    BeginWebtoonTranslateRegion {
+        path: String,
+        disp_w: f32,
+        disp_h: f32,
+    },
+    WebtoonHoverPage {
+        path: String,
+        local_pos: [f32; 2],
+        disp_w: f32,
+        disp_h: f32,
+    },
 }
 
 const VIEWER_RIGHT_MIN_W: f32 = 200.0;
@@ -281,6 +338,11 @@ pub fn viewer_status_summary(state: ViewerViewState<'_>, lang: Language) -> Stri
     let idx = meta.viewer_index.unwrap_or(0);
     let total = meta.viewer_count;
     let name_at = |i: usize| -> Option<String> {
+        if let Some(arch) = &meta.viewer_archive
+            && let Some(label) = arch.page_labels.get(i)
+        {
+            return Some(label.clone());
+        }
         state
             .snapshot
             .viewer_images
@@ -356,18 +418,33 @@ pub fn viewer_status_summary(state: ViewerViewState<'_>, lang: Language) -> Stri
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerToolbarSwitcherKind {
+    MainThreeTab(WorkspaceSwitcherMode),
+    StandaloneTwoButton { show_labels: bool },
+}
+
+pub fn viewer_toolbar_switcher_kind(
+    _is_main_window: bool,
+    window_width: f32,
+) -> ViewerToolbarSwitcherKind {
+    ViewerToolbarSwitcherKind::StandaloneTwoButton {
+        show_labels: window_width >= 1120.0,
+    }
+}
+
 pub fn viewer_reader_options_right_offset(state: ViewerViewState<'_>) -> f32 {
     let utilities_w = 12.0 + 32.0; // right padding + single Panels&Settings button
-    if !state.is_main_window {
-        return utilities_w + 4.0;
-    }
-    let switcher_w = match workspace_switcher_mode(state.window_size.width) {
-        WorkspaceSwitcherMode::Full => 252.0,
-        WorkspaceSwitcherMode::CompactIcons => 112.0,
-        WorkspaceSwitcherMode::Dropdown => 56.0,
-    };
-    // utilities_w + gap(3) + switcher_w + gap(3)
-    utilities_w + 3.0 + switcher_w + 3.0
+    let switcher_w =
+        match viewer_toolbar_switcher_kind(state.is_main_window, state.window_size.width) {
+            ViewerToolbarSwitcherKind::MainThreeTab(WorkspaceSwitcherMode::Full) => 252.0,
+            ViewerToolbarSwitcherKind::MainThreeTab(WorkspaceSwitcherMode::CompactIcons) => 112.0,
+            ViewerToolbarSwitcherKind::MainThreeTab(WorkspaceSwitcherMode::Dropdown) => 56.0,
+            ViewerToolbarSwitcherKind::StandaloneTwoButton { show_labels: true } => 164.0,
+            ViewerToolbarSwitcherKind::StandaloneTwoButton { show_labels: false } => 72.0,
+        };
+    // utilities_w + spacing(8) + divider(9) + switcher_w + spacing(8)
+    utilities_w + 17.0 + switcher_w + 8.0
 }
 
 /// Top toolbar for the Viewer workspace:
@@ -487,53 +564,87 @@ pub fn build_viewer_toolbar<'a>(
     }
 
     left = left.push(button::toolbar_icon(
-        if state.is_fullscreen {
-            Icon::FullscreenExit
-        } else {
-            Icon::Fullscreen
-        },
-        state.is_fullscreen,
-        Some(ViewerMessage::ToggleFullscreen),
-        Some(tr(lang, "tooltip-viewer-fullscreen")),
-    ));
-
-    left = left.push(button::toolbar_icon(
         Icon::Translate,
         state.translate.active,
         has_image.then_some(ViewerMessage::ToggleTranslateOverlay),
         Some(tr(lang, "menu-viewer-read-translate")),
     ));
 
-    // Right side: View Mode Switcher (Single | Double | Webtoon | Reader Options) + Workspace Switcher + Panels & Settings
-    let view_mode_group = toolbar_button_group(vec![
-        button::toolbar_icon(
-            Icon::ViewSingle,
-            viewer_mode == ViewerViewMode::Single,
-            Some(ViewerMessage::SetViewerViewMode(ViewerViewMode::Single)),
-            Some(format!("{} (S)", tr(lang, "action-viewer-single"))),
-        ),
-        button::toolbar_icon(
-            Icon::ViewDouble,
-            viewer_mode == ViewerViewMode::Double,
-            Some(ViewerMessage::SetViewerViewMode(ViewerViewMode::Double)),
-            Some(format!("{} (D)", tr(lang, "action-viewer-double"))),
-        ),
-        button::toolbar_icon(
-            Icon::ViewManhwa,
-            viewer_mode == ViewerViewMode::Webtoon,
-            Some(ViewerMessage::SetViewerViewMode(ViewerViewMode::Webtoon)),
-            Some(format!("{} (M)", tr(lang, "action-viewer-manhwa"))),
-        ),
-        button::toolbar_icon(
-            Icon::Sliders,
-            state.reader_options_open,
-            Some(ViewerMessage::ToggleReaderOptions),
-            Some(tr(lang, "action-reader-options")),
-        ),
-    ]);
+    if let Some(arch) = &meta.viewer_archive {
+        let container_name = Path::new(&arch.container_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Archive");
+        let kind_tag = match arch.kind.as_str() {
+            "pdf" => "PDF",
+            _ => "CBZ",
+        };
+        let page_num = meta
+            .viewer_index
+            .unwrap_or(0)
+            .min(arch.page_count.saturating_sub(1))
+            + 1;
+        left = left.push(
+            container(
+                text(format!(
+                    "{kind_tag} · {container_name} ({page_num}/{})",
+                    arch.page_count
+                ))
+                .size(TEXT_SIZE_CAPTION),
+            )
+            .padding([3, 8])
+            .style(|theme| {
+                let pal = PaletteTokens::for_theme(theme);
+                container::Style {
+                    background: Some(pal.bg_elevated.into()),
+                    text_color: Some(pal.text_secondary),
+                    border: Border {
+                        color: pal.border,
+                        width: 1.0,
+                        radius: RADIUS_SM.into(),
+                    },
+                    ..Default::default()
+                }
+            }),
+        );
+    }
 
-    let right: Element<'a, ViewerMessage> = if state.is_main_window {
-        let switcher = workspace_switcher_responsive(
+    // Right side: View Mode Switcher (Single | Double | Webtoon | Reader Options) + Workspace Switcher + Panels & Settings
+    let reader_options_btn = button::toolbar_icon(
+        Icon::BookOpen,
+        state.reader_options_open,
+        Some(ViewerMessage::ToggleReaderOptions),
+        Some(tr(lang, "action-reader-options")),
+    );
+    let view_mode_group = if state.window_size.width >= 1120.0 {
+        toolbar_button_group(vec![
+            button::toolbar_icon(
+                Icon::ViewSingle,
+                viewer_mode == ViewerViewMode::Single,
+                Some(ViewerMessage::SetViewerViewMode(ViewerViewMode::Single)),
+                Some(format!("{} (S)", tr(lang, "action-viewer-single"))),
+            ),
+            button::toolbar_icon(
+                Icon::ViewDouble,
+                viewer_mode == ViewerViewMode::Double,
+                Some(ViewerMessage::SetViewerViewMode(ViewerViewMode::Double)),
+                Some(format!("{} (D)", tr(lang, "action-viewer-double"))),
+            ),
+            button::toolbar_icon(
+                Icon::ViewManhwa,
+                viewer_mode == ViewerViewMode::Webtoon,
+                Some(ViewerMessage::SetViewerViewMode(ViewerViewMode::Webtoon)),
+                Some(format!("{} (M)", tr(lang, "action-viewer-manhwa"))),
+            ),
+            reader_options_btn,
+        ])
+    } else {
+        toolbar_button_group(vec![reader_options_btn])
+    };
+
+    let switcher = match viewer_toolbar_switcher_kind(state.is_main_window, state.window_size.width)
+    {
+        ViewerToolbarSwitcherKind::MainThreeTab(mode) => workspace_switcher_responsive(
             vec![
                 WorkspaceTab::new(
                     tr(lang, "workspace-browser"),
@@ -563,20 +674,81 @@ pub fn build_viewer_toolbar<'a>(
                 )
                 .tooltip(tr(lang, "tooltip-workspace-editor")),
             ],
-            workspace_switcher_mode(state.window_size.width),
+            mode,
             state.workspace_switcher_open,
             Some(ViewerMessage::ToggleWorkspaceSwitcher),
-        );
-        row![view_mode_group, switcher, right_utilities]
-            .spacing(3)
-            .align_y(Alignment::Center)
-            .into()
-    } else {
-        row![view_mode_group, right_utilities]
-            .spacing(3)
-            .align_y(Alignment::Center)
-            .into()
+        ),
+        ViewerToolbarSwitcherKind::StandaloneTwoButton { show_labels } => {
+            let browser_msg = Some(ViewerMessage::OpenBrowserWindow);
+            let editor_msg = has_image.then_some(ViewerMessage::ViewerAdjOpenInEditor);
+            let browser_tip = Some(tr(lang, "tooltip-workspace-browser"));
+            let editor_tip = Some(tr(lang, "tooltip-workspace-editor"));
+            if show_labels {
+                toolbar_button_group(vec![
+                    button::toolbar_labeled(
+                        tr(lang, "workspace-browser"),
+                        Some(Icon::Browser),
+                        ButtonVariant::Ghost,
+                        browser_msg,
+                        browser_tip,
+                    ),
+                    button::toolbar_labeled(
+                        tr(lang, "workspace-editor"),
+                        Some(Icon::Editor),
+                        ButtonVariant::Ghost,
+                        editor_msg,
+                        editor_tip,
+                    ),
+                ])
+            } else {
+                toolbar_button_group(vec![
+                    button::toolbar_icon(Icon::Browser, false, browser_msg, browser_tip),
+                    button::toolbar_icon(Icon::Editor, false, editor_msg, editor_tip),
+                ])
+            }
+        }
     };
+    let utility_group = toolbar_button_group(vec![
+        button::toolbar_icon(
+            Icon::Filmstrip,
+            state.viewer_filmstrip_open,
+            Some(ViewerMessage::ToggleFilmstrip),
+            Some(tr(lang, "tooltip-viewer-filmstrip")),
+        ),
+        button::toolbar_icon(
+            if state.is_fullscreen {
+                Icon::FullscreenExit
+            } else {
+                Icon::Fullscreen
+            },
+            state.is_fullscreen,
+            Some(ViewerMessage::ToggleFullscreen),
+            Some(tr(lang, "tooltip-viewer-fullscreen")),
+        ),
+        button::toolbar_icon(
+            Icon::Info,
+            state.viewer_info_open,
+            Some(ViewerMessage::ToggleViewerInspector),
+            Some(tr(lang, "action-info")),
+        ),
+        button::toolbar_icon(
+            Icon::Palette,
+            state.viewer_adjustments_open,
+            Some(ViewerMessage::ToggleViewerColorPopover),
+            Some(tr(lang, "panel-view-adjustments")),
+        ),
+    ]);
+
+    let right: Element<'a, ViewerMessage> = row![
+        utility_group,
+        view_mode_group,
+        switcher,
+        container(rule::vertical(1).style(hairline_rule_style)).height(Length::Fixed(18.0)),
+        right_utilities
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into();
 
     toolbar(left, right)
 }
@@ -588,10 +760,13 @@ pub fn build_viewer_view<'a>(state: ViewerViewState<'a>) -> Element<'a, ViewerMe
     let dark = state.snapshot.meta.theme == Theme::Dark;
     let viewer_mode = state.viewer_mode;
 
-    let canvas_tool = if viewer_mode == ViewerViewMode::Single
+    let canvas_tool = if matches!(viewer_mode, ViewerViewMode::Single | ViewerViewMode::Double)
         && state.translate.active
-        && state.translate.picking_region
-    {
+        && (state.translate.picking_region
+            || matches!(
+                state.translate.mode,
+                ViewerTranslateMode::Translate | ViewerTranslateMode::OcrOnly
+            )) {
         CanvasTool::MarqueeRect
     } else if state.translate.active && state.translate.mode == ViewerTranslateMode::Pan {
         CanvasTool::Hand
@@ -644,7 +819,7 @@ pub fn build_viewer_view<'a>(state: ViewerViewState<'a>) -> Element<'a, ViewerMe
                 .style(canvas_backdrop_style)
                 .into()
         }
-        ViewerViewMode::Double => build_viewer_double_panes(state, lang, dark),
+        ViewerViewMode::Double => build_viewer_double_panes(state, lang, dark, canvas_tool),
         ViewerViewMode::Webtoon => build_viewer_webtoon_strip(state),
     };
 
@@ -713,16 +888,45 @@ pub fn build_viewer_view<'a>(state: ViewerViewState<'a>) -> Element<'a, ViewerMe
             tr(lang, "tooltip-panel-close"),
             TooltipPosition::Left,
         );
-        let filmstrip_row = container(
+        let archive_label = state.snapshot.meta.viewer_archive.as_ref().map(|arch| {
+            let cur = state
+                .snapshot
+                .meta
+                .viewer_index
+                .unwrap_or(0)
+                .min(arch.page_count.saturating_sub(1));
+            let page_lbl = arch
+                .page_labels
+                .get(cur)
+                .cloned()
+                .unwrap_or_else(|| format!("Page {}", cur + 1));
+            let kind = if arch.kind == "pdf" { "PDF" } else { "CBZ" };
+            format!("{kind} · {} / {} · {page_lbl}", cur + 1, arch.page_count)
+        });
+        let mut filmstrip_col = column![].width(Fill);
+        if let Some(lbl) = archive_label {
+            filmstrip_col = filmstrip_col.push(
+                container(
+                    text(lbl)
+                        .size(TEXT_SIZE_CAPTION)
+                        .style(|theme| text::Style {
+                            color: Some(PaletteTokens::for_theme(theme).text_muted),
+                        }),
+                )
+                .padding([4, 10]),
+            );
+        }
+        filmstrip_col = filmstrip_col.push(
             row![
                 container(filmstrip_bar(items)).width(Fill),
                 container(close_btn).padding([4, 6]),
             ]
             .align_y(Alignment::Center)
             .width(Fill),
-        )
-        .width(Fill)
-        .style(surface_panel_style);
+        );
+        let filmstrip_row = container(filmstrip_col)
+            .width(Fill)
+            .style(surface_panel_style);
         column![
             main_area,
             rule::horizontal(1).style(hairline_rule_style),
@@ -1018,6 +1222,7 @@ fn build_viewer_double_panes<'a>(
     state: ViewerViewState<'a>,
     _lang: Language,
     dark: bool,
+    canvas_tool: CanvasTool,
 ) -> Element<'a, ViewerMessage> {
     let gap = f32::from(state.viewer_manga_page_gap);
     let (left_slot, right_slot) = dual_spread_slots(state);
@@ -1038,7 +1243,7 @@ fn build_viewer_double_panes<'a>(
             crop_rect: None,
             crop_aspect: None,
             quarter_turns: state.viewer_quarter_turns,
-            tool: CanvasTool::Pointer,
+            tool: canvas_tool,
             preview_angle_rad: 0.0,
             preview_fill: [0.0; 4],
             canvas_bg: None,
@@ -1180,6 +1385,20 @@ pub fn webtoon_index_at_scroll(state: ViewerViewState<'_>, center_y: f32) -> Opt
 fn build_viewer_webtoon_strip<'a>(state: ViewerViewState<'a>) -> Element<'a, ViewerMessage> {
     let gap = f32::from(state.viewer_manga_page_gap);
     let (_, pages) = compute_webtoon_layout(state);
+    let lang = state.snapshot.meta.language;
+    let tr_state = state.translate;
+    let tr_active = tr_state.active;
+    let show_bubbles = tr_active && tr_state.show_bubbles;
+    let is_review = tr_state.mode == ViewerTranslateMode::Review;
+    let marquee_enabled = tr_active
+        && !tr_state.space_pan_held
+        && !is_review
+        && (tr_state.picking_region
+            || matches!(
+                tr_state.mode,
+                ViewerTranslateMode::Translate | ViewerTranslateMode::OcrOnly
+            ));
+
     let mut col = column![]
         .spacing(gap)
         .align_x(Alignment::Center)
@@ -1212,12 +1431,136 @@ fn build_viewer_webtoon_strip<'a>(state: ViewerViewState<'a>) -> Element<'a, Vie
                 .style(surface_panel_style)
                 .into()
         };
-        let wrapped_page =
-            mouse_area(page_el).on_right_press(ViewerMessage::OpenViewerContextMenu {
-                path: Some(path),
+
+        let page_blocks = tr_state.bubble_cache.get(&path).or_else(|| {
+            (tr_state.active_page_path.as_deref() == Some(path.as_str())
+                || (tr_state.active_page_path.is_none()
+                    && state.snapshot.meta.viewer_path.as_deref() == Some(path.as_str())))
+            .then_some(&tr_state.blocks)
+        });
+
+        let mut layers: Vec<Element<'_, ViewerMessage>> = vec![page_el];
+
+        if show_bubbles
+            && let Some(blocks) = page_blocks
+            && !blocks.is_empty()
+            && let Some(&(img_w, img_h)) = state.image_sizes.get(&path)
+            && img_w > 0
+            && img_h > 0
+        {
+            let doc_w = img_w as f32;
+            let doc_h = img_h as f32;
+            let mut bubble_items: Vec<Element<'_, ViewerMessage>> =
+                Vec::with_capacity(blocks.len() + 1);
+            bubble_items.push(
+                iced::widget::space::horizontal()
+                    .width(Fill)
+                    .height(Fill)
+                    .into(),
+            );
+            for (idx, b) in blocks.iter().enumerate() {
+                let (dx_px, dy_px) = match tr_state.active_drag_delta {
+                    Some((drag_idx, d))
+                        if drag_idx == idx
+                            && tr_state.active_drag_page.as_deref() == Some(path.as_str()) =>
+                    {
+                        (d[0], d[1])
+                    }
+                    _ => (0.0, 0.0),
+                };
+                let sx = ((b.x as f32 / doc_w) * w + dx_px).max(0.0);
+                let sy = ((b.y as f32 / doc_h) * h + dy_px).max(0.0);
+                let min_w = if is_review { 48.0 } else { 96.0 };
+                let min_h = if is_review { 28.0 } else { 44.0 };
+                let sw = ((b.w.max(1) as f32 / doc_w) * w).max(min_w);
+                let sh = ((b.h.max(1) as f32 / doc_h) * h).max(min_h);
+                if let Some(el) = render_translate_bubble_item(
+                    tr_state,
+                    lang,
+                    Some(&path),
+                    idx,
+                    b,
+                    sx,
+                    sy,
+                    sw,
+                    sh,
+                ) {
+                    bubble_items.push(el);
+                }
+            }
+            layers.push(
+                stack(bubble_items)
+                    .width(Length::Fixed(w))
+                    .height(Length::Fixed(h))
+                    .into(),
+            );
+        }
+
+        if let Some((m_path, [mx, my, mw, mh])) = &tr_state.webtoon_marquee
+            && m_path == &path
+            && *mw >= 2.0
+            && *mh >= 2.0
+        {
+            let marquee_box = container(iced::widget::space::horizontal().width(Fill).height(Fill))
+                .width(Length::Fixed(*mw))
+                .height(Length::Fixed(*mh))
+                .style(|theme| {
+                    let pal = PaletteTokens::for_theme(theme);
+                    container::Style {
+                        background: Some(pal.accent.scale_alpha(0.16).into()),
+                        border: Border {
+                            color: pal.accent,
+                            width: 1.5,
+                            radius: 2.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                });
+            layers.push(
+                container(marquee_box)
+                    .padding(Padding {
+                        top: (*my).max(0.0),
+                        right: 0.0,
+                        bottom: 0.0,
+                        left: (*mx).max(0.0),
+                    })
+                    .width(Length::Fixed(w))
+                    .height(Length::Fixed(h))
+                    .into(),
+            );
+        }
+
+        let stacked_page: Element<'_, ViewerMessage> = if layers.len() == 1 {
+            layers.pop().unwrap()
+        } else {
+            stack(layers)
+                .width(Length::Fixed(w))
+                .height(Length::Fixed(h))
+                .into()
+        };
+
+        let mut area =
+            mouse_area(stacked_page).on_right_press(ViewerMessage::OpenViewerContextMenu {
+                path: Some(path.clone()),
                 pos: None,
             });
-        col = col.push(wrapped_page);
+        if marquee_enabled {
+            let p_move = path.clone();
+            let p_press = path;
+            area = area
+                .on_move(move |pt| ViewerMessage::WebtoonHoverPage {
+                    path: p_move.clone(),
+                    local_pos: [pt.x, pt.y],
+                    disp_w: w,
+                    disp_h: h,
+                })
+                .on_press(ViewerMessage::BeginWebtoonTranslateRegion {
+                    path: p_press,
+                    disp_w: w,
+                    disp_h: h,
+                });
+        }
+        col = col.push(area);
     }
 
     mouse_area(
@@ -1648,6 +1991,378 @@ fn viewer_fit_geometry(
     (left, top, drawn_w, drawn_h, fw, fh)
 }
 
+/// Transform unrotated image-space `(x, y, w, h)` into display-space coordinates for `quarter_turns`
+/// (0, 1=90° CW, 2=180°, 3=270° CW) within an unrotated `(doc_w, doc_h)` image.
+pub fn transform_block_for_quarter_turns(
+    b: &TranslationBlock,
+    doc_w: f32,
+    doc_h: f32,
+    quarter_turns: u8,
+) -> (f32, f32, f32, f32) {
+    let bx = b.x as f32;
+    let by = b.y as f32;
+    let bw = b.w.max(1) as f32;
+    let bh = b.h.max(1) as f32;
+    match quarter_turns % 4 {
+        1 => ((doc_h - (by + bh)).max(0.0), bx.max(0.0), bh, bw),
+        2 => (
+            (doc_w - (bx + bw)).max(0.0),
+            (doc_h - (by + bh)).max(0.0),
+            bw,
+            bh,
+        ),
+        3 => (by.max(0.0), (doc_w - (bx + bw)).max(0.0), bh, bw),
+        _ => (bx.max(0.0), by.max(0.0), bw, bh),
+    }
+}
+
+/// Screen-space geometry for a dual-page spread matching `photon-canvas` GPU rendering.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DoubleSpreadScreenGeometry {
+    pub spread_left: f32,
+    pub spread_top: f32,
+    pub drawn_w: f32,
+    pub drawn_h: f32,
+    pub fw: f32,
+    pub fh: f32,
+    pub spread_w: f32,
+    pub spread_h: f32,
+    pub left_disp_w: f32,
+    pub gap_doc: f32,
+    pub right_disp_w: f32,
+}
+
+/// Compute screen-space spread geometry for Dual (`Double`) mode matching `photon-canvas/src/gpu.rs`.
+#[allow(clippy::too_many_arguments)]
+pub fn viewer_double_fit_geometries(
+    left_size: (u32, u32),
+    right_size: Option<(u32, u32)>,
+    dual_gap_px: f32,
+    quarter_turns: u8,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
+    vp_w: f32,
+    vp_h: f32,
+) -> DoubleSpreadScreenGeometry {
+    let (spread_w, spread_h, left_disp_w, gap_doc, right_disp_w) = match right_size {
+        Some(r) => {
+            let (sw, sh, lw, gap) = photon_canvas::dual_spread_geometry(left_size, r, dual_gap_px);
+            let rw = (sw - lw - gap).max(1.0);
+            (sw, sh, lw, gap, rw)
+        }
+        None => {
+            let lw = left_size.0.max(1) as f32;
+            let lh = left_size.1.max(1) as f32;
+            (lw, lh, lw, 0.0, 0.0)
+        }
+    };
+    let (spread_left, spread_top, drawn_w, drawn_h, fw, fh) = viewer_fit_geometry(
+        spread_w,
+        spread_h,
+        quarter_turns,
+        zoom,
+        pan_x,
+        pan_y,
+        vp_w,
+        vp_h,
+    );
+    DoubleSpreadScreenGeometry {
+        spread_left,
+        spread_top,
+        drawn_w,
+        drawn_h,
+        fw,
+        fh,
+        spread_w,
+        spread_h,
+        left_disp_w,
+        gap_doc,
+        right_disp_w,
+    }
+}
+
+/// Map a translation block from unrotated page `(img_w, img_h)` coordinates into screen `(sx, sy, sw, sh)`
+/// for either the left (`is_right == false`) or right (`is_right == true`) spread page.
+pub fn transform_double_page_block_to_screen(
+    b: &TranslationBlock,
+    img_w: f32,
+    img_h: f32,
+    is_right: bool,
+    geom: DoubleSpreadScreenGeometry,
+    quarter_turns: u8,
+) -> (f32, f32, f32, f32) {
+    let (x_off, page_disp_w) = if is_right {
+        (geom.left_disp_w + geom.gap_doc, geom.right_disp_w.max(1.0))
+    } else {
+        (0.0, geom.left_disp_w.max(1.0))
+    };
+    let sx_scale = page_disp_w / img_w.max(1.0);
+    let sy_scale = geom.spread_h / img_h.max(1.0);
+    let spread_block = TranslationBlock {
+        x: (x_off + b.x as f32 * sx_scale).round() as i32,
+        y: (b.y as f32 * sy_scale).round() as i32,
+        w: (b.w.max(1) as f32 * sx_scale).round().max(1.0) as i32,
+        h: (b.h.max(1) as f32 * sy_scale).round().max(1.0) as i32,
+        original: String::new(),
+        translated: String::new(),
+    };
+    let (rx, ry, rw, rh) = transform_block_for_quarter_turns(
+        &spread_block,
+        geom.spread_w,
+        geom.spread_h,
+        quarter_turns,
+    );
+    let sx = geom.spread_left + (rx / geom.fw) * geom.drawn_w;
+    let sy = geom.spread_top + (ry / geom.fh) * geom.drawn_h;
+    let sw = (rw / geom.fw) * geom.drawn_w;
+    let sh = (rh / geom.fh) * geom.drawn_h;
+    (sx, sy, sw, sh)
+}
+
+/// Compute an auto-fit pixel font size so translated text fits cleanly inside `(sw, sh)`.
+pub fn compute_bubble_font_size(
+    sw: f32,
+    sh: f32,
+    header_h: f32,
+    char_count: usize,
+    font_scale: f32,
+) -> f32 {
+    let avail_w = (sw - 14.0).max(24.0);
+    let avail_h = (sh - header_h - 10.0).max(16.0);
+    let chars = char_count.max(1) as f32;
+    let area_px = ((avail_w * avail_h) / (chars * 0.62)).sqrt();
+    let base_px = area_px.min((sh * 0.24).max(11.0)).clamp(9.0, 24.0);
+    (base_px * font_scale).clamp(9.0, 28.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_translate_bubble_item<'a>(
+    tr_state: &ViewerTranslateState,
+    lang: Language,
+    page_path: Option<&str>,
+    idx: usize,
+    b: &TranslationBlock,
+    sx: f32,
+    sy: f32,
+    sw: f32,
+    sh: f32,
+) -> Option<Element<'a, ViewerMessage>> {
+    let ocr_only = tr_state.mode == ViewerTranslateMode::OcrOnly;
+    let is_review = tr_state.mode == ViewerTranslateMode::Review;
+    let show_orig = ocr_only
+        || match page_path {
+            Some(p) => tr_state
+                .show_original_page_blocks
+                .contains(&(p.to_owned(), idx)),
+            None => tr_state.show_original_indices.contains(&idx),
+        };
+    let has_both = !ocr_only && !b.original.trim().is_empty() && !b.translated.trim().is_empty();
+    let display_text = if show_orig || b.translated.trim().is_empty() {
+        b.original.clone()
+    } else {
+        b.translated.clone()
+    };
+    if display_text.trim().is_empty() {
+        return None;
+    }
+
+    let header_h = if is_review { 0.0 } else { 22.0 };
+    let font_size = compute_bubble_font_size(
+        sw,
+        sh,
+        header_h,
+        display_text.chars().count(),
+        tr_state.font_scale,
+    );
+    let page_matches = match page_path {
+        Some(p) => tr_state.active_page_path.as_deref() == Some(p),
+        None => true,
+    };
+    let is_sel = page_matches && tr_state.editing_block_idx == Some(idx);
+    let drag_page_matches = match page_path {
+        Some(p) => tr_state.active_drag_page.as_deref() == Some(p),
+        None => tr_state.active_drag_page.is_none(),
+    };
+    let is_dragging =
+        drag_page_matches && matches!(tr_state.active_drag_delta, Some((d_idx, _)) if d_idx == idx);
+
+    let toggle_msg = match page_path {
+        Some(p) => ViewerMessage::ToggleTranslatePageBlockOriginal(p.to_owned(), idx),
+        None => ViewerMessage::ToggleTranslateBlockOriginal(idx),
+    };
+    let select_msg = match page_path {
+        Some(p) => ViewerMessage::SelectTranslatePageBlock(p.to_owned(), idx),
+        None => ViewerMessage::SelectTranslateBlock(Some(idx)),
+    };
+    let drag_msg = match page_path {
+        Some(p) => ViewerMessage::BeginDragTranslatePageBubble(p.to_owned(), idx),
+        None => ViewerMessage::BeginDragTranslateBubble(idx),
+    };
+    let retry_msg = match page_path {
+        Some(p) => ViewerMessage::RetryTranslatePageBlock(p.to_owned(), idx),
+        None => ViewerMessage::RetryTranslateBlock(idx),
+    };
+    let remove_msg = match page_path {
+        Some(p) => ViewerMessage::RemoveTranslatePageBlock(p.to_owned(), idx),
+        None => ViewerMessage::RemoveTranslateBlock(idx),
+    };
+
+    let body_press = if is_review && has_both {
+        toggle_msg.clone()
+    } else {
+        select_msg
+    };
+
+    let text_body = iced_button(
+        container(
+            text(display_text)
+                .size(font_size)
+                .align_x(iced::alignment::Horizontal::Center)
+                .style(|theme| text::Style {
+                    color: Some(PaletteTokens::for_theme(theme).text_primary),
+                }),
+        )
+        .width(Fill)
+        .height(Fill)
+        .padding([4, 7])
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center),
+    )
+    .width(Fill)
+    .height(Fill)
+    .padding(0)
+    .style(|theme, _| {
+        let pal = PaletteTokens::for_theme(theme);
+        iced_button::Style {
+            background: None,
+            text_color: pal.text_primary,
+            ..Default::default()
+        }
+    })
+    .on_press(body_press);
+
+    let bubble_inner: Element<'_, ViewerMessage> = if is_review {
+        text_body.into()
+    } else {
+        let drag_grip = mouse_area(
+            container(text("⋮⋮").size(10).style(|theme| text::Style {
+                color: Some(PaletteTokens::for_theme(theme).text_muted),
+            }))
+            .padding([0, 6])
+            .height(Length::Fixed(22.0))
+            .align_y(iced::alignment::Vertical::Center),
+        )
+        .on_press(drag_msg);
+
+        let mut header_row = row![drag_grip, iced::widget::space::horizontal()]
+            .spacing(3)
+            .align_y(Alignment::Center)
+            .height(Length::Fixed(22.0))
+            .padding([0, 4]);
+
+        if has_both {
+            let toggle_lbl = tr(
+                lang,
+                if show_orig {
+                    "translate-bubble-trans"
+                } else {
+                    "translate-bubble-orig"
+                },
+            );
+            header_row = header_row.push(
+                iced_button(text(toggle_lbl).size(10))
+                    .padding([1, 5])
+                    .style(button::style_for(if show_orig {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Secondary
+                    }))
+                    .on_press(toggle_msg),
+            );
+        }
+
+        header_row = header_row
+            .push(
+                iced_button(text("↻").size(11))
+                    .padding([1, 5])
+                    .style(button::style_for(ButtonVariant::Ghost))
+                    .on_press(retry_msg),
+            )
+            .push(
+                iced_button(text("×").size(11))
+                    .padding([1, 5])
+                    .style(button::style_for(ButtonVariant::Ghost))
+                    .on_press(remove_msg),
+            );
+
+        let header_bar = container(header_row).width(Fill).style(|theme| {
+            let pal = PaletteTokens::for_theme(theme);
+            container::Style {
+                background: Some(pal.bg_elevated.scale_alpha(0.95).into()),
+                text_color: Some(pal.text_primary),
+                border: Border {
+                    color: pal.border,
+                    width: 0.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            }
+        });
+
+        column![
+            header_bar,
+            rule::horizontal(1).style(hairline_rule_style),
+            text_body
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into()
+    };
+
+    let frosted = tr_state.frosted_bubbles;
+    let bubble_box = container(bubble_inner)
+        .width(Length::Fixed(sw))
+        .height(Length::Fixed(sh))
+        .style(move |theme| {
+            let pal = PaletteTokens::for_theme(theme);
+            let bg = if frosted {
+                pal.bg_elevated.scale_alpha(0.92)
+            } else {
+                pal.bg_elevated.scale_alpha(0.98)
+            };
+            container::Style {
+                background: Some(bg.into()),
+                text_color: Some(pal.text_primary),
+                border: Border {
+                    color: if is_sel || is_dragging {
+                        pal.accent
+                    } else if is_review {
+                        pal.border
+                    } else {
+                        pal.border_strong
+                    },
+                    width: if is_sel || is_dragging { 2.0 } else { 1.0 },
+                    radius: 8.0.into(),
+                },
+                ..Default::default()
+            }
+        });
+
+    Some(
+        container(bubble_box)
+            .padding(Padding {
+                top: sy.max(0.0),
+                right: 0.0,
+                bottom: 0.0,
+                left: sx.max(0.0),
+            })
+            .width(Fill)
+            .height(Fill)
+            .into(),
+    )
+}
+
 fn build_viewer_translate_overlay<'a>(
     viewport: Element<'a, ViewerMessage>,
     state: ViewerViewState<'a>,
@@ -1656,6 +2371,8 @@ fn build_viewer_translate_overlay<'a>(
     let tr_state = state.translate;
     let has_path = state.snapshot.meta.viewer_path.is_some();
     let is_single = state.viewer_mode == ViewerViewMode::Single;
+    let is_double = state.viewer_mode == ViewerViewMode::Double;
+    let is_review = tr_state.mode == ViewerTranslateMode::Review;
     let running_stage = state
         .snapshot
         .meta
@@ -1666,6 +2383,7 @@ fn build_viewer_translate_overlay<'a>(
 
     let mut stack_layers: Vec<Element<'a, ViewerMessage>> = vec![viewport];
 
+    // 1. Full-box covering translated/OCR bubbles (Single & Double modes; Webtoon renders per-page inside scroll)
     if tr_state.show_bubbles
         && is_single
         && !tr_state.blocks.is_empty()
@@ -1677,10 +2395,7 @@ fn build_viewer_translate_overlay<'a>(
         let zoom = state.zoom;
         let pan_x = state.pan_x;
         let pan_y = state.pan_y;
-        let font_size = (12.0 * tr_state.font_scale).clamp(8.0, 26.0);
-        let ocr_only = tr_state.mode == ViewerTranslateMode::OcrOnly;
-        let blocks = tr_state.blocks.clone();
-        let selected_idx = tr_state.editing_block_idx;
+        let tr_owned = tr_state.clone();
 
         let bubble_layer: Element<'a, ViewerMessage> = responsive(move |bounds| {
             let (left, top, drawn_w, drawn_h, fw, fh) = viewer_fit_geometry(
@@ -1693,341 +2408,566 @@ fn build_viewer_translate_overlay<'a>(
                 bounds.width,
                 bounds.height,
             );
-            let mut items: Vec<Element<'_, ViewerMessage>> = Vec::with_capacity(blocks.len() + 1);
+            let mut items: Vec<Element<'_, ViewerMessage>> =
+                Vec::with_capacity(tr_owned.blocks.len() + 1);
             items.push(
                 iced::widget::space::horizontal()
                     .width(Fill)
                     .height(Fill)
                     .into(),
             );
-            for (idx, b) in blocks.iter().enumerate() {
-                let display_text = if ocr_only || b.translated.trim().is_empty() {
-                    b.original.clone()
-                } else {
-                    b.translated.clone()
+            for (idx, b) in tr_owned.blocks.iter().enumerate() {
+                let (rx, ry, rw, rh) = transform_block_for_quarter_turns(b, doc_w, doc_h, qturns);
+                let (dx_px, dy_px) = match tr_owned.active_drag_delta {
+                    Some((drag_idx, d)) if drag_idx == idx => (d[0], d[1]),
+                    _ => (0.0, 0.0),
                 };
-                if display_text.trim().is_empty() {
-                    continue;
+                let sx = (left + (rx / fw) * drawn_w + dx_px).max(0.0);
+                let sy = (top + (ry / fh) * drawn_h + dy_px).max(0.0);
+                let min_w = if is_review { 48.0 } else { 96.0 };
+                let min_h = if is_review { 28.0 } else { 44.0 };
+                let sw = ((rw / fw) * drawn_w).max(min_w);
+                let sh = ((rh / fh) * drawn_h).max(min_h);
+                if let Some(el) =
+                    render_translate_bubble_item(&tr_owned, lang, None, idx, b, sx, sy, sw, sh)
+                {
+                    items.push(el);
                 }
-                let sx =
-                    (left + (b.x as f32 / fw) * drawn_w).clamp(4.0, (bounds.width - 90.0).max(4.0));
-                let sy = (top + (b.y as f32 / fh) * drawn_h)
-                    .clamp(52.0, (bounds.height - 40.0).max(52.0));
-                let bw = ((b.w as f32 / fw) * drawn_w).clamp(88.0, 320.0);
-                let is_sel = selected_idx == Some(idx);
-
-                let bubble_btn = iced_button(
-                    container(text(display_text).size(font_size))
-                        .padding([4, 6])
-                        .max_width(bw)
-                        .style(move |theme| {
-                            let pal = PaletteTokens::for_theme(theme);
-                            container::Style {
-                                background: Some(pal.bg_elevated.into()),
-                                text_color: Some(pal.text_primary),
-                                border: Border {
-                                    color: if is_sel {
-                                        pal.accent
-                                    } else {
-                                        pal.border_strong
-                                    },
-                                    width: if is_sel { 2.0 } else { 1.0 },
-                                    radius: RADIUS_SM.into(),
-                                },
-                                ..Default::default()
-                            }
-                        }),
-                )
-                .padding(0)
-                .style(|_, _| iced_button::Style::default())
-                .on_press(ViewerMessage::SelectTranslateBlock(Some(idx)));
-
-                items.push(
-                    container(bubble_btn)
-                        .padding(Padding {
-                            top: sy,
-                            right: 0.0,
-                            bottom: 0.0,
-                            left: sx,
-                        })
-                        .width(Fill)
-                        .height(Fill)
-                        .into(),
-                );
             }
             stack(items).width(Fill).height(Fill).into()
         })
         .into();
         stack_layers.push(bubble_layer);
+    } else if tr_state.show_bubbles
+        && is_double
+        && let Some(left_frame) = state.viewer_frame
+    {
+        let (left_slot, right_slot) = dual_spread_slots(state);
+        let left_path = left_slot.map(|(_, p)| p.to_owned());
+        let right_path = right_slot.map(|(_, p)| p.to_owned());
+        let left_blocks: Vec<TranslationBlock> = left_path
+            .as_deref()
+            .and_then(|p| tr_state.bubble_cache.get(p).cloned())
+            .or_else(|| {
+                (left_path.as_deref() == state.snapshot.meta.viewer_path.as_deref())
+                    .then(|| tr_state.blocks.clone())
+            })
+            .unwrap_or_default();
+        let right_blocks: Vec<TranslationBlock> = right_path
+            .as_deref()
+            .and_then(|p| tr_state.bubble_cache.get(p).cloned())
+            .unwrap_or_default();
+
+        if !left_blocks.is_empty() || !right_blocks.is_empty() {
+            let left_size = (left_frame.width, left_frame.height);
+            let right_size = state.viewer_pair_frame.map(|f| (f.width, f.height));
+            let gap = f32::from(state.viewer_manga_page_gap);
+            let qturns = state.viewer_quarter_turns;
+            let zoom = state.zoom;
+            let pan_x = state.pan_x;
+            let pan_y = state.pan_y;
+            let tr_owned = tr_state.clone();
+
+            let bubble_layer: Element<'a, ViewerMessage> = responsive(move |bounds| {
+                let geom = viewer_double_fit_geometries(
+                    left_size,
+                    right_size,
+                    gap,
+                    qturns,
+                    zoom,
+                    pan_x,
+                    pan_y,
+                    bounds.width,
+                    bounds.height,
+                );
+                let mut items: Vec<Element<'_, ViewerMessage>> =
+                    Vec::with_capacity(left_blocks.len() + right_blocks.len() + 1);
+                items.push(
+                    iced::widget::space::horizontal()
+                        .width(Fill)
+                        .height(Fill)
+                        .into(),
+                );
+                let min_w = if is_review { 48.0 } else { 96.0 };
+                let min_h = if is_review { 28.0 } else { 44.0 };
+                if let Some(ref lp) = left_path {
+                    for (idx, b) in left_blocks.iter().enumerate() {
+                        let (mut sx, mut sy, sw_raw, sh_raw) =
+                            transform_double_page_block_to_screen(
+                                b,
+                                left_size.0 as f32,
+                                left_size.1 as f32,
+                                false,
+                                geom,
+                                qturns,
+                            );
+                        if let Some((drag_idx, d)) = tr_owned.active_drag_delta
+                            && drag_idx == idx
+                            && tr_owned.active_drag_page.as_deref() == Some(lp.as_str())
+                        {
+                            sx += d[0];
+                            sy += d[1];
+                        }
+                        if let Some(el) = render_translate_bubble_item(
+                            &tr_owned,
+                            lang,
+                            Some(lp.as_str()),
+                            idx,
+                            b,
+                            sx,
+                            sy,
+                            sw_raw.max(min_w),
+                            sh_raw.max(min_h),
+                        ) {
+                            items.push(el);
+                        }
+                    }
+                }
+                if let (Some(rp), Some(r_sz)) = (&right_path, right_size) {
+                    for (idx, b) in right_blocks.iter().enumerate() {
+                        let (mut sx, mut sy, sw_raw, sh_raw) =
+                            transform_double_page_block_to_screen(
+                                b,
+                                r_sz.0 as f32,
+                                r_sz.1 as f32,
+                                true,
+                                geom,
+                                qturns,
+                            );
+                        if let Some((drag_idx, d)) = tr_owned.active_drag_delta
+                            && drag_idx == idx
+                            && tr_owned.active_drag_page.as_deref() == Some(rp.as_str())
+                        {
+                            sx += d[0];
+                            sy += d[1];
+                        }
+                        if let Some(el) = render_translate_bubble_item(
+                            &tr_owned,
+                            lang,
+                            Some(rp.as_str()),
+                            idx,
+                            b,
+                            sx,
+                            sy,
+                            sw_raw.max(min_w),
+                            sh_raw.max(min_h),
+                        ) {
+                            items.push(el);
+                        }
+                    }
+                }
+                stack(items).width(Fill).height(Fill).into()
+            })
+            .into();
+            stack_layers.push(bubble_layer);
+        }
     }
 
-    let mode_row = row![
-        button::labeled(
-            tr(lang, "translate-mode-translate"),
-            None,
-            ButtonVariant::Tab {
-                active: tr_state.mode == ViewerTranslateMode::Translate,
-            },
-            Some(ViewerMessage::SetTranslateMode(
-                ViewerTranslateMode::Translate
-            )),
-        ),
-        button::labeled(
-            tr(lang, "translate-mode-ocr"),
-            None,
-            ButtonVariant::Tab {
-                active: tr_state.mode == ViewerTranslateMode::OcrOnly,
-            },
-            Some(ViewerMessage::SetTranslateMode(
-                ViewerTranslateMode::OcrOnly
-            )),
-        ),
-        button::labeled(
-            tr(lang, "translate-mode-pan"),
-            None,
-            ButtonVariant::Tab {
-                active: tr_state.mode == ViewerTranslateMode::Pan,
-            },
-            Some(ViewerMessage::SetTranslateMode(ViewerTranslateMode::Pan)),
-        ),
-        button::labeled(
-            tr(lang, "translate-mode-review"),
-            None,
-            ButtonVariant::Tab {
-                active: tr_state.mode == ViewerTranslateMode::Review,
-            },
-            Some(ViewerMessage::SetTranslateMode(ViewerTranslateMode::Review)),
-        ),
-    ]
-    .spacing(3);
+    // 2. Top HUD or compact Review Pill (hidden while Space-panning)
+    if !tr_state.space_pan_held {
+        if is_review {
+            let review_pill = container(
+                row![
+                    button::labeled(
+                        "A−",
+                        None,
+                        ButtonVariant::Ghost,
+                        Some(ViewerMessage::SetTranslateFontScale(
+                            (tr_state.font_scale - 0.1).clamp(0.7, 2.0),
+                        )),
+                    ),
+                    button::labeled(
+                        "A+",
+                        None,
+                        ButtonVariant::Ghost,
+                        Some(ViewerMessage::SetTranslateFontScale(
+                            (tr_state.font_scale + 0.1).clamp(0.7, 2.0),
+                        )),
+                    ),
+                    button::labeled(
+                        tr(lang, "action-edit"),
+                        None,
+                        ButtonVariant::Secondary,
+                        Some(ViewerMessage::SetTranslateMode(
+                            ViewerTranslateMode::Translate,
+                        )),
+                    ),
+                    button::compact_icon(
+                        Icon::Close,
+                        ButtonVariant::Ghost,
+                        Some(ViewerMessage::CloseTranslateOverlay),
+                    ),
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center),
+            )
+            .padding([6, 10])
+            .style(popover_style);
 
-    let engine_row = row![
-        text(format!("{}:", tr(lang, "translate-engine-label"))).size(TEXT_SIZE_CAPTION),
-        button::labeled(
-            tr(lang, "translate-engine-tesseract"),
-            None,
-            ButtonVariant::Tab {
-                active: tr_state.ocr_engine == ViewerOcrEngine::Tesseract,
-            },
-            Some(ViewerMessage::SetTranslateOcrEngine(
-                ViewerOcrEngine::Tesseract
-            )),
-        ),
-        button::labeled(
-            tr(lang, "translate-engine-manga-ocr"),
-            None,
-            ButtonVariant::Tab {
-                active: tr_state.ocr_engine == ViewerOcrEngine::MangaOcr,
-            },
-            Some(ViewerMessage::SetTranslateOcrEngine(
-                ViewerOcrEngine::MangaOcr
-            )),
-        ),
-        button::labeled(
-            tr(lang, "translate-engine-rapidocr"),
-            None,
-            ButtonVariant::Tab {
-                active: tr_state.ocr_engine == ViewerOcrEngine::RapidOcr,
-            },
-            Some(ViewerMessage::SetTranslateOcrEngine(
-                ViewerOcrEngine::RapidOcr
-            )),
-        ),
-    ]
-    .spacing(3)
-    .align_y(Alignment::Center);
-
-    let lang_row = row![
-        text_input("eng", &tr_state.source_lang)
-            .on_input(ViewerMessage::SetTranslateSourceLang)
-            .size(TEXT_SIZE_CAPTION)
-            .padding([4, 6])
-            .style(input_style)
-            .width(Length::Fixed(64.0)),
-        button::compact_icon(
-            Icon::Swap,
-            ButtonVariant::Ghost,
-            Some(ViewerMessage::SwapTranslateLangs),
-        ),
-        text_input("vi", &tr_state.target_lang)
-            .on_input(ViewerMessage::SetTranslateTargetLang)
-            .size(TEXT_SIZE_CAPTION)
-            .padding([4, 6])
-            .style(input_style)
-            .width(Length::Fixed(52.0)),
-    ]
-    .spacing(3)
-    .align_y(Alignment::Center);
-
-    let action_row = row![
-        button::labeled(
-            tr(lang, "translate-scan-page"),
-            Some(Icon::Translate),
-            ButtonVariant::Primary,
-            has_path.then_some(ViewerMessage::ScanTranslatePage),
-        ),
-        button::labeled(
-            tr(lang, "translate-drag-region"),
-            Some(Icon::Crop),
-            ButtonVariant::Tab {
-                active: tr_state.picking_region,
-            },
-            (has_path && is_single).then_some(ViewerMessage::StartTranslateRegionPick),
-        ),
-        button::labeled(
-            tr(lang, "translate-show-bubbles"),
-            None,
-            ButtonVariant::Tab {
-                active: tr_state.show_bubbles,
-            },
-            Some(ViewerMessage::ToggleTranslateBubbles),
-        ),
-        text(tr(lang, "translate-font-scale")).size(TEXT_SIZE_CAPTION),
-        button::labeled(
-            "-",
-            None,
-            ButtonVariant::Secondary,
-            Some(ViewerMessage::SetTranslateFontScale(
-                (tr_state.font_scale - 0.1).clamp(0.7, 2.0),
-            )),
-        ),
-        text(format!("{:.1}x", tr_state.font_scale)).size(TEXT_SIZE_CAPTION),
-        button::labeled(
-            "+",
-            None,
-            ButtonVariant::Secondary,
-            Some(ViewerMessage::SetTranslateFontScale(
-                (tr_state.font_scale + 0.1).clamp(0.7, 2.0),
-            )),
-        ),
-        button::labeled(
-            tr(lang, "translate-save-sidecar"),
-            Some(Icon::Save),
-            ButtonVariant::Secondary,
-            (has_path && !tr_state.blocks.is_empty())
-                .then_some(ViewerMessage::SaveTranslationSidecar),
-        ),
-        button::labeled(
-            tr(lang, "translate-delete-sidecar"),
-            Some(Icon::Trash),
-            ButtonVariant::Ghost,
-            (has_path && tr_state.saved_sidecar).then_some(ViewerMessage::DeleteTranslationSidecar),
-        ),
-        button::labeled(
-            tr(lang, "action-copy"),
-            Some(Icon::Copy),
-            ButtonVariant::Ghost,
-            (!tr_state.blocks.is_empty()).then_some(ViewerMessage::CopyTranslatedText),
-        ),
-        button::compact_icon_tipped(
-            Icon::Settings,
-            ButtonVariant::Ghost,
-            Some(ViewerMessage::OpenTranslateSettings),
-            tr(lang, "action-translate-settings"),
-        ),
-        button::compact_icon(
-            Icon::Close,
-            ButtonVariant::Ghost,
-            Some(ViewerMessage::CloseTranslateOverlay),
-        ),
-    ]
-    .spacing(4)
-    .align_y(Alignment::Center);
-
-    let mut top_bar_col = column![
-        row![
-            mode_row,
-            iced::widget::space::horizontal(),
-            engine_row,
-            lang_row
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-        action_row,
-    ]
-    .spacing(4);
-
-    if let Some((pct, stage)) = running_stage {
-        top_bar_col = top_bar_col.push(
-            text(format!("{pct}% · {stage}"))
-                .size(TEXT_SIZE_CAPTION)
-                .style(|theme| text::Style {
-                    color: Some(PaletteTokens::for_theme(theme).accent),
-                }),
-        );
-    } else if tr_state.saved_sidecar {
-        top_bar_col = top_bar_col.push(
-            text(tr(lang, "translate-saved-badge"))
-                .size(TEXT_SIZE_CAPTION)
-                .style(|theme| text::Style {
-                    color: Some(PaletteTokens::for_theme(theme).text_muted),
-                }),
-        );
-    }
-
-    let top_bar_card = container(top_bar_col).padding([6, 10]).style(popover_style);
-
-    let mut hud_col = column![top_bar_card].spacing(6).width(Fill);
-
-    if tr_state.mode == ViewerTranslateMode::Review || tr_state.editing_block_idx.is_some() {
-        let mut review_col = column![].spacing(6);
-        if tr_state.blocks.is_empty() {
-            review_col = review_col.push(
-                text(tr(lang, "translate-empty-hint"))
-                    .size(TEXT_SIZE_CAPTION)
-                    .style(|theme| text::Style {
-                        color: Some(PaletteTokens::for_theme(theme).text_muted),
-                    }),
+            stack_layers.push(
+                container(review_pill)
+                    .width(Fill)
+                    .height(Fill)
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .align_y(iced::alignment::Vertical::Top)
+                    .padding(12.0)
+                    .into(),
             );
         } else {
-            let indices: Vec<usize> = if tr_state.mode == ViewerTranslateMode::Review {
-                (0..tr_state.blocks.len()).collect()
-            } else if let Some(idx) = tr_state
-                .editing_block_idx
-                .filter(|&i| i < tr_state.blocks.len())
-            {
-                vec![idx]
-            } else {
-                Vec::new()
-            };
-            for idx in indices {
-                let b = &tr_state.blocks[idx];
-                let val = if tr_state.mode == ViewerTranslateMode::OcrOnly
-                    || b.translated.trim().is_empty()
-                {
-                    b.original.clone()
-                } else {
-                    b.translated.clone()
+            let off_x = tr_state.top_bar_offset[0];
+            let off_y = tr_state.top_bar_offset[1];
+            let top_running_stage = running_stage.clone();
+            let top_layer: Element<'a, ViewerMessage> = responsive(move |bounds| {
+                let hud_grip: Element<'_, ViewerMessage> = mouse_area(
+                    container(text("⋮⋮").size(12).style(|theme| text::Style {
+                        color: Some(PaletteTokens::for_theme(theme).text_muted),
+                    }))
+                    .padding([4, 4]),
+                )
+                .on_press(ViewerMessage::BeginDragTranslateTopBar)
+                .into();
+
+                let mode_group = row![
+                    button::labeled(
+                        tr(lang, "translate-mode-translate"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: tr_state.mode == ViewerTranslateMode::Translate,
+                        },
+                        Some(ViewerMessage::SetTranslateMode(
+                            ViewerTranslateMode::Translate,
+                        )),
+                    ),
+                    button::labeled(
+                        tr(lang, "translate-mode-ocr"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: tr_state.mode == ViewerTranslateMode::OcrOnly,
+                        },
+                        Some(ViewerMessage::SetTranslateMode(
+                            ViewerTranslateMode::OcrOnly,
+                        )),
+                    ),
+                    button::labeled(
+                        tr(lang, "translate-mode-pan"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: tr_state.mode == ViewerTranslateMode::Pan,
+                        },
+                        Some(ViewerMessage::SetTranslateMode(ViewerTranslateMode::Pan)),
+                    ),
+                ]
+                .spacing(3)
+                .align_y(Alignment::Center);
+
+                let engine_lang_group = row![
+                    button::labeled(
+                        tr(lang, "translate-engine-tesseract"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: tr_state.ocr_engine == ViewerOcrEngine::Tesseract,
+                        },
+                        Some(ViewerMessage::SetTranslateOcrEngine(
+                            ViewerOcrEngine::Tesseract,
+                        )),
+                    ),
+                    button::labeled(
+                        tr(lang, "translate-engine-manga-ocr"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: tr_state.ocr_engine == ViewerOcrEngine::MangaOcr,
+                        },
+                        Some(ViewerMessage::SetTranslateOcrEngine(
+                            ViewerOcrEngine::MangaOcr,
+                        )),
+                    ),
+                    button::labeled(
+                        tr(lang, "translate-engine-rapidocr"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: tr_state.ocr_engine == ViewerOcrEngine::RapidOcr,
+                        },
+                        Some(ViewerMessage::SetTranslateOcrEngine(
+                            ViewerOcrEngine::RapidOcr,
+                        )),
+                    ),
+                    text_input("eng", &tr_state.source_lang)
+                        .on_input(ViewerMessage::SetTranslateSourceLang)
+                        .size(TEXT_SIZE_CAPTION)
+                        .padding([4, 6])
+                        .style(input_style)
+                        .width(Length::Fixed(56.0)),
+                    button::compact_icon(
+                        Icon::Swap,
+                        ButtonVariant::Ghost,
+                        Some(ViewerMessage::SwapTranslateLangs),
+                    ),
+                    text_input("vi", &tr_state.target_lang)
+                        .on_input(ViewerMessage::SetTranslateTargetLang)
+                        .size(TEXT_SIZE_CAPTION)
+                        .padding([4, 6])
+                        .style(input_style)
+                        .width(Length::Fixed(48.0)),
+                ]
+                .spacing(3)
+                .align_y(Alignment::Center);
+
+                let mut action_group = row![
+                    button::labeled(
+                        tr(lang, "translate-scan-page"),
+                        Some(Icon::Translate),
+                        ButtonVariant::Primary,
+                        has_path.then_some(ViewerMessage::ScanTranslatePage),
+                    ),
+                    button::labeled(
+                        tr(lang, "translate-show-bubbles"),
+                        None,
+                        ButtonVariant::Tab {
+                            active: tr_state.show_bubbles,
+                        },
+                        Some(ViewerMessage::ToggleTranslateBubbles),
+                    ),
+                    button::labeled(
+                        tr(
+                            lang,
+                            if tr_state.frosted_bubbles {
+                                "translate-style-frosted"
+                            } else {
+                                "translate-style-solid"
+                            },
+                        ),
+                        None,
+                        ButtonVariant::Secondary,
+                        Some(ViewerMessage::ToggleTranslateBubbleStyle),
+                    ),
+                    button::labeled(
+                        "A−",
+                        None,
+                        ButtonVariant::Ghost,
+                        Some(ViewerMessage::SetTranslateFontScale(
+                            (tr_state.font_scale - 0.1).clamp(0.7, 2.0),
+                        )),
+                    ),
+                    button::labeled(
+                        "A+",
+                        None,
+                        ButtonVariant::Ghost,
+                        Some(ViewerMessage::SetTranslateFontScale(
+                            (tr_state.font_scale + 0.1).clamp(0.7, 2.0),
+                        )),
+                    ),
+                ]
+                .spacing(3)
+                .align_y(Alignment::Center);
+
+                if !tr_state.blocks.is_empty() {
+                    action_group = action_group
+                        .push(button::labeled(
+                            tr(lang, "translate-mode-review"),
+                            None,
+                            ButtonVariant::Secondary,
+                            Some(ViewerMessage::SetTranslateMode(ViewerTranslateMode::Review)),
+                        ))
+                        .push(button::compact_icon_tipped(
+                            Icon::Save,
+                            ButtonVariant::Ghost,
+                            has_path.then_some(ViewerMessage::SaveTranslationSidecar),
+                            tr(lang, "translate-save-sidecar"),
+                        ));
+                }
+                if has_path && tr_state.saved_sidecar {
+                    action_group = action_group.push(button::compact_icon_tipped(
+                        Icon::Trash,
+                        ButtonVariant::Ghost,
+                        Some(ViewerMessage::DeleteTranslationSidecar),
+                        tr(lang, "translate-delete-sidecar"),
+                    ));
+                }
+                action_group = action_group
+                    .push(button::compact_icon_tipped(
+                        Icon::Settings,
+                        ButtonVariant::Ghost,
+                        Some(ViewerMessage::OpenTranslateSettings),
+                        tr(lang, "action-translate-settings"),
+                    ))
+                    .push(button::compact_icon(
+                        Icon::Close,
+                        ButtonVariant::Ghost,
+                        Some(ViewerMessage::CloseTranslateOverlay),
+                    ));
+
+                let mut top_bar_col = column![
+                    row![
+                        hud_grip,
+                        mode_group,
+                        rule::vertical(1).style(hairline_rule_style),
+                        engine_lang_group,
+                        rule::vertical(1).style(hairline_rule_style),
+                        action_group,
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .wrap(),
+                ]
+                .spacing(4);
+
+                if let Some((pct, stage)) = top_running_stage.clone() {
+                    top_bar_col = top_bar_col.push(
+                        text(format!("{pct}% · {stage}"))
+                            .size(TEXT_SIZE_CAPTION)
+                            .style(|theme| text::Style {
+                                color: Some(PaletteTokens::for_theme(theme).accent),
+                            }),
+                    );
+                }
+
+                let top_bar_card =
+                    container(top_bar_col.width(Length::Shrink).height(Length::Shrink))
+                        .width(Length::Shrink)
+                        .height(Length::Shrink)
+                        .padding([6, 10])
+                        .style(popover_style);
+                let max_w = (bounds.width - 24.0).max(260.0);
+                let est_w = max_w.min(920.0);
+                let x = ((bounds.width - est_w) * 0.5 + off_x)
+                    .clamp(8.0, (bounds.width - est_w - 8.0).max(8.0));
+                let y = (12.0 + off_y).clamp(8.0, (bounds.height - 64.0).max(8.0));
+                container(
+                    container(top_bar_card)
+                        .max_width(est_w)
+                        .width(Length::Shrink)
+                        .height(Length::Shrink),
+                )
+                .width(Fill)
+                .height(Fill)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding(Padding {
+                    top: y,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: x,
+                })
+                .into()
+            })
+            .into();
+            stack_layers.push(top_layer);
+        }
+
+        // 3. Bottom-centered floating resultCard
+        let show_result_card = !is_review
+            && (tr_state.result_card_visible
+                || tr_state.editing_block_idx.is_some()
+                || running_stage.is_some());
+        if show_result_card {
+            let off_x = tr_state.result_card_offset[0];
+            let off_y = tr_state.result_card_offset[1];
+            let card_layer: Element<'a, ViewerMessage> = responsive(move |bounds| {
+                let sel_idx = tr_state
+                    .editing_block_idx
+                    .filter(|&i| i < tr_state.blocks.len());
+                let mut card_body = column![].spacing(8);
+
+                let card_grip: Element<'_, ViewerMessage> = mouse_area(
+                    container(text("⋮⋮").size(11).style(|theme| text::Style {
+                        color: Some(PaletteTokens::for_theme(theme).text_muted),
+                    }))
+                    .padding([0, 6]),
+                )
+                .on_press(ViewerMessage::BeginDragTranslateResultCard)
+                .into();
+
+                let header_title = match sel_idx {
+                    Some(i) => format!("#{} / {}", i + 1, tr_state.blocks.len()),
+                    None if !tr_state.blocks.is_empty() => format!("{}", tr_state.blocks.len()),
+                    None => tr(lang, "translate-mode-translate"),
                 };
-                review_col = review_col.push(
-                    column![
+
+                let card_header = container(
+                    row![
+                        card_grip,
+                        text(header_title).size(TEXT_SIZE_CAPTION),
+                        iced::widget::space::horizontal(),
+                        iced_button(text("×").size(12))
+                            .padding([1, 6])
+                            .style(button::style_for(ButtonVariant::Ghost))
+                            .on_press(ViewerMessage::DismissTranslateResultCard),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .height(Length::Fixed(24.0))
+                    .padding([0, 6]),
+                )
+                .width(Fill)
+                .style(|theme| {
+                    let pal = PaletteTokens::for_theme(theme);
+                    container::Style {
+                        background: Some(pal.bg_elevated.into()),
+                        ..Default::default()
+                    }
+                });
+
+                if let Some((pct, stage)) = running_stage.clone() {
+                    card_body = card_body.push(
+                        text(format!("{pct}% · {stage}"))
+                            .size(TEXT_SIZE_CAPTION)
+                            .style(|theme| text::Style {
+                                color: Some(PaletteTokens::for_theme(theme).accent),
+                            }),
+                    );
+                } else if let Some(idx) = sel_idx {
+                    let b = &tr_state.blocks[idx];
+                    let ocr_only = tr_state.mode == ViewerTranslateMode::OcrOnly;
+                    let has_both = !ocr_only
+                        && !b.original.trim().is_empty()
+                        && !b.translated.trim().is_empty();
+                    let show_orig = ocr_only
+                        || tr_state.result_card_show_original
+                        || b.translated.trim().is_empty();
+                    let active_val = if show_orig {
+                        b.original.clone()
+                    } else {
+                        b.translated.clone()
+                    };
+
+                    if has_both {
+                        card_body = card_body.push(
+                            row![
+                                button::labeled(
+                                    tr(lang, "translate-bubble-trans"),
+                                    None,
+                                    ButtonVariant::Tab {
+                                        active: !tr_state.result_card_show_original,
+                                    },
+                                    Some(ViewerMessage::ToggleTranslateResultCardOriginal(false)),
+                                ),
+                                button::labeled(
+                                    tr(lang, "translate-bubble-orig"),
+                                    None,
+                                    ButtonVariant::Tab {
+                                        active: tr_state.result_card_show_original,
+                                    },
+                                    Some(ViewerMessage::ToggleTranslateResultCardOriginal(true)),
+                                ),
+                            ]
+                            .spacing(4),
+                        );
+                    }
+
+                    card_body = card_body.push(
+                        text_input(&tr(lang, "translate-text-placeholder"), &active_val)
+                            .on_input(move |s| ViewerMessage::UpdateTranslateBlockText(idx, s))
+                            .size(TEXT_SIZE_CONTROL)
+                            .padding([6, 8])
+                            .style(input_style),
+                    );
+
+                    card_body = card_body.push(
                         row![
-                            text(format!("#{} ({}, {})", idx + 1, b.x, b.y))
-                                .size(TEXT_SIZE_CAPTION),
-                            iced::widget::space::horizontal(),
                             button::labeled(
-                                "←",
-                                None,
+                                tr(lang, "action-copy"),
+                                Some(Icon::Copy),
                                 ButtonVariant::Ghost,
-                                Some(ViewerMessage::MoveTranslateBlock(idx, -16, 0)),
-                            ),
-                            button::labeled(
-                                "↑",
-                                None,
-                                ButtonVariant::Ghost,
-                                Some(ViewerMessage::MoveTranslateBlock(idx, 0, -16)),
-                            ),
-                            button::labeled(
-                                "↓",
-                                None,
-                                ButtonVariant::Ghost,
-                                Some(ViewerMessage::MoveTranslateBlock(idx, 0, 16)),
-                            ),
-                            button::labeled(
-                                "→",
-                                None,
-                                ButtonVariant::Ghost,
-                                Some(ViewerMessage::MoveTranslateBlock(idx, 16, 0)),
+                                Some(ViewerMessage::CopyTranslatedText),
                             ),
                             button::labeled(
                                 tr(lang, "translate-retry-bubble"),
@@ -2041,33 +2981,97 @@ fn build_viewer_translate_overlay<'a>(
                                 ButtonVariant::Danger,
                                 Some(ViewerMessage::RemoveTranslateBlock(idx)),
                             ),
+                            iced::widget::space::horizontal(),
+                            button::labeled(
+                                tr(lang, "tooltip-viewer-next"),
+                                None,
+                                ButtonVariant::Primary,
+                                Some(ViewerMessage::NextTranslateBubble),
+                            ),
+                            button::labeled(
+                                tr(lang, "action-close"),
+                                None,
+                                ButtonVariant::Ghost,
+                                Some(ViewerMessage::DismissTranslateResultCard),
+                            ),
                         ]
                         .spacing(4)
-                        .align_y(Alignment::Center),
-                        text_input(&tr(lang, "translate-text-placeholder"), &val)
-                            .on_input(move |s| ViewerMessage::UpdateTranslateBlockText(idx, s))
-                            .size(TEXT_SIZE_CONTROL)
-                            .padding([5, 8])
-                            .style(input_style),
-                    ]
-                    .spacing(4),
-                );
-            }
-        }
-        let review_card = container(scrollable(review_col).height(Length::Shrink))
-            .padding([8, 10])
-            .max_width(480.0)
-            .max_height(240.0)
-            .style(popover_style);
-        hud_col = hud_col.push(review_card);
-    }
+                        .align_y(Alignment::Center)
+                        .wrap(),
+                    );
+                } else {
+                    card_body = card_body.push(
+                        text(tr(lang, "translate-empty-hint"))
+                            .size(TEXT_SIZE_CAPTION)
+                            .style(|theme| text::Style {
+                                color: Some(PaletteTokens::for_theme(theme).text_muted),
+                            }),
+                    );
+                    if !tr_state.blocks.is_empty() {
+                        card_body = card_body.push(
+                            row![
+                                button::labeled(
+                                    tr(lang, "action-copy"),
+                                    Some(Icon::Copy),
+                                    ButtonVariant::Ghost,
+                                    Some(ViewerMessage::CopyTranslatedText),
+                                ),
+                                iced::widget::space::horizontal(),
+                                button::labeled(
+                                    tr(lang, "tooltip-viewer-next"),
+                                    None,
+                                    ButtonVariant::Primary,
+                                    Some(ViewerMessage::NextTranslateBubble),
+                                ),
+                                button::labeled(
+                                    tr(lang, "action-close"),
+                                    None,
+                                    ButtonVariant::Ghost,
+                                    Some(ViewerMessage::DismissTranslateResultCard),
+                                ),
+                            ]
+                            .spacing(4)
+                            .align_y(Alignment::Center),
+                        );
+                    }
+                }
 
-    stack_layers.push(
-        container(hud_col)
-            .padding(Padding::from(10.0))
-            .width(Fill)
-            .into(),
-    );
+                let result_card = container(
+                    column![
+                        card_header,
+                        rule::horizontal(1).style(hairline_rule_style),
+                        container(card_body).padding([10, 12]),
+                    ]
+                    .height(Length::Shrink),
+                )
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .style(popover_style);
+
+                let card_w = (bounds.width - 28.0).min(580.0).max(260.0);
+                let x = ((bounds.width - card_w) * 0.5 + off_x)
+                    .clamp(8.0, (bounds.width - card_w - 8.0).max(8.0));
+                let bottom_pad = (16.0 - off_y).clamp(12.0, (bounds.height - 120.0).max(12.0));
+                container(
+                    container(result_card)
+                        .width(Length::Fixed(card_w))
+                        .height(Length::Shrink),
+                )
+                .width(Fill)
+                .height(Fill)
+                .align_y(iced::alignment::Vertical::Bottom)
+                .padding(Padding {
+                    top: 0.0,
+                    right: 0.0,
+                    bottom: bottom_pad,
+                    left: x,
+                })
+                .into()
+            })
+            .into();
+            stack_layers.push(card_layer);
+        }
+    }
 
     stack(stack_layers).width(Fill).height(Fill).into()
 }
@@ -2111,5 +3115,106 @@ mod tests {
         let (left, right) = dual_spread_slots_for(&imgs, &sizes, Some(1), true, true);
         assert_eq!(left, Some((2, "/tmp/03.png")));
         assert_eq!(right, Some((1, "/tmp/02.png")));
+    }
+
+    #[test]
+    fn transform_block_rotates_coordinates_across_all_quarter_turns() {
+        let block = TranslationBlock {
+            x: 100,
+            y: 50,
+            w: 200,
+            h: 80,
+            original: "hi".to_owned(),
+            translated: "chào".to_owned(),
+        };
+        assert_eq!(
+            transform_block_for_quarter_turns(&block, 1000.0, 800.0, 0),
+            (100.0, 50.0, 200.0, 80.0)
+        );
+        assert_eq!(
+            transform_block_for_quarter_turns(&block, 1000.0, 800.0, 1),
+            (670.0, 100.0, 80.0, 200.0)
+        );
+        assert_eq!(
+            transform_block_for_quarter_turns(&block, 1000.0, 800.0, 2),
+            (700.0, 670.0, 200.0, 80.0)
+        );
+        assert_eq!(
+            transform_block_for_quarter_turns(&block, 1000.0, 800.0, 3),
+            (50.0, 700.0, 80.0, 200.0)
+        );
+    }
+
+    #[test]
+    fn compute_bubble_font_size_scales_and_clamps() {
+        let small = compute_bubble_font_size(60.0, 36.0, 0.0, 40, 1.0);
+        let large = compute_bubble_font_size(240.0, 160.0, 22.0, 10, 1.0);
+        let scaled = compute_bubble_font_size(240.0, 160.0, 22.0, 10, 1.5);
+        assert!((9.0..=28.0).contains(&small));
+        assert!(large > small);
+        assert!(scaled >= large);
+        assert!(scaled <= 28.0);
+    }
+
+    #[test]
+    fn double_spread_geometry_maps_left_and_right_pages_across_rotations() {
+        let geom = viewer_double_fit_geometries(
+            (800, 1000),
+            Some((1200, 1500)),
+            10.0,
+            0,
+            1.0,
+            0.0,
+            0.0,
+            1610.0,
+            750.0,
+        );
+        // Normalized target_h = 1500; left_disp_w = 800 * 1.5 = 1200, right_disp_w = 1200.
+        assert_eq!(geom.spread_h, 1500.0);
+        assert_eq!(geom.left_disp_w, 1200.0);
+        assert!((geom.right_disp_w - 1200.0).abs() < 1e-3);
+        let left_block = TranslationBlock {
+            x: 100,
+            y: 200,
+            w: 200,
+            h: 100,
+            original: String::new(),
+            translated: String::new(),
+        };
+        let right_block = TranslationBlock {
+            x: 150,
+            y: 450,
+            w: 300,
+            h: 150,
+            original: String::new(),
+            translated: String::new(),
+        };
+        let (lx, ly, lw, lh) =
+            transform_double_page_block_to_screen(&left_block, 800.0, 1000.0, false, geom, 0);
+        let (rx, ry, rw, rh) =
+            transform_double_page_block_to_screen(&right_block, 1200.0, 1500.0, true, geom, 0);
+        assert!(rx > lx + lw);
+        assert!(lw > 0.0 && lh > 0.0 && rw > 0.0 && rh > 0.0);
+        assert!(ry > ly);
+    }
+
+    #[test]
+    fn standalone_vs_main_toolbar_switcher_uses_two_button_pill_for_standalone() {
+        assert_eq!(
+            viewer_toolbar_switcher_kind(true, 1280.0),
+            ViewerToolbarSwitcherKind::StandaloneTwoButton { show_labels: true }
+        );
+        assert_eq!(
+            viewer_toolbar_switcher_kind(true, 900.0),
+            ViewerToolbarSwitcherKind::StandaloneTwoButton { show_labels: false }
+        );
+        assert_eq!(
+            viewer_toolbar_switcher_kind(false, 1120.0),
+            ViewerToolbarSwitcherKind::StandaloneTwoButton { show_labels: true }
+        );
+        assert_eq!(
+            viewer_toolbar_switcher_kind(false, 1119.0),
+            ViewerToolbarSwitcherKind::StandaloneTwoButton { show_labels: false }
+        );
     }
 }

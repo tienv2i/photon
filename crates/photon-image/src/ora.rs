@@ -107,6 +107,85 @@ pub fn decode_ora_merged(path: &Path) -> Result<RgbaImage, ImageError> {
     Ok((*composite_stack(&stack)).clone())
 }
 
+/// Fast header-only dimensions lookup for `.kra` (Krita) archives.
+pub fn probe_kra_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let file = File::open(path).ok()?;
+    let mut archive = ZipArchive::new(file).ok()?;
+    for entry in ["mergedimage.png", "preview.png", "Thumbnails/thumbnail.png"] {
+        if let Ok(bytes) = read_zip_bytes(&mut archive, entry)
+            && let Ok(reader) = image::ImageReader::new(Cursor::new(&bytes)).with_guessed_format()
+            && let Ok((w, h)) = reader.into_dimensions()
+            && w > 0
+            && h > 0
+        {
+            return Some((w, h));
+        }
+    }
+    None
+}
+
+/// Decode the flattened preview of a `.kra` archive (`mergedimage.png` / `preview.png`).
+pub fn decode_kra_merged(path: &Path) -> Result<RgbaImage, ImageError> {
+    let file = File::open(path).map_err(|source| ImageError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let mut archive = ZipArchive::new(file).map_err(|err| ImageError::Decode {
+        path: path.display().to_string(),
+        message: err.to_string(),
+    })?;
+    for entry in ["mergedimage.png", "preview.png", "Thumbnails/thumbnail.png"] {
+        if let Ok(bytes) = read_zip_bytes(&mut archive, entry)
+            && let Ok(reader) = image::ImageReader::new(Cursor::new(&bytes)).with_guessed_format()
+            && let Ok((w, h)) = reader.into_dimensions()
+        {
+            validate_dimensions(w, h)?;
+            return image::load_from_memory(&bytes)
+                .map(|d| d.to_rgba8())
+                .map_err(|err| ImageError::Decode {
+                    path: path.display().to_string(),
+                    message: err.to_string(),
+                });
+        }
+    }
+    Err(ImageError::Decode {
+        path: path.display().to_string(),
+        message: "KRA archive does not contain mergedimage.png or preview.png".to_owned(),
+    })
+}
+
+/// Read `Thumbnails/thumbnail.png` (falling back to `mergedimage.png` / `preview.png`) from `.kra`.
+pub fn kra_thumbnail(path: &Path, max_edge: u32) -> Result<RgbaImage, ImageError> {
+    let file = File::open(path).map_err(|source| ImageError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let mut archive = ZipArchive::new(file).map_err(|err| ImageError::Decode {
+        path: path.display().to_string(),
+        message: err.to_string(),
+    })?;
+    let mut decoded = None;
+    for entry in ["Thumbnails/thumbnail.png", "mergedimage.png", "preview.png"] {
+        if let Ok(bytes) = read_zip_bytes(&mut archive, entry)
+            && let Ok(img) = image::load_from_memory(&bytes)
+        {
+            decoded = Some(img.to_rgba8());
+            break;
+        }
+    }
+    let rgba = decoded.ok_or_else(|| ImageError::Decode {
+        path: path.display().to_string(),
+        message: "KRA archive does not contain a readable preview image".to_owned(),
+    })?;
+    let (w, h) = rgba.dimensions();
+    if max_edge == 0 || (w <= max_edge && h <= max_edge) {
+        return Ok(rgba);
+    }
+    Ok(DynamicImage::ImageRgba8(rgba)
+        .thumbnail(max_edge, max_edge)
+        .to_rgba8())
+}
+
 struct ParsedOraLayer {
     src: String,
     name: String,

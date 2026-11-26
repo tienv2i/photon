@@ -1,11 +1,11 @@
 //! Tokio actor runtime hosting `Core` with watch state snapshots & broadcast event bus.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use photon_image::{
-    EditorDocument, LayerThumbnail, composite_stack, composite_stack_excluding,
-    render_layer_thumbnails,
+    EditorDocument, LayerThumbnail, archive::ArchiveSession, composite_stack,
+    composite_stack_excluding, render_layer_thumbnails,
 };
 use photon_plugins::AiWorkerEvent;
 use photon_protocol::{
@@ -96,6 +96,7 @@ pub struct CoreHandle {
     tx: mpsc::Sender<GatewayMsg>,
     state_rx: watch::Receiver<Arc<UiStateSnapshot>>,
     event_tx: broadcast::Sender<Event>,
+    archive_session: Arc<Mutex<Option<ArchiveSession>>>,
 }
 
 impl CoreHandle {
@@ -204,6 +205,10 @@ impl CoreHandle {
     pub fn subscribe_events(&self) -> broadcast::Receiver<Event> {
         self.event_tx.subscribe()
     }
+
+    pub fn archive_session(&self) -> Arc<Mutex<Option<ArchiveSession>>> {
+        Arc::clone(&self.archive_session)
+    }
 }
 
 pub struct CoreRuntime;
@@ -215,11 +220,13 @@ impl CoreRuntime {
         let (state_tx, state_rx) = watch::channel(initial);
         let (event_tx, _) = broadcast::channel::<Event>(256);
         let seq = Arc::new(AtomicU64::new(1));
+        let archive_session = core.archive_session();
 
         let handle = CoreHandle {
             tx: tx.clone(),
             state_rx,
             event_tx: event_tx.clone(),
+            archive_session,
         };
 
         tokio::spawn(async move {

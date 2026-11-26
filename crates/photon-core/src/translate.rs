@@ -11,14 +11,14 @@ use photon_protocol::{
     TranslationResult, UiText,
 };
 
-/// Parse Tesseract TSV output into line-grouped [`TranslationBlock`]s in document coordinates.
+/// Parse Tesseract TSV output into paragraph-grouped [`TranslationBlock`]s in document coordinates.
 pub fn parse_tesseract_tsv(
     tsv: &str,
     offset_x: i32,
     offset_y: i32,
 ) -> (String, Vec<TranslationBlock>) {
     #[derive(Default)]
-    struct LineAccum {
+    struct ParAccum {
         min_x: i32,
         min_y: i32,
         max_x: i32,
@@ -26,7 +26,7 @@ pub fn parse_tesseract_tsv(
         words: Vec<String>,
     }
 
-    let mut lines: BTreeMap<(i32, i32, i32, i32), LineAccum> = BTreeMap::new();
+    let mut paragraphs: BTreeMap<(i32, i32, i32), ParAccum> = BTreeMap::new();
     for (idx, row) in tsv.lines().enumerate() {
         if idx == 0 && row.starts_with("level\t") {
             continue;
@@ -41,21 +41,21 @@ pub fn parse_tesseract_tsv(
         if level != 5 {
             continue;
         }
+        let conf = cols[10].trim().parse::<f32>().unwrap_or(-1.0);
         let text = cols[11].trim();
-        if text.is_empty() {
+        if text.is_empty() || conf < 25.0 {
             continue;
         }
         let page = cols[1].trim().parse::<i32>().unwrap_or(0);
         let block = cols[2].trim().parse::<i32>().unwrap_or(0);
         let par = cols[3].trim().parse::<i32>().unwrap_or(0);
-        let line = cols[4].trim().parse::<i32>().unwrap_or(0);
         let left = cols[6].trim().parse::<i32>().unwrap_or(0) + offset_x;
         let top = cols[7].trim().parse::<i32>().unwrap_or(0) + offset_y;
         let width = cols[8].trim().parse::<i32>().unwrap_or(0).max(1);
         let height = cols[9].trim().parse::<i32>().unwrap_or(0).max(1);
 
-        let key = (page, block, par, line);
-        let entry = lines.entry(key).or_insert_with(|| LineAccum {
+        let key = (page, block, par);
+        let entry = paragraphs.entry(key).or_insert_with(|| ParAccum {
             min_x: left,
             min_y: top,
             max_x: left + width,
@@ -69,16 +69,16 @@ pub fn parse_tesseract_tsv(
         entry.words.push(text.to_owned());
     }
 
-    let mut blocks = Vec::with_capacity(lines.len());
-    let mut joined = Vec::with_capacity(lines.len());
-    for acc in lines.into_values() {
+    let mut blocks = Vec::with_capacity(paragraphs.len());
+    let mut joined = Vec::with_capacity(paragraphs.len());
+    for acc in paragraphs.into_values() {
         let original = acc.words.join(" ");
         joined.push(original.clone());
         blocks.push(TranslationBlock {
             x: acc.min_x,
             y: acc.min_y,
-            w: (acc.max_x - acc.min_x).max(1),
-            h: (acc.max_y - acc.min_y).max(1),
+            w: (acc.max_x - acc.min_x).max(16),
+            h: (acc.max_y - acc.min_y).max(16),
             original,
             translated: String::new(),
         });
@@ -177,6 +177,15 @@ pub fn save_translation_blocks(
     }))
 }
 
+/// Return `true` if any Tesseract `.traineddata` pack for `src_lang` (supports `a+b`) exists in `dir`.
+fn has_tessdata_for(dir: &Path, src_lang: &str) -> bool {
+    src_lang
+        .split('+')
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .any(|lang| dir.join(format!("{lang}.traineddata")).is_file())
+}
+
 /// Run Tesseract OCR (optionally on cropped `region`) and translate if `target_lang` and
 /// `settings.provider != TranslateProvider::None`.
 pub fn run_ocr_and_translate(
@@ -185,6 +194,7 @@ pub fn run_ocr_and_translate(
     source_lang: &str,
     target_lang: &str,
     settings: &TranslateSettings,
+    models_dir: Option<&Path>,
 ) -> Result<TranslationResult, ProtocolError> {
     let src_lang = if source_lang.trim().is_empty() {
         settings.default_source_lang.as_str()
@@ -217,13 +227,14 @@ pub fn run_ocr_and_translate(
         (image_path.to_path_buf(), 0, 0)
     };
 
-    let output = Command::new("tesseract")
-        .arg(&ocr_input)
-        .arg("stdout")
-        .arg("-l")
-        .arg(src_lang)
-        .arg("tsv")
-        .output();
+    let mut cmd = Command::new("tesseract");
+    cmd.arg(&ocr_input).arg("stdout").arg("-l").arg(src_lang);
+    if let Some(dir) = models_dir
+        && has_tessdata_for(dir, src_lang)
+    {
+        cmd.arg("--tessdata-dir").arg(dir);
+    }
+    let output = cmd.arg("tsv").output();
 
     if let Some(tmp) = temp_crop {
         let _ = fs::remove_file(tmp);
@@ -255,38 +266,81 @@ pub fn run_ocr_and_translate(
     }
 
     let tsv = String::from_utf8_lossy(&output.stdout);
-    let (original_text, mut blocks) = parse_tesseract_tsv(&tsv, off_x, off_y);
+    let (original_text, blocks) = parse_tesseract_tsv(&tsv, off_x, off_y);
 
-    let mut translated_text = String::new();
-    if !tgt_lang.is_empty()
-        && settings.provider != TranslateProvider::None
-        && !original_text.trim().is_empty()
-        && let Ok(translated) = translate_lines(&original_text, src_lang, tgt_lang, settings)
-    {
-        let t_lines: Vec<&str> = translated.lines().collect();
-        for (i, blk) in blocks.iter_mut().enumerate() {
-            if let Some(&line) = t_lines.get(i) {
-                blk.translated = line.to_owned();
-            }
-        }
-        translated_text = translated;
-    }
-
-    Ok(TranslationResult {
+    let mut result = TranslationResult {
         path: image_path.to_string_lossy().into_owned(),
         source_lang: src_lang.to_owned(),
         target_lang: tgt_lang.to_owned(),
         original_text,
-        translated_text,
+        translated_text: String::new(),
         blocks,
-    })
+    };
+    translate_result_blocks(&mut result, settings)
+        .map_err(|err| ProtocolError::new("translate_failed", err))?;
+
+    Ok(result)
+}
+
+/// Translate each block in `result` in place using `settings` (no-op if `target_lang` is empty
+/// or `settings.provider == TranslateProvider::None`). Preserves 1:1 block alignment.
+pub fn translate_result_blocks(
+    result: &mut TranslationResult,
+    settings: &TranslateSettings,
+) -> Result<(), String> {
+    let tgt_lang = result.target_lang.trim();
+    if tgt_lang.is_empty() || settings.provider == TranslateProvider::None {
+        return Ok(());
+    }
+    if result.blocks.is_empty() {
+        if result.original_text.trim().is_empty() {
+            return Ok(());
+        }
+        result.translated_text = translate_lines(
+            &result.original_text,
+            &result.source_lang,
+            tgt_lang,
+            settings,
+        )?;
+        return Ok(());
+    }
+
+    let mut any_ok = false;
+    let mut non_empty = 0usize;
+    let mut last_err: Option<String> = None;
+    let mut all_trans = Vec::with_capacity(result.blocks.len());
+
+    for blk in &mut result.blocks {
+        if blk.original.trim().is_empty() {
+            all_trans.push(String::new());
+            continue;
+        }
+        non_empty += 1;
+        match translate_lines(&blk.original, &result.source_lang, tgt_lang, settings) {
+            Ok(t) => {
+                any_ok = true;
+                blk.translated = t.clone();
+                all_trans.push(t);
+            }
+            Err(err) => {
+                last_err = Some(err);
+                all_trans.push(String::new());
+            }
+        }
+    }
+
+    if non_empty > 0 && !any_ok {
+        return Err(last_err.unwrap_or_else(|| "translation failed".to_owned()));
+    }
+    result.translated_text = all_trans.join("\n");
+    Ok(())
 }
 
 fn map_tesseract_to_iso(lang: &str) -> &str {
     match lang {
         "eng" => "en",
         "vie" => "vi",
-        "jpn" => "ja",
+        "jpn" | "jpn_vert" => "ja",
         "kor" => "ko",
         "chi_sim" => "zh-CN",
         "chi_tra" => "zh-TW",
@@ -393,13 +447,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tsv_parser_groups_words_into_document_coordinate_lines() {
+    fn tsv_parser_groups_words_into_document_coordinate_paragraphs() {
         let sample = "\
 level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext
 4\t1\t1\t1\t1\t0\t10\t20\t100\t18\t-1\t
 5\t1\t1\t1\t1\t1\t10\t20\t40\t18\t95\tHello
 5\t1\t1\t1\t1\t2\t55\t22\t55\t16\t92\tworld
-5\t1\t1\t1\t2\t1\t12\t45\t60\t20\t90\tPhoton";
+5\t1\t1\t1\t2\t1\t12\t40\t30\t18\t12\tnoise
+5\t1\t1\t2\t1\t1\t12\t45\t60\t20\t90\tPhoton";
 
         let (text, blocks) = parse_tesseract_tsv(sample, 100, 50);
         assert_eq!(text, "Hello world\nPhoton");
@@ -445,5 +500,47 @@ level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theigh
         assert!(load_sidecar(&img).is_none());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn has_tessdata_for_detects_single_and_combined_langs() {
+        let dir = std::env::temp_dir().join(format!("photon-tess-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("jpn.traineddata"), b"stub").unwrap();
+
+        assert!(has_tessdata_for(&dir, "jpn"));
+        assert!(has_tessdata_for(&dir, "eng+jpn"));
+        assert!(!has_tessdata_for(&dir, "vie"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn translate_result_blocks_skips_when_provider_none_or_empty_target() {
+        let mut res = TranslationResult {
+            path: "/tmp/a.png".into(),
+            source_lang: "jpn_vert".into(),
+            target_lang: "vi".into(),
+            original_text: "こんにちは".into(),
+            translated_text: String::new(),
+            blocks: vec![TranslationBlock {
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+                original: "こんにちは".into(),
+                translated: String::new(),
+            }],
+        };
+        let settings = TranslateSettings {
+            provider: TranslateProvider::None,
+            ..Default::default()
+        };
+        translate_result_blocks(&mut res, &settings).unwrap();
+        assert_eq!(res.translated_text, "");
+        assert_eq!(res.blocks[0].translated, "");
+        assert_eq!(map_tesseract_to_iso("jpn_vert"), "ja");
+        assert_eq!(map_tesseract_to_iso("fra"), "fr");
     }
 }

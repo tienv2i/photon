@@ -2,19 +2,19 @@
 
 Photon is an automation-first, headless-capable image browser, viewer, and non-destructive layered editor built in Rust with `iced 0.14`, `wgpu 27`, and a single authoritative Tokio `CoreRuntime`.
 
-## Workspaces
+## Workspaces & 3-Process Architecture
 
-All three workspaces run in one process sharing `CoreRuntime`, `PluginRegistry`, and GPU/CPU image caches:
+Photon runs a unified `CoreRuntime`, `PluginRegistry`, and GPU/CPU image pipeline, coordinating three distinct window roles (with separate Linux `application_id` / `StartupWMClass` taskbar identities):
 
-- **Browser** (`photon-browser`):
-  - Resizable `Quick Access` (`Icon::Folder` rows with hidden-by-default Edit mode via the panel Options menu) + `Explorer` sidebar (`photon-panels`), manual `Detail` inspector, `Grid` / `List` / `Details` views, `XS`–`XL` thumbnails, sorting/filtering, file operations, and separate **Batch Resize**, **Batch Crop**, and **Batch Convert** dialogs (`px` / `cm` / `in` / `%` + DPI).
+- **Browser** (`photon-browser`, singleton via `photon.sock`, `io.github.tienv2i.Photon`):
+  - Resizable `Quick Access` (`Icon::Folder` rows with header pencil Edit toggle) + `Explorer` sidebar (`photon-panels`), manual `Detail` inspector, `Grid` / `List` / `Details` views, `XS`–`XL` thumbnails, sorting/filtering, Open / Edit / `xdg-open` context actions, and separate **Batch Resize**, **Batch Crop**, and **Batch Convert** dialogs (`px` / `cm` / `in` / `%` + DPI).
   - **Window & Startup Modes**: Opens maximized on first launch and remembers window size/maximized state (`AppLaunchWindowMode::{Maximized, Remembered}`), separated in Settings (`config.json`) from runtime UI session state (`ui_state.json` with configurable **Save UI state on exit** and `Ctrl+Q`/`Ctrl+Close` force-save), and from **Opening Image Files** (`SystemOpenWindowMode`: `Fit Image`, `Fullscreen`, `Remembered`).
   - **Clipboard & Plugins**: `Ctrl+C` / `Ctrl+V` image & file copy/paste (`Command::PasteImageBytes` with safe `stem (copy).ext` collision naming) and `Plugins` menu (`BrowserAction` plugins, `Manage Plugins…`, `Reload Plugins`).
-- **Viewer** (`photon-viewer`):
-  - Independent multi-image Viewer processes (`photon view <file>`, Browser open, or "Open in New Window") with canonical-path window deduplication & focus activation (`photon-ipc::viewer_registry`), hardware-accelerated `Single`, `Double` spread (LTR/RTL, separate cover, page gap), and continuous `Webtoon` strip modes, unified right dock (`View Adjustments` + `Info`), and optional bottom `Filmstrip`.
+- **Viewer** (`photon-viewer`, multi-instance via `v-<pid>.sock`, `io.github.tienv2i.Photon.Viewer`):
+  - Independent multi-image Viewer processes (`photon view <file>`, Browser open, or "Open in New Window") with canonical-path window deduplication & focus/restore activation (`photon-ipc::viewer_registry`), `[ Browser | Editor ]` navigation, `Filmstrip` (`Icon::PanelsTopLeft`) → `Fullscreen` → `Info` → `Adjustment` toolbar flow, responsive `ReaderOptions` (`Icon::BookOpen` + `MenuEntry::IconRow`), `Single` / `Double` / `Webtoon` modes, hybrid `.cbz`/`.zip`/`.pdf` `ArchiveSession` with windowed Filmstrip, and interactive Translate overlay (`GoogleWeb` default, `⋮⋮` drag handles, bottom-centered `result_card`, full-box masking, `SwapTranslateLangs`).
   - Configurable **Canvas Anti-Aliasing** (`Crisp`, `Smooth`, `HighQuality`), **Viewport Denoise** (`Off`, `Light`, `Medium`, `Strong`), and **Canvas Backdrop** presets/custom color in the auto-closing `Workspace & View` menu.
-- **Editor** (`photon-editor`):
-  - **Multi-Tab Workspace**: Document tab bar below the Editor toolbar (`+` new tab, dirty indicators, per-tab view cache, dirty-close confirmation on `×`/`Ctrl+W`, `Ctrl+Tab`/`Alt+1..9` switching).
+- **Editor** (`photon-editor`, singleton via `editor.sock`, `io.github.tienv2i.Photon.Editor`):
+  - **Multi-Tab Workspace**: Document tab bar below the Editor toolbar (`+` / `Ctrl+N` new document, virtual `Save As` for unsaved buffers, Unsupported Format screen with `Back to Viewer` / `Back to Browser`, dirty indicators, per-tab view cache, dirty-close confirmation on `×`/`Ctrl+W`, `Ctrl+Tab`/`Alt+1..9` switching).
   - Non-destructive layered document (`photon-image`), layer masks, Before/After `Compare` modes, atomic backup saves (`file~`), menu-driven **Image Size…** (`Ctrl+R`) & **Canvas Size…** (`Ctrl+Shift+R`) popups, and real-time GPU adjustments via `Cutout` dialogs (`Color & Light`, `HSV`, `Color Balance`, `Curves`), plus **Filter → Denoise…** (`LayerEffect::Denoise`):
     - **Interactive Curves + Live GPU LUT**: `CurveGraphProgram` (`256×256` tonal curve editor with luminance histogram backdrop, monotone cubic Hermite spline, `Linear`/`S-Curve`/`Fade`/`High Contrast`/`Negative` presets, channel reset, and live 60fps `256×1` RGBA8 GPU 1D-LUT preview).
   - **Selection Suite**: Rectangular / Elliptical / Single Row / Single Column Marquee (`M`), Freehand Lasso, Krita-style Polygon Lasso, Sobel + Dijkstra Magnetic Lasso, Bézier Select, Magic Wand (`W`), Quick Select, Color Range, Quick Mask (`Q`), animated GPU marching ants on a dedicated `Nearest` `sel_sampler` (isolated from image AA/Denoise), `Select` menu with `SelectionModify` dialog, and `SelectionMask` clipping across paint/draw/adjustment/denoise/healing ops.
@@ -23,10 +23,11 @@ All three workspaces run in one process sharing `CoreRuntime`, `PluginRegistry`,
   - **Free Canvas Navigation & Oversized (`>4096px`) GPU Support**: Free pan on `Pointer`/`Hand` and tool-safe Middle-mouse or `Space + Drag` pan across all tools (with `Unfocused` transient flag reset), `Shift + Wheel` / touchpad horizontal pan, draggable Canvas Scrollbars, Zoom `-` / `%` / `+` / `Fit` (`0`) / `1:1` (`1`) controls, dynamic zoom ceiling (`min_zoom = 0.02`, `max_zoom = (32.0 / fit_scale).max(32.0)`), and GPU texture cap raised to `device.limits().max_texture_dimension_2d.min(16384)` with exact `doc_size` coordinate alignment.
   - **Pixel Clipboard & Renderer Controls**: Selection/layer-aware `Cut` (`Ctrl+X`), `Copy` (`Ctrl+C`), `Copy Merged` (`Ctrl+Shift+C`), `Paste` (`Ctrl+V`), and `Paste Into Selection` (`arboard` + `wl-copy`/`wl-paste`/`xclip`), plus Hardware Acceleration toggle (`GPU (wgpu)` vs `Software (tiny-skia)`).
 
-## Supported Image Formats
+## Supported Image & Archive Formats
 
-- **Multi-layer**: OpenRaster (`.ora` full read/write preserving layers, offsets, opacity, visibility, blend modes, thumbnail, and `.bak` backups), Photoshop (`.psd` multi-layer import).
-- **Vector, HDR, Next-Gen & Camera RAW**: `.svg` / `.svgz` (`usvg`/`resvg`), `.jxl` (`jxl-oxide`), Camera RAW (`.dng`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.raf`, `.orf`, `.rw2` via `rawler`), `.avif`, `.exr`, `.hdr`, `.ico`, `.cur`, `.pam`, `.dds`, `.ff` (Farbfeld), `.apng`, `.pnm`/`.ppm`/`.pgm`/`.pbm`, `.qoi`, `.tga`, `.webp`, `.tiff`, `.gif`, `.bmp`, `.png`, `.jpg`/`.jpeg`, plus optional external CLI fallback (`heif-convert` / `avifdec` / `ffmpeg` / `magick`) for `.heic` / `.heif`.
+- **Multi-layer**: OpenRaster (`.ora` full read/write preserving layers, offsets, opacity, visibility, blend modes, thumbnail, and `.bak` backups), Photoshop (`.psd` multi-layer import), Krita (`.kra` merged preview/decode).
+- **Vector, HDR, Next-Gen, Icon & Camera RAW**: `.svg` / `.svgz` (`usvg`/`resvg`), `.jxl` (`jxl-oxide`), `.jp2`/`.j2k`/`.jpx`/`.jpf` (`libopenjp2`), `.heic`/`.heif`/`.hif` (`libheif`), native `.avif` (`avif-native`), `.icns` (`image/x-icns`), Camera RAW (29 formats via `rawler`: `.dng`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.raf`, `.orf`, `.rw2`, `.ari`, `.crm`, `.crw`, `.dcr`, `.dcs`, `.erf`, `.iiq`, `.kdc`, `.mef`, `.mos`, `.mrw`, `.nrw`, `.ori`, `.pef`, `.raw`, `.rwl`, `.srw`, `.3fr`, `.fff`, `.x3f`, `.qtk`), `.exr`, `.hdr`, `.ico`, `.cur`, `.pam`, `.dds`, `.ff` (Farbfeld), `.apng`, `.pnm`/`.ppm`/`.pgm`/`.pbm`, `.qoi`, `.tga`, `.webp`, `.tiff`, `.gif`, `.bmp`, `.png`, `.jpg`/`.jpeg`.
+- **Paged Archives & Documents**: `.cbz`, `.zip`, `.pdf` (lazy `ArchiveSession` page indexing and materialization for Viewer & Translate).
 - **Save / Export Formats**: `.png`, `.jpg`, `.webp`, `.tiff`, `.gif`, `.bmp`, `.tga`, `.qoi`, `.ora`, `.avif`, `.exr`, `.hdr`, `.ico`, `.pnm`, `.ff`.
 
 ## Plugin System (`photon-plugins`)
@@ -105,7 +106,8 @@ just uninstall
 ```sh
 photon browse ~/Pictures
 photon view image1.png image2.png
-photon edit photo.png
+photon edit [photo.png]
+photon --edit [photo.png]
 photon --headless
 photon --safe-mode
 

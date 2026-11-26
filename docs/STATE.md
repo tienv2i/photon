@@ -18,7 +18,7 @@ All workspace checks below were executed after the final Rust edits:
 | Check | Command | Result |
 |---|---|---|
 | Formatting | `just fmt-check` (`cargo fmt --all -- --check`) | Passed |
-| Workspace tests | `just test` (`cargo test --workspace`) | **167 passed, 0 failed** (`photon-browser`: 5, `photon-canvas`: 13, `photon-cli`: 1, `photon-core`: 21 unit + 8 `automation_e2e`, `photon-desktop`: 6, `photon-dialogs`: 11, `photon-editor`: 5, `photon-i18n`: 3, `photon-image`: 29, `photon-ipc`: 4, `photon-panels`: 13, `photon-plugins`: 12, `photon-protocol`: 10, `photon-storage`: 8, `photon-ui`: 17, `photon-viewer`: 1) |
+| Workspace tests | `just test` (`cargo test --workspace`) | **204 passed, 0 failed** (`photon-browser`: 5, `photon-canvas`: 13, `photon-cli`: 1, `photon-core`: 33 unit + 8 `automation_e2e`, `photon-desktop`: 14, `photon-dialogs`: 12, `photon-editor`: 5, `photon-i18n`: 3, `photon-image`: 35, `photon-ipc`: 4, `photon-panels`: 13, `photon-plugins`: 1 unit + 12 `plugin_bridge_tests`, `photon-protocol`: 13, `photon-storage`: 8, `photon-ui`: 19, `photon-viewer`: 5) |
 
 ## Implemented Feature Milestones
 
@@ -43,6 +43,11 @@ All workspace checks below were executed after the final Rust edits:
 10. **Multi-Stop Gradient, Multi-Tab Editor, Independent Viewers & Separated Persistence**:
     - KogaView multi-stop Gradient engine (6 shapes, 3 repeat modes, 7 blend modes, 8 presets, interactive stop editor, live `wgpu` preview), selection-clipped live Brush/Eraser strokes.
     - Image Size & Canvas Size moved from tool rail into Image menu & popups; Multi-tab Editor (`document_tab_bar`, per-tab view cache, dirty-close prompt); Independent multi-image Viewer processes (`photon-ipc::viewer_registry` canonical-path deduplication & focus); Quick Access folder icons + hidden-by-default Edit toggle; auto-closing `Workspace & View` menu with Viewer Canvas Backdrop; `config.json` vs `ui_state.json` separation with `save_ui_state_on_exit`, `Ctrl+Q`/`Ctrl+Close` force-save, `photonctl reset <layout|settings|all>`, and Safe Mode disk reset.
+11. **Translate Pipeline Parity, Extended Codecs, Hybrid Archive/PDF & 3-Process Taskbar Separation**:
+    - Translate plugin & pipeline parity: `resolve_models_dir_for`, `--tessdata-dir`, `GoogleWeb` default, `rasterize_for_translate` for JP2/HEIC/HIF/AVIF/JXL/KRA/RAW, KogaView plugin-first routing, `SwapTranslateLangs` Tesseract↔ISO mapping, block-merge/per-path cache, rotated/Dual/Manhwa overlay, `⋮⋮` drag handles, bottom-centered `result_card`, full-box text masking + `pal.text_primary` high contrast.
+    - Popup/dialog & menu/icon polish: `resolve_card_and_body_limits` + resize handles (`photon-dialogs`), `opaque(scrollable(...))` + `MenuEntry::IconRow` (`photon-ui`), `Icon::BookOpen` & `Icon::PanelsTopLeft`, Quick Access header pencil toggle, responsive `ReaderOptions`.
+    - Extended codecs & hybrid archive/PDF: `.jp2`/`.j2k`/`.jpx`/`.jpf` (`libopenjp2`), `.heic`/`.heif`/`.hif` (`libheif`), `avif-native`, 29 `rawler` RAWs, `.kra`, `.icns` (`image/x-icns`), `ArchiveSession` (`.cbz`/`.zip`/`.pdf`) + windowed Filmstrip, Browser Open/Edit/`xdg-open`, Editor `New` (`Ctrl+N`), Unsupported Format screen, virtual `Save As`.
+    - 3-process architecture & Linux taskbar separation: Browser singleton (`photon.sock`), Editor singleton (`editor.sock`), Viewer multi-instance (`v-<pid>.sock` with focus+restore), Viewer `[ Browser | Editor ]` + `Filmstrip → Fullscreen → Info → Adjustment`, distinct `application_id`/`StartupWMClass` (`io.github.tienv2i.Photon`, `.Editor`, `.Viewer`), and MIME defaults (`scripts/install.py`).
 
 ## Verification Scope Notes
 

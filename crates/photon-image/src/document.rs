@@ -285,6 +285,22 @@ impl EditorDocument {
         }
     }
 
+    /// Create a new blank single-layer document filled with `background_rgba`.
+    pub fn new_blank(
+        width: u32,
+        height: u32,
+        background_rgba: [u8; 4],
+    ) -> Result<Self, ImageError> {
+        crate::validate_dimensions(width, height)?;
+        let img = RgbaImage::from_pixel(width, height, Rgba(background_rgba));
+        let mut doc = Self::from_rgba(PathBuf::from("untitled.png"), img);
+        if let Some(layer) = doc.stack.layers.first_mut() {
+            layer.name = "Background".to_owned();
+        }
+        doc.original_stack = doc.stack.clone();
+        Ok(doc)
+    }
+
     pub fn dimensions(&self) -> (u32, u32) {
         (self.stack.canvas_width, self.stack.canvas_height)
     }
@@ -3674,10 +3690,104 @@ mod tests {
             assert_eq!(dec.dimensions(), (16, 12), "decode failed for {ext}");
         }
 
-        // AVIF encode test (decoding depends on optional avifdec/ffmpeg CLI)
+        // AVIF encode + native probe & decode test
         let avif_path = dir.join("sample.avif");
         codec::save_to(&sample, &avif_path).unwrap();
         assert!(std::fs::metadata(&avif_path).unwrap().len() > 0);
+        assert_eq!(crate::probe_dimensions(&avif_path), Some((16, 12)));
+        assert_eq!(
+            crate::decode_rgba(&avif_path).unwrap().dimensions(),
+            (16, 12)
+        );
+
+        // JPEG 2000 (.jp2 / .j2k) probe & decode when opj_compress is available
+        let png_src = dir.join("src_for_ext.png");
+        codec::save_to(&sample, &png_src).unwrap();
+        for ext in ["jp2", "j2k"] {
+            let jp2_path = dir.join(format!("sample.{ext}"));
+            if let Ok(out) = std::process::Command::new("opj_compress")
+                .arg("-i")
+                .arg(&png_src)
+                .arg("-o")
+                .arg(&jp2_path)
+                .output()
+                && out.status.success()
+            {
+                assert_eq!(
+                    crate::probe_dimensions(&jp2_path),
+                    Some((16, 12)),
+                    "probe failed for {ext}"
+                );
+                let dec = crate::decode_rgba(&jp2_path).unwrap();
+                assert_eq!(dec.dimensions(), (16, 12), "decode failed for {ext}");
+                let thumb = crate::generate_thumbnail(&jp2_path, 8).unwrap();
+                assert_eq!(thumb.dimensions(), (8, 6));
+            }
+        }
+
+        // HEIC (.heic / .hif) probe & decode when heif-enc is available
+        let heic_path = dir.join("sample.heic");
+        if let Ok(out) = std::process::Command::new("heif-enc")
+            .arg(&png_src)
+            .arg("-o")
+            .arg(&heic_path)
+            .output()
+            && out.status.success()
+        {
+            assert_eq!(crate::probe_dimensions(&heic_path), Some((16, 12)));
+            let dec = crate::decode_rgba(&heic_path).unwrap();
+            assert_eq!(dec.dimensions(), (16, 12));
+            let hif_path = dir.join("sample.hif");
+            std::fs::copy(&heic_path, &hif_path).unwrap();
+            assert_eq!(crate::probe_dimensions(&hif_path), Some((16, 12)));
+            assert_eq!(
+                crate::decode_rgba(&hif_path).unwrap().dimensions(),
+                (16, 12)
+            );
+        }
+
+        // KRA (.kra) probe, decode & thumbnail
+        {
+            use image::{ExtendedColorType, ImageEncoder};
+            use std::io::Write;
+            let mut png_bytes = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut png_bytes)
+                .write_image(sample.as_raw(), 16, 12, ExtendedColorType::Rgba8)
+                .unwrap();
+            let kra_path = dir.join("sample.kra");
+            let f = std::fs::File::create(&kra_path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("mergedimage.png", opts).unwrap();
+            zw.write_all(&png_bytes).unwrap();
+            zw.finish().unwrap();
+            assert_eq!(crate::probe_dimensions(&kra_path), Some((16, 12)));
+            assert_eq!(
+                crate::decode_rgba(&kra_path).unwrap().dimensions(),
+                (16, 12)
+            );
+            assert_eq!(
+                crate::generate_thumbnail(&kra_path, 8)
+                    .unwrap()
+                    .dimensions(),
+                (8, 6)
+            );
+        }
+
+        // Extra RAW extensions recognized by codec::is_raw_ext
+        assert!(codec::is_raw_ext("pef"));
+        assert!(codec::is_raw_ext("srw"));
+        assert!(codec::is_raw_ext("3fr"));
+        assert!(codec::is_raw_ext("rwl"));
+        assert!(!codec::is_raw_ext("png"));
+
+        // EditorDocument::new_blank
+        assert!(EditorDocument::new_blank(0, 100, [255, 255, 255, 255]).is_err());
+        let blank = EditorDocument::new_blank(32, 24, [10, 20, 30, 255]).unwrap();
+        assert_eq!(blank.dimensions(), (32, 24));
+        assert_eq!(blank.stack.layers.len(), 1);
+        assert_eq!(blank.stack.layers[0].name, "Background");
+        assert_eq!(blank.current.get_pixel(0, 0).0, [10, 20, 30, 255]);
 
         // JXL probe & decode
         let jxl_bytes: &[u8] = &[

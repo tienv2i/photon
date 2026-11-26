@@ -445,13 +445,14 @@ pub fn resolve_models_dir_for(
     plugin: Option<&LoadedPlugin>,
     override_dir: Option<&Path>,
 ) -> PathBuf {
-    if let Some(dir) = override_dir
-        && !dir.as_os_str().is_empty()
-    {
-        return dir.to_path_buf();
-    }
     if let Some(env_dir) = std::env::var_os(MODELS_DIR_ENV).filter(|s| !s.is_empty()) {
         return PathBuf::from(env_dir);
+    }
+    if let Some(dir) = override_dir
+        && !dir.as_os_str().is_empty()
+        && dir.is_dir()
+    {
+        return dir.to_path_buf();
     }
     if let Some(data_dir) = plugin.and_then(|p| p.plugin_dir.parent().and_then(|d| d.parent())) {
         let sibling_models = data_dir.join("models");
@@ -471,6 +472,11 @@ pub fn resolve_models_dir_for(
         if candidate.is_dir() {
             return candidate;
         }
+    }
+    if let Some(dir) = override_dir
+        && !dir.as_os_str().is_empty()
+    {
+        return dir.to_path_buf();
     }
     if let Some(data_dir) = plugin.and_then(|p| p.plugin_dir.parent().and_then(|d| d.parent())) {
         return data_dir.join("models");
@@ -1366,4 +1372,25 @@ fn build_plugin_command(entry_path: &Path, extra_args: &[String]) -> Command {
 
     cmd.args(extra_args);
     cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_models_dir_prefers_existing_override_and_falls_back_when_missing() {
+        let existing =
+            std::env::temp_dir().join(format!("photon-models-ok-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&existing);
+        fs::create_dir_all(&existing).unwrap();
+        assert_eq!(resolve_models_dir_for(None, Some(&existing)), existing);
+        let _ = fs::remove_dir_all(&existing);
+
+        let missing =
+            std::env::temp_dir().join(format!("photon-models-missing-{}", std::process::id()));
+        let resolved = resolve_models_dir_for(None, Some(&missing));
+        // Either resolves to an existing XDG fallback dir or returns `missing` if none exist.
+        assert!(resolved.is_dir() || resolved == missing);
+    }
 }

@@ -4,23 +4,24 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::io::{Cursor, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, UNIX_EPOCH};
 
 use image::{GrayImage, ImageEncoder, Rgba, RgbaImage};
+use photon_image::archive::{ArchiveKind, ArchiveSession, is_archive_path, sanitize_zip_filename};
 use photon_image::{EditOp, EditorDocument, ImageError, LayerOperation, SelectionMask};
 use photon_plugins::{
     PluginError, PluginOutputMode, PluginRegistry, resolve_plugins_dir, run_browser_plugin,
     run_editor_plugin,
 };
 use photon_protocol::{
-    AiTaskState, ApplyTarget, BatchSource, BatchState, ColorAdjustments, ColorBalanceAdjustment,
-    Command, CommandResponse, CommandStatus, Crumb, CurvesAdjustment, EditorSelectionSummary,
-    EditorState, EditorTabSummary, Entry, HsvAdjustment, IMAGE_EXTENSIONS, PluginCapability,
-    PluginParamValue, ProtocolError, Query, RuntimeStatus, SavedTranslation, SelectionInfo,
-    TaskRunStatus, TaskSnapshot, TranslationResult, UiStateMeta, UiStateSnapshot, UiText,
-    UiTreeSnapshot, Workspace, protocol_schemas,
+    AiTaskState, ApplyTarget, ArchiveViewerSessionMeta, BatchSource, BatchState, ColorAdjustments,
+    ColorBalanceAdjustment, Command, CommandResponse, CommandStatus, Crumb, CurvesAdjustment,
+    EditorSelectionSummary, EditorState, EditorTabSummary, Entry, HsvAdjustment, IMAGE_EXTENSIONS,
+    PluginCapability, PluginParamValue, ProtocolError, Query, RuntimeStatus, SavedTranslation,
+    SelectionInfo, TaskRunStatus, TaskSnapshot, TranslationResult, UiStateMeta, UiStateSnapshot,
+    UiText, UiTreeSnapshot, UnsupportedEditorFile, Workspace, protocol_schemas,
 };
 use photon_storage::journal::now_ms;
 use photon_storage::logging::current_boot_id;
@@ -46,6 +47,7 @@ pub(crate) struct EditorTabSlot {
     pub(crate) id: u64,
     pub(crate) doc: Option<EditorDocument>,
     pub(crate) caption: Option<String>,
+    pub(crate) source_is_virtual: bool,
 }
 
 pub struct Core {
@@ -70,7 +72,11 @@ pub struct Core {
     selection_info: Option<SelectionInfo>,
     pub(crate) viewer_images: Vec<String>,
     pub(crate) viewer_index: Option<usize>,
+    pub(crate) archive_session: Arc<Mutex<Option<ArchiveSession>>>,
+    pub(crate) viewer_archive: Option<ArchiveViewerSessionMeta>,
     pub(crate) editor: Option<EditorDocument>,
+    pub(crate) editor_unsupported: Option<UnsupportedEditorFile>,
+    pub(crate) editor_source_is_virtual: bool,
     editor_tabs: Vec<EditorTabSlot>,
     active_editor_tab_id: Option<u64>,
     next_editor_tab_id: u64,
@@ -212,7 +218,11 @@ impl Core {
             selection_info: None,
             viewer_images: Vec::new(),
             viewer_index: None,
+            archive_session: Arc::new(Mutex::new(None)),
+            viewer_archive: None,
             editor: None,
+            editor_unsupported: None,
+            editor_source_is_virtual: false,
             editor_tabs: Vec::new(),
             active_editor_tab_id: None,
             next_editor_tab_id: 1,
@@ -500,6 +510,9 @@ impl Core {
             ai_task: self.ai_task.clone(),
             editor_caption: self.editor_caption.clone(),
             has_pixel_clipboard: self.pixel_clipboard.is_some(),
+            viewer_archive: self.viewer_archive.clone(),
+            editor_unsupported: self.editor_unsupported.clone(),
+            editor_source_is_virtual: self.editor_source_is_virtual,
         }
     }
 
@@ -716,13 +729,22 @@ impl Core {
         match command {
             Command::OpenFolder { path } => {
                 let p = PathBuf::from(path);
+                if p.is_file() && is_archive_path(&p) {
+                    let text = self.open_archive_container(&p)?;
+                    return Ok((Some(text), None));
+                }
                 let text = self.open_folder(&p)?;
                 if self.root_folder.as_ref() != Some(&p) {
                     self.root_folder = Some(p.clone());
                     self.tree_revision += 1;
                 }
                 self.workspace = Workspace::Browser;
+                self.editor_unsupported = None;
                 self.sync_session_prefs();
+                Ok((Some(text), None))
+            }
+            Command::OpenArchive { path } => {
+                let text = self.open_archive_container(Path::new(path))?;
                 Ok((Some(text), None))
             }
             Command::Navigate { path } => {
@@ -754,6 +776,13 @@ impl Core {
                         "open_files requires at least one file path",
                     ));
                 }
+                if paths.len() == 1 {
+                    let p = PathBuf::from(&paths[0]);
+                    if p.is_file() && is_archive_path(&p) {
+                        let text = self.open_archive_container(&p)?;
+                        return Ok((Some(text), None));
+                    }
+                }
                 let mut valid = Vec::new();
                 for raw in paths {
                     let p = PathBuf::from(raw);
@@ -765,6 +794,7 @@ impl Core {
                     }
                     valid.push(p.to_string_lossy().into_owned());
                 }
+                self.clear_archive_session();
                 if let Some(first) = PathBuf::from(&valid[0]).parent()
                     && first.is_dir()
                     && valid.len() == 1
@@ -786,6 +816,7 @@ impl Core {
                     self.listing_epoch += 1;
                 }
                 self.workspace = Workspace::Viewer;
+                self.editor_unsupported = None;
                 self.sync_viewer_saved_translation();
                 self.sync_session_prefs();
                 let text = self.current_viewer_status();
@@ -801,6 +832,7 @@ impl Core {
             Command::SetWorkspace { workspace } => match workspace {
                 Workspace::Browser => {
                     self.workspace = Workspace::Browser;
+                    self.editor_unsupported = None;
                     self.sync_session_prefs();
                     Ok((None, None))
                 }
@@ -815,6 +847,7 @@ impl Core {
                         self.viewer_index = Some(0);
                     }
                     self.workspace = Workspace::Viewer;
+                    self.editor_unsupported = None;
                     self.sync_session_prefs();
                     Ok((None, None))
                 }
@@ -822,14 +855,25 @@ impl Core {
                     if self.editor.is_none() {
                         if let Some(first_id) = self.editor_tabs.first().map(|s| s.id) {
                             let _ = self.activate_editor_tab(first_id);
+                            self.editor_unsupported = None;
                         } else {
                             let path = self
                                 .viewer_index
                                 .and_then(|i| self.viewer_images.get(i))
                                 .cloned()
                                 .ok_or_else(no_doc_err)?;
-                            self.open_editor_path(Path::new(&path))?;
+                            let _ = Self::ensure_archive_page_for_path(
+                                &self.archive_session,
+                                Path::new(&path),
+                            );
+                            if let Err(err) = self.open_editor_path(Path::new(&path)) {
+                                self.set_editor_unsupported(&path, err.message);
+                            } else {
+                                self.editor_unsupported = None;
+                            }
                         }
+                    } else {
+                        self.editor_unsupported = None;
                     }
                     self.workspace = Workspace::Editor;
                     self.sync_session_prefs();
@@ -839,6 +883,7 @@ impl Core {
             Command::WorkspaceBack => {
                 self.workspace = match self.workspace {
                     Workspace::Editor => {
+                        self.editor_unsupported = None;
                         if self.viewer_images.is_empty() {
                             Workspace::Browser
                         } else {
@@ -968,7 +1013,10 @@ impl Core {
             Command::ViewerPrevious => self.step_viewer(-1),
             Command::ViewerOpen { path } => {
                 let p = Path::new(path);
-                if !p.is_file() {
+                let materialized = Self::ensure_archive_page_for_path(&self.archive_session, p)
+                    .map_err(|e| ProtocolError::new("decode_error", e.to_string()))?
+                    .is_some();
+                if !materialized && !p.is_file() {
                     return Err(ProtocolError::new(
                         "not_found",
                         format!("file not found: {path}"),
@@ -977,19 +1025,47 @@ impl Core {
                 if let Some(idx) = self.viewer_images.iter().position(|x| x == path) {
                     self.viewer_index = Some(idx);
                 } else {
+                    self.clear_archive_session();
                     self.viewer_images = vec![path.clone()];
                     self.viewer_index = Some(0);
                     self.listing_epoch += 1;
                 }
                 self.workspace = Workspace::Viewer;
+                self.editor_unsupported = None;
                 self.sync_viewer_saved_translation();
                 self.sync_session_prefs();
                 Ok((Some(self.current_viewer_status()), None))
             }
             Command::EditorOpen { path } => {
+                let _ = Self::ensure_archive_page_for_path(&self.archive_session, Path::new(path));
                 let text = self.open_editor_path(Path::new(path))?;
+                self.editor_unsupported = None;
                 self.workspace = Workspace::Editor;
                 Ok((Some(text), None))
+            }
+            Command::EditorNew {
+                width,
+                height,
+                background,
+            } => {
+                let text = self.new_editor_document(*width, *height, *background)?;
+                self.workspace = Workspace::Editor;
+                Ok((Some(text), None))
+            }
+            Command::OpenInEditorOrUnsupported { path } => {
+                let _ = Self::ensure_archive_page_for_path(&self.archive_session, Path::new(path));
+                match self.open_editor_path(Path::new(path)) {
+                    Ok(text) => {
+                        self.editor_unsupported = None;
+                        self.workspace = Workspace::Editor;
+                        Ok((Some(text), None))
+                    }
+                    Err(err) => {
+                        self.set_editor_unsupported(path, err.message);
+                        self.workspace = Workspace::Editor;
+                        Ok((None, None))
+                    }
+                }
             }
             Command::EditorResize {
                 width,
@@ -1801,6 +1877,12 @@ impl Core {
                 }
             }
             Command::EditorSave => {
+                if self.editor_source_is_virtual {
+                    return Err(ProtocolError::new(
+                        "save_as_required",
+                        "virtual or unsaved document requires Save As",
+                    ));
+                }
                 let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
                 let saved = doc
                     .save_to(None)
@@ -1818,6 +1900,7 @@ impl Core {
                 let saved = doc
                     .save_to(Some(Path::new(path)))
                     .map_err(|e| ProtocolError::new("save_error", e.to_string()))?;
+                self.editor_source_is_virtual = false;
                 Ok((
                     Some(UiText::with(
                         "editor_saved",
@@ -2013,6 +2096,7 @@ impl Core {
         );
         viewer_images.sort_by_key(|a| a.to_lowercase());
 
+        self.clear_archive_session();
         let total = entries.len();
         let img_count = viewer_images.len();
         self.current_folder = Some(dir.to_path_buf());
@@ -2039,6 +2123,7 @@ impl Core {
         {
             slot.doc = self.editor.take();
             slot.caption = self.editor_caption.take();
+            slot.source_is_virtual = self.editor_source_is_virtual;
         }
     }
 
@@ -2053,6 +2138,8 @@ impl Core {
         if let Some(slot) = self.editor_tabs.iter_mut().find(|s| s.id == tab_id) {
             self.editor = slot.doc.take();
             self.editor_caption = slot.caption.take();
+            self.editor_source_is_virtual = slot.source_is_virtual;
+            self.editor_unsupported = None;
             self.active_editor_tab_id = Some(tab_id);
             true
         } else {
@@ -2075,6 +2162,7 @@ impl Core {
         if closing_active {
             self.editor = None;
             self.editor_caption = None;
+            self.editor_source_is_virtual = false;
             if self.editor_tabs.is_empty() {
                 self.active_editor_tab_id = None;
                 if self.workspace == Workspace::Editor {
@@ -2091,6 +2179,7 @@ impl Core {
                 self.active_editor_tab_id = Some(next_id);
                 self.editor = self.editor_tabs[next_idx].doc.take();
                 self.editor_caption = self.editor_tabs[next_idx].caption.take();
+                self.editor_source_is_virtual = self.editor_tabs[next_idx].source_is_virtual;
             }
         }
         Ok(UiText::new("editor_closed"))
@@ -2153,6 +2242,7 @@ impl Core {
             .and_then(|n| n.to_str())
             .unwrap_or_default()
             .to_owned();
+        let is_virtual = self.is_archive_temp_path(path);
         self.park_active_editor_tab();
         let tab_id = self.next_editor_tab_id;
         self.next_editor_tab_id += 1;
@@ -2160,10 +2250,17 @@ impl Core {
             id: tab_id,
             doc: None,
             caption: None,
+            source_is_virtual: is_virtual,
         });
         self.active_editor_tab_id = Some(tab_id);
         self.editor = Some(doc);
-        self.editor_caption = ai::load_caption_for_image(path);
+        self.editor_source_is_virtual = is_virtual;
+        self.editor_unsupported = None;
+        self.editor_caption = if is_virtual {
+            None
+        } else {
+            ai::load_caption_for_image(path)
+        };
         Ok(UiText::with(
             "editor_opened",
             [
@@ -2172,6 +2269,167 @@ impl Core {
                 ("height", h.to_string()),
             ],
         ))
+    }
+
+    pub fn archive_session(&self) -> Arc<Mutex<Option<ArchiveSession>>> {
+        Arc::clone(&self.archive_session)
+    }
+
+    /// Materialize the archive/PDF page matching `path` if it belongs to the active archive session.
+    pub fn ensure_archive_page_for_path(
+        session_arc: &Arc<Mutex<Option<ArchiveSession>>>,
+        path: &Path,
+    ) -> Result<Option<PathBuf>, ImageError> {
+        let mut guard = session_arc
+            .lock()
+            .map_err(|_| ImageError::InvalidEdit("archive session lock poisoned".to_owned()))?;
+        let Some(session) = guard.as_mut() else {
+            return Ok(None);
+        };
+        let Some(index) = find_archive_page_index(session, path) else {
+            return Ok(None);
+        };
+        session.materialize_page(index).map(Some)
+    }
+
+    /// Render/decode a thumbnail for the archive/PDF page matching `path`.
+    pub fn archive_thumbnail_for_path(
+        session_arc: &Arc<Mutex<Option<ArchiveSession>>>,
+        path: &Path,
+        max_edge: u32,
+    ) -> Result<Option<RgbaImage>, ImageError> {
+        let mut guard = session_arc
+            .lock()
+            .map_err(|_| ImageError::InvalidEdit("archive session lock poisoned".to_owned()))?;
+        let Some(session) = guard.as_mut() else {
+            return Ok(None);
+        };
+        let Some(index) = find_archive_page_index(session, path) else {
+            return Ok(None);
+        };
+        session.page_thumbnail(index, max_edge).map(Some)
+    }
+
+    fn is_archive_temp_path(&self, path: &Path) -> bool {
+        let Ok(guard) = self.archive_session.lock() else {
+            return false;
+        };
+        let Some(session) = guard.as_ref() else {
+            return false;
+        };
+        path.starts_with(session.temp_dir())
+    }
+
+    fn clear_archive_session(&mut self) {
+        if let Ok(mut guard) = self.archive_session.lock() {
+            *guard = None;
+        }
+        self.viewer_archive = None;
+    }
+
+    fn open_archive_container(&mut self, path: &Path) -> Result<UiText, ProtocolError> {
+        if !path.is_file() {
+            return Err(ProtocolError::new(
+                "not_found",
+                format!("archive not found: {}", path.display()),
+            ));
+        }
+        let mut session = ArchiveSession::open(path)
+            .map_err(|e| ProtocolError::new("decode_error", e.to_string()))?;
+        if session.page_count() == 0 {
+            return Err(ProtocolError::new(
+                "empty_archive",
+                format!("no viewable pages in {}", path.display()),
+            ));
+        }
+        session
+            .materialize_page(0)
+            .map_err(|e| ProtocolError::new("decode_error", e.to_string()))?;
+
+        let viewer_images: Vec<String> = (0..session.page_count())
+            .map(|idx| {
+                planned_archive_page_path(&session, idx)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let page_labels: Vec<String> = session.pages().iter().map(|p| p.label.clone()).collect();
+        let kind = match session.kind() {
+            ArchiveKind::ZipCbz => "zip_cbz",
+            ArchiveKind::Pdf => "pdf",
+        }
+        .to_owned();
+        let meta = ArchiveViewerSessionMeta {
+            container_path: path.to_string_lossy().into_owned(),
+            kind,
+            page_count: session.page_count(),
+            page_labels,
+        };
+
+        if let Ok(mut guard) = self.archive_session.lock() {
+            *guard = Some(session);
+        }
+        self.viewer_archive = Some(meta);
+        self.viewer_images = viewer_images;
+        self.viewer_index = (!self.viewer_images.is_empty()).then_some(0);
+        self.listing_epoch += 1;
+        self.workspace = Workspace::Viewer;
+        self.editor_unsupported = None;
+        self.sync_viewer_saved_translation();
+        self.sync_session_prefs();
+        Ok(self.current_viewer_status())
+    }
+
+    fn new_editor_document(
+        &mut self,
+        width: u32,
+        height: u32,
+        background: [u8; 4],
+    ) -> Result<UiText, ProtocolError> {
+        let mut doc =
+            EditorDocument::new_blank(width, height, background).map_err(map_image_err)?;
+        doc.original_revision = self.next_original_revision;
+        self.next_original_revision += 1;
+        let (w, h) = doc.dimensions();
+        self.park_active_editor_tab();
+        let tab_id = self.next_editor_tab_id;
+        self.next_editor_tab_id += 1;
+        self.editor_tabs.push(EditorTabSlot {
+            id: tab_id,
+            doc: None,
+            caption: None,
+            source_is_virtual: true,
+        });
+        self.active_editor_tab_id = Some(tab_id);
+        self.editor = Some(doc);
+        self.editor_source_is_virtual = true;
+        self.editor_unsupported = None;
+        self.editor_caption = None;
+        Ok(UiText::with(
+            "editor_opened",
+            [
+                ("name", "Untitled".to_owned()),
+                ("width", w.to_string()),
+                ("height", h.to_string()),
+            ],
+        ))
+    }
+
+    fn set_editor_unsupported(&mut self, path: &str, reason: String) {
+        self.park_active_editor_tab();
+        self.editor = None;
+        self.active_editor_tab_id = None;
+        self.editor_source_is_virtual = false;
+        self.editor_caption = None;
+        let extension = Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        self.editor_unsupported = Some(UnsupportedEditorFile {
+            path: path.to_owned(),
+            extension,
+            reason,
+        });
     }
 
     fn apply_editor_op(
@@ -2220,6 +2478,11 @@ impl Core {
         let len = self.viewer_images.len() as isize;
         let cur = self.viewer_index.unwrap_or(0) as isize;
         let next = (cur + delta).rem_euclid(len) as usize;
+        if self.viewer_archive.is_some()
+            && let Some(next_path) = self.viewer_images.get(next)
+        {
+            let _ = Self::ensure_archive_page_for_path(&self.archive_session, Path::new(next_path));
+        }
         self.viewer_index = Some(next);
         self.workspace = Workspace::Viewer;
         self.sync_viewer_saved_translation();
@@ -2794,6 +3057,33 @@ impl Core {
             ));
         }
 
+        if caps.contains(&PluginCapability::ViewerAction) {
+            let path = self
+                .viewer_index
+                .and_then(|idx| self.viewer_images.get(idx))
+                .cloned()
+                .ok_or_else(|| ProtocolError::new("not_found", "no image is open in Viewer"))?;
+            let src_lang = self.config.translate.default_source_lang.clone();
+            let tgt_lang = self.config.translate.default_target_lang.clone();
+            if plugin.supports_action("viewer.translate") {
+                return self.viewer_translate(&path, &src_lang, &tgt_lang, None, "tesseract");
+            }
+            if plugin.supports_action("viewer.ai_ocr") {
+                let engine = match params.get("engine") {
+                    Some(PluginParamValue::Select(s)) if !s.trim().is_empty() => s.clone(),
+                    _ => "manga_ocr".to_owned(),
+                };
+                return self.viewer_translate(&path, &src_lang, &tgt_lang, None, &engine);
+            }
+            if plugin.supports_action("viewer.ocr_copy") {
+                let lang = match params.get("lang") {
+                    Some(PluginParamValue::Select(s)) if !s.trim().is_empty() => s.clone(),
+                    _ => src_lang,
+                };
+                return self.viewer_translate(&path, &lang, "", None, "tesseract");
+            }
+        }
+
         Err(ProtocolError::with_line(
             "plugin_failed",
             format!("plugin '{id}' declares no runnable capability"),
@@ -3056,6 +3346,29 @@ pub(crate) fn no_doc_err() -> ProtocolError {
     ProtocolError::line("no_document", UiText::new("needs_a_document"))
 }
 
+fn planned_archive_page_path(session: &ArchiveSession, index: usize) -> PathBuf {
+    match session.kind() {
+        ArchiveKind::ZipCbz => {
+            let label = session
+                .pages()
+                .get(index)
+                .map(|p| p.label.as_str())
+                .unwrap_or("page");
+            session.temp_dir().join(sanitize_zip_filename(index, label))
+        }
+        ArchiveKind::Pdf => session
+            .temp_dir()
+            .join(format!("page-{:04}.png", index + 1)),
+    }
+}
+
+fn find_archive_page_index(session: &ArchiveSession, path: &Path) -> Option<usize> {
+    if !path.starts_with(session.temp_dir()) {
+        return None;
+    }
+    (0..session.page_count()).find(|&idx| planned_archive_page_path(session, idx) == path)
+}
+
 pub(crate) fn map_image_err(e: ImageError) -> ProtocolError {
     match e {
         ImageError::Coded { code, ui } => ProtocolError::line(code, ui),
@@ -3119,6 +3432,7 @@ fn build_breadcrumbs(path: &Path) -> Vec<Crumb> {
 
 impl Drop for Core {
     fn drop(&mut self) {
+        self.clear_archive_session();
         self.persist_ui_state(false);
     }
 }
@@ -4505,6 +4819,171 @@ for line in sys.stdin:
             photon_protocol::AppLaunchWindowMode::Maximized
         );
         assert!(!core.config.save_ui_state_on_exit);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_new_creates_blank_doc_and_clears_unsupported_state() {
+        let mut core = Core::new(true, true);
+        let dir = std::env::temp_dir().join(format!("photon-editor-new-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let bad_file = dir.join("broken.bin");
+        fs::write(&bad_file, b"not an image").unwrap();
+
+        let resp = core.dispatch(photon_protocol::Envelope::new(
+            "u1",
+            photon_protocol::ClientKind::Cli,
+            Command::OpenInEditorOrUnsupported {
+                path: bad_file.to_string_lossy().into_owned(),
+            },
+        ));
+        assert!(resp.ok);
+        assert_eq!(core.workspace(), Workspace::Editor);
+        assert!(core.meta().editor.is_none());
+        let unsup = core
+            .meta()
+            .editor_unsupported
+            .expect("unsupported metadata");
+        assert_eq!(unsup.extension.as_deref(), Some("bin"));
+
+        let new_resp = core.dispatch(photon_protocol::Envelope::new(
+            "n1",
+            photon_protocol::ClientKind::Cli,
+            Command::EditorNew {
+                width: 32,
+                height: 24,
+                background: [255, 255, 255, 255],
+            },
+        ));
+        assert!(new_resp.ok);
+        let meta = core.meta();
+        assert_eq!(meta.workspace, Workspace::Editor);
+        assert!(meta.editor_unsupported.is_none());
+        assert!(meta.editor_source_is_virtual);
+        let ed = meta.editor.expect("new blank doc");
+        assert_eq!((ed.width, ed.height), (32, 24));
+
+        // Saving a virtual/new blank doc without Save As requires Save As.
+        let save_resp = core.dispatch(photon_protocol::Envelope::new(
+            "s1",
+            photon_protocol::ClientKind::Cli,
+            Command::EditorSave,
+        ));
+        assert!(!save_resp.ok);
+        assert_eq!(save_resp.error.unwrap().code, "save_as_required");
+
+        let save_as_path = dir.join("created.png");
+        let save_as_resp = core.dispatch(photon_protocol::Envelope::new(
+            "s2",
+            photon_protocol::ClientKind::Cli,
+            Command::EditorSaveAs {
+                path: save_as_path.to_string_lossy().into_owned(),
+            },
+        ));
+        assert!(save_as_resp.ok);
+        assert!(!core.meta().editor_source_is_virtual);
+        assert!(save_as_path.is_file());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switching_viewer_to_editor_on_corrupt_file_sets_editor_unsupported() {
+        let mut core = Core::new(true, true);
+        let dir = std::env::temp_dir().join(format!("photon-editor-unsup-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let corrupt = dir.join("corrupt.png");
+        fs::write(&corrupt, b"corrupted png bytes").unwrap();
+
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "o1",
+                photon_protocol::ClientKind::Cli,
+                Command::OpenFiles {
+                    paths: vec![corrupt.to_string_lossy().into_owned()],
+                },
+            ))
+            .ok
+        );
+        assert_eq!(core.workspace(), Workspace::Viewer);
+
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "e1",
+                photon_protocol::ClientKind::Cli,
+                Command::SetWorkspace {
+                    workspace: Workspace::Editor,
+                },
+            ))
+            .ok
+        );
+        let meta = core.meta();
+        assert_eq!(meta.workspace, Workspace::Editor);
+        assert!(meta.editor.is_none());
+        assert!(meta.editor_unsupported.is_some());
+        assert_eq!(meta.viewer_count, 1);
+
+        // Back to Viewer clears editor_unsupported and preserves viewer_images.
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "b1",
+                photon_protocol::ClientKind::Cli,
+                Command::WorkspaceBack,
+            ))
+            .ok
+        );
+        assert_eq!(core.workspace(), Workspace::Viewer);
+        assert!(core.meta().editor_unsupported.is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_cbz_populates_viewer_archive_materializes_page_zero_and_cleans_up() {
+        let dir = std::env::temp_dir().join(format!("photon-cbz-test-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let cbz_path = dir.join("comic.cbz");
+
+        let doc = EditorDocument::new_blank(4, 4, [10, 20, 30, 255]).unwrap();
+        let zip_bytes = photon_image::ora::encode_ora_bytes(doc.stack()).unwrap();
+        fs::write(&cbz_path, &zip_bytes).unwrap();
+
+        let mut core = Core::new(true, true);
+        let resp = core.dispatch(photon_protocol::Envelope::new(
+            "a1",
+            photon_protocol::ClientKind::Cli,
+            Command::OpenFiles {
+                paths: vec![cbz_path.to_string_lossy().into_owned()],
+            },
+        ));
+        assert!(resp.ok);
+        let snap = core.snapshot();
+        assert_eq!(snap.meta.workspace, Workspace::Viewer);
+        let archive_meta = snap.meta.viewer_archive.expect("viewer_archive");
+        assert_eq!(archive_meta.kind, "zip_cbz");
+        assert!(archive_meta.page_count >= 2);
+        assert_eq!(snap.viewer_images.len(), archive_meta.page_count);
+
+        let page0 = PathBuf::from(&snap.viewer_images[0]);
+        let page1 = PathBuf::from(&snap.viewer_images[1]);
+        assert!(page0.is_file());
+        assert!(!page1.exists());
+        let temp_dir = page0.parent().unwrap().to_path_buf();
+
+        // Switching to a regular folder cleans up the archive temp dir.
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "f1",
+                photon_protocol::ClientKind::Cli,
+                Command::OpenFolder {
+                    path: dir.to_string_lossy().into_owned(),
+                },
+            ))
+            .ok
+        );
+        assert!(core.meta().viewer_archive.is_none());
+        assert!(!temp_dir.exists());
 
         let _ = fs::remove_dir_all(&dir);
     }

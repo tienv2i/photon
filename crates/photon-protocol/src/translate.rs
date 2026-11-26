@@ -15,6 +15,10 @@ fn default_tgt_lang() -> String {
     "vi".to_owned()
 }
 
+fn default_provider() -> TranslateProvider {
+    TranslateProvider::GoogleWeb
+}
+
 /// Translation backend provider used after Tesseract OCR.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -29,7 +33,7 @@ pub enum TranslateProvider {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TranslateSettings {
-    #[serde(default)]
+    #[serde(default = "default_provider")]
     pub provider: TranslateProvider,
     #[serde(default = "default_libre_url")]
     pub libre_endpoint: String,
@@ -44,7 +48,7 @@ pub struct TranslateSettings {
 impl Default for TranslateSettings {
     fn default() -> Self {
         Self {
-            provider: TranslateProvider::None,
+            provider: default_provider(),
             libre_endpoint: default_libre_url(),
             api_key: None,
             default_source_lang: default_src_lang(),

@@ -74,10 +74,38 @@ fn lower_ext(path: &Path) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
-fn is_raw_ext(ext: &str) -> bool {
+pub(crate) fn is_raw_ext(ext: &str) -> bool {
     matches!(
         ext,
-        "dng" | "cr2" | "cr3" | "nef" | "arw" | "raf" | "orf" | "rw2"
+        "ari"
+            | "arw"
+            | "cr2"
+            | "cr3"
+            | "crm"
+            | "crw"
+            | "dcr"
+            | "dcs"
+            | "dng"
+            | "erf"
+            | "iiq"
+            | "kdc"
+            | "mef"
+            | "mos"
+            | "mrw"
+            | "nef"
+            | "nrw"
+            | "orf"
+            | "ori"
+            | "pef"
+            | "raf"
+            | "raw"
+            | "rw2"
+            | "rwl"
+            | "srw"
+            | "3fr"
+            | "fff"
+            | "x3f"
+            | "qtk"
     )
 }
 
@@ -86,6 +114,7 @@ pub fn probe_dimensions(path: &Path) -> Option<(u32, u32)> {
     if let Some(ext) = lower_ext(path) {
         match ext.as_str() {
             "ora" => return crate::ora::probe_ora_dimensions(path),
+            "kra" => return crate::ora::probe_kra_dimensions(path),
             "svg" | "svgz" => return probe_svg_dimensions(path, ext == "svgz"),
             "jxl" => {
                 let img = jxl_oxide::JxlImage::builder().open(path).ok()?;
@@ -94,6 +123,7 @@ pub fn probe_dimensions(path: &Path) -> Option<(u32, u32)> {
             }
             "psd" => return probe_psd_dimensions(path),
             "cur" => return probe_cur_dimensions(path),
+            "icns" => return probe_icns_dimensions(path),
             "apng" => {
                 if let Ok(file) = fs::File::open(path) {
                     let reader =
@@ -101,11 +131,25 @@ pub fn probe_dimensions(path: &Path) -> Option<(u32, u32)> {
                     return reader.into_dimensions().ok();
                 }
             }
-            "heic" | "heif" | "avif" => {
+            "heic" | "heif" | "hif" => {
+                #[cfg(has_libheif)]
+                if let Some(dims) = crate::native_codecs::heif::probe_dimensions(path) {
+                    return Some(dims);
+                }
+                return probe_via_cli(path);
+            }
+            "avif" => {
                 if let Ok(reader) = ImageReader::open(path)
                     && let Ok(guessed) = reader.with_guessed_format()
                     && let Ok(dims) = guessed.into_dimensions()
                 {
+                    return Some(dims);
+                }
+                return probe_via_cli(path);
+            }
+            "jp2" | "j2k" | "jpx" | "jpf" => {
+                #[cfg(has_openjp2)]
+                if let Some(dims) = crate::native_codecs::jp2::probe_dimensions(path) {
                     return Some(dims);
                 }
                 return probe_via_cli(path);
@@ -134,10 +178,12 @@ pub fn decode_rgba(path: &Path) -> Result<RgbaImage, ImageError> {
     if let Some(ext) = lower_ext(path) {
         match ext.as_str() {
             "ora" => return crate::ora::decode_ora_merged(path),
+            "kra" => return crate::ora::decode_kra_merged(path),
             "svg" | "svgz" => return decode_svg_rgba(path, ext == "svgz"),
             "jxl" => return decode_jxl_rgba(path),
             "psd" => return decode_psd_rgba(path),
             "cur" => return decode_cur_rgba(path),
+            "icns" => return decode_icns_rgba(path),
             "apng" => {
                 let file = fs::File::open(path).map_err(|source| ImageError::Io {
                     path: path.display().to_string(),
@@ -152,7 +198,13 @@ pub fn decode_rgba(path: &Path) -> Result<RgbaImage, ImageError> {
                         })?;
                 return Ok(dyn_img.to_rgba8());
             }
-            "heic" | "heif" => return decode_via_cli(path, &["heif-convert", "ffmpeg", "magick"]),
+            "heic" | "heif" | "hif" => {
+                #[cfg(has_libheif)]
+                if let Ok(rgba) = crate::native_codecs::heif::decode_rgba(path) {
+                    return Ok(rgba);
+                }
+                return decode_via_cli(path, &["heif-convert", "ffmpeg", "magick"]);
+            }
             "avif" => {
                 if let Ok(reader) = ImageReader::open(path)
                     && let Ok(guessed) = reader.with_guessed_format()
@@ -161,6 +213,13 @@ pub fn decode_rgba(path: &Path) -> Result<RgbaImage, ImageError> {
                     return Ok(dyn_img.to_rgba8());
                 }
                 return decode_via_cli(path, &["avifdec", "ffmpeg", "magick"]);
+            }
+            "jp2" | "j2k" | "jpx" | "jpf" => {
+                #[cfg(has_openjp2)]
+                if let Ok(rgba) = crate::native_codecs::jp2::decode_rgba(path) {
+                    return Ok(rgba);
+                }
+                return decode_via_cli(path, &["opj_decompress", "ffmpeg"]);
             }
             e if is_raw_ext(e) => return decode_raw_rgba(path),
             _ => {}
@@ -207,8 +266,10 @@ pub fn decode_rgba(path: &Path) -> Result<RgbaImage, ImageError> {
 
 /// Generate a thumbnail RGBA8 buffer scaled proportionally to fit `max_edge`.
 pub fn generate_thumbnail(path: &Path, max_edge: u32) -> Result<RgbaImage, ImageError> {
-    if lower_ext(path).as_deref() == Some("ora") {
-        return crate::ora::ora_thumbnail(path, max_edge);
+    match lower_ext(path).as_deref() {
+        Some("ora") => return crate::ora::ora_thumbnail(path, max_edge),
+        Some("kra") => return crate::ora::kra_thumbnail(path, max_edge),
+        _ => {}
     }
     let rgba = decode_rgba(path)?;
     let (w, h) = rgba.dimensions();
@@ -482,6 +543,135 @@ fn decode_cur_rgba(path: &Path) -> Result<RgbaImage, ImageError> {
     Ok(dyn_img.to_rgba8())
 }
 
+const ICNS_PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
+const ICNS_JP2_BOX_MAGIC: &[u8] = b"\x00\x00\x00\x0c\x6a\x50\x20\x20";
+const ICNS_J2K_MAGIC: &[u8] = b"\xff\x4f\xff\x51";
+
+fn icns_chunk_priority(tag: &[u8; 4]) -> Option<usize> {
+    const ORDER: [&[u8; 4]; 11] = [
+        b"ic10", // 1024
+        b"ic09", // 512
+        b"ic14", // 512@2x
+        b"ic08", // 256
+        b"ic13", // 256@2x
+        b"ic07", // 128
+        b"ic12", // 64@2x
+        b"icp6", // 64
+        b"ic11", // 32@2x
+        b"icp5", // 32
+        b"icp4", // 16
+    ];
+    ORDER.iter().position(|t| *t == tag)
+}
+
+fn is_icns_jp2_payload(payload: &[u8]) -> bool {
+    payload.starts_with(ICNS_JP2_BOX_MAGIC) || payload.starts_with(ICNS_J2K_MAGIC)
+}
+
+fn is_icns_image_payload(payload: &[u8]) -> bool {
+    payload.starts_with(ICNS_PNG_MAGIC) || is_icns_jp2_payload(payload)
+}
+
+/// Extract the highest-resolution PNG or JPEG 2000 icon payload from an `.icns` container.
+pub fn extract_icns_best_payload(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.len() < 8 || &bytes[0..4] != b"icns" {
+        return None;
+    }
+    let total_len = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    if total_len < 8 || total_len > bytes.len() {
+        return None;
+    }
+
+    let mut best: Option<(usize, &[u8])> = None;
+    let mut offset = 8usize;
+    while offset + 8 <= total_len {
+        let tag: [u8; 4] = bytes[offset..offset + 4].try_into().ok()?;
+        let chunk_len = u32::from_be_bytes([
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]) as usize;
+        if chunk_len < 8 || offset + chunk_len > total_len {
+            break;
+        }
+        let payload = &bytes[offset + 8..offset + chunk_len];
+        if let Some(priority) = icns_chunk_priority(&tag)
+            && is_icns_image_payload(payload)
+            && best.is_none_or(|(best_prio, _)| priority < best_prio)
+        {
+            best = Some((priority, payload));
+        }
+        offset += chunk_len;
+    }
+
+    best.map(|(_, payload)| payload)
+}
+
+struct TempPayloadFile(PathBuf);
+
+impl TempPayloadFile {
+    fn write(ext: &str, bytes: &[u8]) -> Result<Self, std::io::Error> {
+        let id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("photon-icns-{}-{id}.{ext}", std::process::id()));
+        fs::write(&path, bytes)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for TempPayloadFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn probe_icns_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let bytes = fs::read(path).ok()?;
+    let payload = extract_icns_best_payload(&bytes)?;
+    if payload.starts_with(ICNS_PNG_MAGIC) {
+        return ImageReader::with_format(Cursor::new(payload), ImageFormat::Png)
+            .into_dimensions()
+            .ok();
+    }
+    if is_icns_jp2_payload(payload) {
+        let tmp = TempPayloadFile::write("jp2", payload).ok()?;
+        #[cfg(has_openjp2)]
+        if let Some(dims) = crate::native_codecs::jp2::probe_dimensions(&tmp.0) {
+            return Some(dims);
+        }
+        return probe_via_cli(&tmp.0);
+    }
+    None
+}
+
+fn decode_icns_rgba(path: &Path) -> Result<RgbaImage, ImageError> {
+    let bytes = fs::read(path).map_err(|source| ImageError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let payload = extract_icns_best_payload(&bytes).ok_or_else(|| ImageError::Decode {
+        path: path.display().to_string(),
+        message: "no supported PNG or JPEG 2000 icon chunk found in .icns".to_owned(),
+    })?;
+    if !is_icns_jp2_payload(payload) {
+        let dyn_img = image::load_from_memory(payload).map_err(|err| ImageError::Decode {
+            path: path.display().to_string(),
+            message: err.to_string(),
+        })?;
+        return Ok(dyn_img.to_rgba8());
+    }
+    let tmp = TempPayloadFile::write("jp2", payload).map_err(|source| ImageError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    #[cfg(has_openjp2)]
+    if let Ok(rgba) = crate::native_codecs::jp2::decode_rgba(&tmp.0) {
+        return Ok(rgba);
+    }
+    decode_via_cli(&tmp.0, &["opj_decompress", "ffmpeg"])
+}
+
 fn probe_raw_dimensions(path: &Path) -> Option<(u32, u32)> {
     let src = rawler::rawsource::RawSource::new(path).ok()?;
     let raw = rawler::decode_dummy(&src).ok()?;
@@ -569,6 +759,14 @@ fn decode_via_cli(path: &Path, tools: &[&str]) -> Result<RgbaImage, ImageError> 
                 .map(|o| o.status.success()),
             "avifdec" => ProcessCommand::new("avifdec")
                 .arg(path)
+                .arg(&tmp_png)
+                .output()
+                .ok()
+                .map(|o| o.status.success()),
+            "opj_decompress" => ProcessCommand::new("opj_decompress")
+                .arg("-i")
+                .arg(path)
+                .arg("-o")
                 .arg(&tmp_png)
                 .output()
                 .ok()
@@ -1024,4 +1222,65 @@ pub fn splice_jpeg_metadata_segments(
     }
     out.extend_from_slice(&encoded[2..]);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode_test_png(width: u32, height: u32) -> Vec<u8> {
+        let mut img = RgbaImage::new(width, height);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = image::Rgba([(x * 80) as u8, (y * 120) as u8, 200, 255]);
+        }
+        let mut out = Vec::new();
+        DynamicImage::ImageRgba8(img)
+            .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+            .expect("encode test png");
+        out
+    }
+
+    fn build_synthetic_icns(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let total_len: usize = 8 + chunks.iter().map(|(_, p)| 8 + p.len()).sum::<usize>();
+        let mut out = Vec::with_capacity(total_len);
+        out.extend_from_slice(b"icns");
+        out.extend_from_slice(&(total_len as u32).to_be_bytes());
+        for (tag, payload) in chunks {
+            out.extend_from_slice(*tag);
+            out.extend_from_slice(&((8 + payload.len()) as u32).to_be_bytes());
+            out.extend_from_slice(payload);
+        }
+        out
+    }
+
+    #[test]
+    fn icns_extracts_highest_priority_payload_and_validates_header() {
+        assert!(extract_icns_best_payload(b"noticns!").is_none());
+        assert!(extract_icns_best_payload(b"icns\x00\x00\x00\x04").is_none());
+
+        let small = encode_test_png(1, 1);
+        let large = encode_test_png(2, 2);
+        let icns = build_synthetic_icns(&[(b"icp4", &small), (b"ic07", &large)]);
+        let best = extract_icns_best_payload(&icns).expect("extract best icns payload");
+        assert_eq!(best, large.as_slice());
+    }
+
+    #[test]
+    fn icns_probe_decode_and_thumbnail_work_for_synthetic_png_chunk() {
+        let png = encode_test_png(2, 2);
+        let icns = build_synthetic_icns(&[(b"ic07", &png)]);
+        let id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("photon-test-{id}.icns"));
+        fs::write(&path, &icns).expect("write synthetic icns");
+
+        let dims = probe_dimensions(&path);
+        let decoded = decode_rgba(&path).expect("decode icns");
+        let thumb = generate_thumbnail(&path, 16).expect("thumbnail icns");
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(dims, Some((2, 2)));
+        assert_eq!(decoded.dimensions(), (2, 2));
+        assert_eq!(decoded.get_pixel(1, 1), &image::Rgba([80, 120, 200, 255]));
+        assert_eq!(thumb.dimensions(), (2, 2));
+    }
 }

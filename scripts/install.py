@@ -32,10 +32,16 @@ IMAGE_MIME_TYPES = ";".join(
         "image/gif",
         "image/tiff",
         "image/bmp",
+        "image/avif",
+        "image/heic",
+        "image/heif",
+        "image/jp2",
+        "image/jpx",
         "image/x-exr",
         "image/vnd.radiance",
         "image/x-hdr",
         "image/vnd.microsoft.icon",
+        "image/x-icns",
         "image/x-portable-anymap",
         "image/x-portable-bitmap",
         "image/x-portable-graymap",
@@ -44,6 +50,8 @@ IMAGE_MIME_TYPES = ";".join(
         "image/x-tga",
         "image/x-farbfeld",
         "image/vnd.ms-dds",
+        "application/vnd.comicbook+zip",
+        "application/x-cbz",
     ]
 ) + ";"
 
@@ -74,6 +82,7 @@ def install_targets(prefix: pathlib.Path) -> dict[str, pathlib.Path]:
         "photon": prefix / "bin" / "photon",
         "photonctl": prefix / "bin" / "photonctl",
         "viewer desktop": share / "applications" / f"{APP_ID}.desktop",
+        "standalone viewer desktop": share / "applications" / f"{APP_ID}.Viewer.desktop",
         "editor desktop": share / "applications" / f"{APP_ID}.Editor.desktop",
         "metainfo": share / "metainfo" / f"{APP_ID}.metainfo.xml",
         "icon svg": share / "icons" / "hicolor" / "scalable" / "apps" / f"{APP_ID}.svg",
@@ -148,9 +157,14 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
 
     bindir = prefix / "bin"
     viewer_desktop = stage / f"{APP_ID}.desktop"
+    standalone_viewer_desktop = stage / f"{APP_ID}.Viewer.desktop"
     editor_desktop = stage / f"{APP_ID}.Editor.desktop"
     viewer_desktop.write_text(
         render_desktop(PACKAGING / f"{APP_ID}.desktop.in", bindir),
+        encoding="utf-8",
+    )
+    standalone_viewer_desktop.write_text(
+        render_desktop(PACKAGING / f"{APP_ID}.Viewer.desktop.in", bindir),
         encoding="utf-8",
     )
     editor_desktop.write_text(
@@ -160,7 +174,7 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
 
     validator = shutil.which("desktop-file-validate")
     if validator:
-        for df in (viewer_desktop, editor_desktop):
+        for df in (viewer_desktop, standalone_viewer_desktop, editor_desktop):
             res = subprocess.run([validator, str(df)], capture_output=True, text=True, check=False)
             if res.returncode != 0:
                 print(res.stdout or res.stderr, file=sys.stderr)
@@ -183,6 +197,7 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
     sources: dict[str, tuple[pathlib.Path, str]] = {
         "photonctl": (ctl_bin, "755"),
         "viewer desktop": (viewer_desktop, "644"),
+        "standalone viewer desktop": (standalone_viewer_desktop, "644"),
         "editor desktop": (editor_desktop, "644"),
         "metainfo": (metainfo, "644"),
         "icon svg": (svg_src, "644"),

@@ -9,9 +9,9 @@
 | `photon-protocol` | `Envelope`, `Command`, `Query`, `Event`, `CommandResponse`, `UiText`, `LayoutState`, `PluginManifest`, `LayerTransformSpec`, JSON Schema (`schemars`) | Yes |
 | `photon-storage` | `AppIdentity` (`Dev`/`Prod`/`Sandbox`), `AppPaths` (XDG), atomic `Config`, `Journal` (`commands.jsonl`), `tracing` daily JSONL logs | Yes |
 | `photon-i18n` | Embedded Fluent `.ftl` (`en-US`, `vi-VN`) + `UiText` translator + key/placeholder parity test | Yes |
-| `photon-image` | Image probing, RGBA decode, thumbnails, `.ora`/`.psd`/RAW/SVG/JXL codecs, `EditorDocument`, layers/masks/`SelectionMask`, `healing`, `drawing`, `denoise_rgba`, affine transform, atomic `file~` backup save | Yes |
-| `photon-core` | Authoritative `Core` state machine, `CoreRuntime` (Tokio `mpsc` + `watch` + `broadcast`), pixel clipboard, plugin dispatch, batch runner, sandbox `replay` engine | Yes |
-| `photon-plugins` | Process-isolated NDJSON (`PhotonNdjsonV1`) & `jsonl-stdio` (`JsonlStdioV1`) plugin discovery, path-traversal-safe validation, and execution bridge | Yes |
+| `photon-image` | Image probing, RGBA decode, thumbnails, `.ora`/`.psd`/`.kra`/`.icns`/RAW/SVG/JXL/`libopenjp2`/`libheif`/`avif-native` codecs, `ArchiveSession` (`.cbz`/`.zip`/`.pdf`), `EditorDocument`, layers/masks/`SelectionMask`, `healing`, `drawing`, `denoise_rgba`, affine transform, atomic `file~` backup save | Yes |
+| `photon-core` | Authoritative `Core` state machine, `CoreRuntime` (Tokio `mpsc` + `watch` + `broadcast`), pixel clipboard, `ArchiveSession` & `rasterize_for_translate` orchestration, plugin dispatch, batch runner, sandbox `replay` engine | Yes |
+| `photon-plugins` | Process-isolated NDJSON (`PhotonNdjsonV1`) & `jsonl-stdio` (`JsonlStdioV1`) plugin discovery, `resolve_models_dir_for`, path-traversal-safe validation, and execution bridge | Yes |
 | `photon-ipc` | Secure local IPC (`$XDG_RUNTIME_DIR/photon[-dev]/control.sock` `0600` on Unix) with NDJSON request/response & event stream | Yes |
 | `photon-dialogs` | Native OS file/folder/save dialogs (`rfd`) + movable/8-way resizable `DialogManager` frames and `DimmedFrosted` / `Cutout` / `Floating` overlays | UI Kit only (no Core dep) |
 | `photon-ui` | Reusable pure-`iced` Design System & UI Kit (`theme`, SVG `icons`, `curve_editor`, `button`, `menu`, `dialog` theme bridge, `toolbar`, `grid`, `table`, `editor`, `splitter`, `tooltip`) | UI Kit only (no Core dep) |
@@ -31,14 +31,12 @@
   - External plugins run out-of-process via `photon-plugins` (`<data_dir>/plugins` or `PHOTON_PLUGINS_DIR`) with `PluginRegistry` in `Core` and `Plugins` menus + `ManagePlugins` / `PluginParams` dialogs in the GUI (see [PLUGINS.md](PLUGINS.md)).
   - Legacy built-in translation commands (`ViewerTranslate`, `ViewerSaveTranslation`, `ViewerDeleteTranslation`, `SetTranslateSettings`) remain serde-compatible in `photon-protocol` and `Config` for deterministic `commands.jsonl` replay, while `Core::dispatch` rejects them with `feature_disabled` (`ai_feature_disabled`); OCR and translation workflows are provided through the standalone plugins (`photon.translate`, `photon.ocr.tesseract`, `photon.ocr.ai`).
 
-## Modes & Multi-Window Strategy
-Instead of 3 disconnected binaries (which break GPU texture sharing and cross-workspace transitions), `photon` runs **one CoreRuntime** in-process and exposes:
-- **3 Workspaces** (`Browser`, `Viewer`, `Editor`) switchable instantly in-window with zero re-decode.
-- **Multi-window (`iced::daemon`)**: extra windows can be opened (`--new-window` or UI action) sharing the same `CoreRuntime` and `wgpu` caches.
+## Modes & 3-Process Window Strategy
+`photon` exposes **3 Workspaces** (`Browser`, `Viewer`, `Editor`) backed by `CoreRuntime`, `PluginRegistry`, and `photon-image`/`wgpu` caches, coordinated across three dedicated process roles (`compute_launch_route` in `crates/photon-desktop/src/main.rs`):
+- **Browser singleton (`photon.sock` / `control.sock`)**: Launching Browser (`photon`, `photon browse`, `photon <dir>`) forwards commands + `FocusWindow` to the running Browser instance and exits `0` (Linux `application_id` / `StartupWMClass`: `io.github.tienv2i.Photon`).
+- **Editor singleton (`editor.sock` via `AppPaths::editor_socket_path`)**: Launching Editor (`photon edit [file]`, `photon --edit [file]`, or `Command::EditorOpen` / `OpenInEditorOrUnsupported`) routes to the dedicated Editor process (`io.github.tienv2i.Photon.Editor`), forwarding new files + `FocusWindow` if already running.
+- **Viewer multi-instance (`v-<pid>.sock`)**: Launching Viewer (`photon view <file>`, `photon <file>`, Browser open, or Viewer "Open in New Window") checks `$XDG_RUNTIME_DIR/photon[-dev]/viewers/` (`v-<pid>.json`, `v-<pid>.sock`, `CanonicalPathLock`). If a live Viewer already holds that canonical path, it sends `FocusWindow` (focus + restore) to raise that window; otherwise it spawns an independent `StandaloneViewer` (`Core::new_viewer_ephemeral`, `io.github.tienv2i.Photon.Viewer`).
 - **Headless mode (`photon --headless`)**: runs `CoreRuntime` + `photon-ipc` (including `PluginRun`, batch ops, and `.ora`/codec pipelines) without opening any window or GPU surface for automation, CI, and CLI control.
-- **Single-instance & Independent Viewer coordination**:
-  - Launching Browser/Editor (`photon`, `photon browse`, `photon edit`, `photon <dir>`) when a main instance is listening on `control.sock` forwards the command + `FocusWindow` over IPC and exits `0`.
-  - Launching Viewer (`photon view <file>`, `photon <file>`, Browser open, or Viewer "Open in New Window") checks `$XDG_RUNTIME_DIR/photon[-dev]/viewers/` (`v-<pid>.json`, `v-<pid>.sock`, `CanonicalPathLock`). If a live Viewer already holds that canonical path, it sends `FocusWindow` to raise that window; otherwise it spawns an independent `StandaloneViewer` (`Core::new_viewer_ephemeral`) so Viewer windows are isolated from each other and the main app.
 - **Separated Settings vs UI State**: Settings persist in `config.json` (`theme`, `language`, `remember_last_folder`, `save_ui_state_on_exit`, `hardware_acceleration`, `favorites`, `plugins`, `ai`, `translate`, and Settings-level defaults), while runtime UI state persists in `ui_state.json` (`last_folder`, window bounds/maximized, panel visibility/order/splits, `viewer_viewport_background`, sort/view modes), flushed on exit (when `save_ui_state_on_exit` or `Ctrl` force-save), `Ctrl+,`, `ResetConfig`, or `photonctl reset`.
 
 ## GPU & Large-Image Pipeline (`iced 0.14` + `wgpu 27`)

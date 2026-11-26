@@ -46,7 +46,7 @@ clap = { version = "4", features = ["derive", "env"] }
 flate2 = "1"
 fluent-templates = "0.15"
 iced = { version = "0.14", features = ["wgpu", "tiny-skia", "tokio", "image", "svg", "advanced"] }
-image = "0.25"
+image = { version = "0.25", features = ["avif-native"] }
 jxl-oxide = "0.12"
 psd = "0.3"
 rawler = "0.7"

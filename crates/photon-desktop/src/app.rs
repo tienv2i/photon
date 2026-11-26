@@ -2,7 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use iced::keyboard::{self, Key, Modifiers, key::Named};
@@ -39,8 +40,8 @@ use photon_ui::dialog::{
 };
 use photon_ui::icons::Icon;
 use photon_ui::menu::{
-    MenuEntry, MenuItem, menu_panel_entries, with_anchored_menu, with_bottom_right_menu_at,
-    with_context_menu, with_top_right_menu, with_top_right_menu_at,
+    MenuEntry, MenuIconButton, MenuItem, menu_panel_entries, with_anchored_menu,
+    with_bottom_right_menu_at, with_context_menu, with_top_right_menu, with_top_right_menu_at,
 };
 use photon_ui::panel::{section_card, status_bar};
 use photon_ui::theme::{
@@ -78,29 +79,50 @@ use photon_viewer::{
     ViewerMessage, ViewerTranslateMode, ViewerTranslateState, ViewerViewState,
     build_viewer_context_menu, build_viewer_quality_menu_entries, build_viewer_toolbar,
     build_viewer_view, dual_spread_slots, dual_spread_slots_for, step_dual_spread,
-    viewer_counter_summary, viewer_reader_options_right_offset, viewer_status_summary,
-    webtoon_index_at_scroll, webtoon_offset_for_index, webtoon_scroll_id,
+    viewer_counter_summary, viewer_double_fit_geometries, viewer_reader_options_right_offset,
+    viewer_status_summary, webtoon_index_at_scroll, webtoon_offset_for_index, webtoon_scroll_id,
 };
 
 static CORE_HANDLE: OnceLock<CoreHandle> = OnceLock::new();
 static GPU_BACKEND_NAME: OnceLock<String> = OnceLock::new();
 static OPENED_WITH_FILES: OnceLock<bool> = OnceLock::new();
-static STANDALONE_VIEWER: OnceLock<bool> = OnceLock::new();
+static STANDALONE_VIEWER: AtomicBool = AtomicBool::new(false);
+static STANDALONE_EDITOR: AtomicBool = AtomicBool::new(false);
 
 pub fn init_globals(
     handle: CoreHandle,
     gpu_backend: String,
     opened_with_files: bool,
     standalone_viewer: bool,
+    standalone_editor: bool,
 ) {
     let _ = CORE_HANDLE.set(handle);
     let _ = GPU_BACKEND_NAME.set(gpu_backend);
     let _ = OPENED_WITH_FILES.set(opened_with_files);
-    let _ = STANDALONE_VIEWER.set(standalone_viewer);
+    STANDALONE_VIEWER.store(standalone_viewer, Ordering::Relaxed);
+    STANDALONE_EDITOR.store(standalone_editor, Ordering::Relaxed);
 }
 
 fn is_standalone_viewer() -> bool {
-    STANDALONE_VIEWER.get().copied().unwrap_or(false)
+    STANDALONE_VIEWER.load(Ordering::Relaxed)
+}
+
+fn is_standalone_editor() -> bool {
+    STANDALONE_EDITOR.load(Ordering::Relaxed)
+}
+
+pub(crate) fn window_app_id_for(standalone_viewer: bool, standalone_editor: bool) -> &'static str {
+    if standalone_viewer {
+        "io.github.tienv2i.Photon.Viewer"
+    } else if standalone_editor {
+        "io.github.tienv2i.Photon.Editor"
+    } else {
+        "io.github.tienv2i.Photon"
+    }
+}
+
+fn window_app_id() -> &'static str {
+    window_app_id_for(is_standalone_viewer(), is_standalone_editor())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +159,7 @@ pub(crate) enum ActiveMenu {
 pub enum DesktopDialogId {
     Settings,
     NewFolder,
+    NewDocument,
     ConfirmResetLayout,
     ConfirmUnsavedLeave,
     Resize,
@@ -290,6 +313,56 @@ impl SelectionModifyKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewDocBackground {
+    Transparent,
+    White,
+    Black,
+    Custom([u8; 3]),
+}
+
+impl NewDocBackground {
+    pub const fn to_rgba(self) -> [u8; 4] {
+        match self {
+            Self::Transparent => [0, 0, 0, 0],
+            Self::White => [255, 255, 255, 255],
+            Self::Black => [0, 0, 0, 255],
+            Self::Custom([r, g, b]) => [r, g, b, 255],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) enum TranslateDragTarget {
+    #[default]
+    None,
+    Bubble {
+        page_path: Option<String>,
+        idx: usize,
+        start_cursor: Point,
+        dx_px: f32,
+        dy_px: f32,
+    },
+    TopBar {
+        start_cursor: Point,
+        base_offset: [f32; 2],
+    },
+    ResultCard {
+        start_cursor: Point,
+        base_offset: [f32; 2],
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WebtoonMarqueeDrag {
+    pub(crate) path: String,
+    pub(crate) start_local: [f32; 2],
+    pub(crate) cur_local: [f32; 2],
+    pub(crate) start_cursor: Point,
+    pub(crate) disp_w: f32,
+    pub(crate) disp_h: f32,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum InAppDialog {
     SelectionModify {
@@ -300,6 +373,12 @@ pub(crate) enum InAppDialog {
     NewFolder {
         parent: String,
         name: String,
+        error: Option<String>,
+    },
+    NewDocument {
+        dims: DimensionInputState,
+        background: NewDocBackground,
+        custom_rgb: [u8; 3],
         error: Option<String>,
     },
     ConfirmResetLayout,
@@ -425,6 +504,8 @@ pub struct PhotonGui {
     pub(crate) snapshot: Arc<UiStateSnapshot>,
     windows: BTreeMap<window::Id, WindowRole>,
     main_window: Option<window::Id>,
+    last_active_window: Option<window::Id>,
+    active_dialog_window: Option<window::Id>,
     pub(crate) window_size: Size,
     resize_save_seq: u64,
     suppress_resize_until: Option<Instant>,
@@ -524,11 +605,15 @@ pub struct PhotonGui {
     pub(crate) expanded_folders: BTreeSet<String>,
     pub(crate) folder_children: HashMap<String, Vec<(String, String)>>,
     pub(crate) viewer_translate: ViewerTranslateState,
+    pub(crate) translate_drag: TranslateDragTarget,
+    pub(crate) pending_translate_queue: VecDeque<Command>,
+    pub(crate) active_translate_target: Option<String>,
+    pub(crate) webtoon_hover: Option<(String, [f32; 2], f32, f32)>,
+    pub(crate) webtoon_marquee_drag: Option<WebtoonMarqueeDrag>,
     pub(crate) editor_ai_stroke_pts: Vec<[f64; 2]>,
     last_ai_clipboard: Option<String>,
     last_ai_error: Option<String>,
     editor_tab_view_states: HashMap<u64, EditorTabUiCache>,
-    pub(crate) quick_access_options_open: bool,
     pub(crate) quick_access_editing: bool,
     canvas_size_draft: Option<(
         DimensionInputState,
@@ -536,6 +621,8 @@ pub struct PhotonGui {
         Option<[u8; 3]>,
     )>,
     reopen_canvas_size_after_picker: bool,
+    new_doc_draft: Option<(DimensionInputState, [u8; 3])>,
+    reopen_new_doc_after_picker: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -544,6 +631,8 @@ pub enum Message {
     CoreEvent(photon_protocol::Event),
     KeyEvent(keyboard::Event),
     WindowOpened(window::Id),
+    WindowFocused(window::Id),
+    FocusWindowAfterRestore(window::Id),
     WindowMonitorSizeCheck(window::Id, Option<Size>, bool),
     WindowClosed(window::Id),
     WindowResized(window::Id, Size),
@@ -596,6 +685,7 @@ pub enum Message {
     OpenAboutDialog,
     WindowCursorMoved(Point),
     WindowMouseUp,
+    WindowUnfocused,
     DialogEvent(DialogEvent<DesktopDialogId>),
     ToggleBrowserInspector,
     BrowserOpenSelectedInEditor,
@@ -725,7 +815,7 @@ pub enum Message {
     SetAntiAliasingMode(CanvasAntiAliasingMode),
     SetViewportDenoiseMode(ViewportDenoiseMode),
     WebtoonScrolled(scrollable::Viewport),
-    WebtoonPagesLoaded(Vec<(String, u32, u32, Vec<u8>)>),
+    WebtoonPagesLoaded(Vec<(String, u32, u32, u32, u32, Vec<u8>)>),
     Browser(BrowserMessage),
     Viewer(ViewerMessage),
     Editor(EditorMessage),
@@ -734,7 +824,16 @@ pub enum Message {
         is_dir: bool,
         is_image: bool,
     },
-    ThumbnailsLoaded(Vec<(String, u32, u32, Vec<u8>)>),
+    OpenExternally(String),
+    BrowserEditPath(String),
+    ThumbnailsLoaded(Vec<String>, Vec<(String, u32, u32, Vec<u8>)>),
+    ViewerImageSizesProbed(Vec<(String, (u32, u32))>),
+    OpenNewDocumentDialog,
+    NewDocDimAction(DimGridAction),
+    NewDocApplyPreset(u32, u32),
+    NewDocSetBackground(NewDocBackground),
+    OpenNewDocColorPicker,
+    ConfirmNewDocument,
     ToggleFolderExpand(String),
     FolderChildrenLoaded(String, Vec<(String, String)>),
     ZoomStep(f32),
@@ -863,7 +962,8 @@ pub enum Message {
     EditorOpenNewTabDialog,
     EditorNewTabFilesPicked(Vec<PathBuf>),
     OpenInViewerWindow(String),
-    ToggleQuickAccessOptions,
+    OpenBrowserWindow,
+    OpenEditorViewerWindow,
     ToggleQuickAccessEditing,
     OpenExportDialog,
     PickExportDialog,
@@ -971,9 +1071,18 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
         remembered_size
     };
 
+    #[cfg(target_os = "linux")]
+    let platform_specific = window::settings::PlatformSpecific {
+        application_id: window_app_id().to_owned(),
+        ..Default::default()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let platform_specific = window::settings::PlatformSpecific::default();
+
     let (id, open_task) = window::open(window::Settings {
         size: init_size,
         min_size: Some(Size::new(680.0, 500.0)),
+        platform_specific,
         ..Default::default()
     });
 
@@ -1038,6 +1147,8 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
         snapshot,
         windows,
         main_window: Some(id),
+        last_active_window: Some(id),
+        active_dialog_window: None,
         window_size: init_size,
         resize_save_seq: 0,
         suppress_resize_until,
@@ -1141,17 +1252,23 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
             target_lang: initial_translate_draft.default_target_lang,
             ..Default::default()
         },
+        translate_drag: TranslateDragTarget::None,
+        pending_translate_queue: VecDeque::new(),
+        active_translate_target: None,
+        webtoon_hover: None,
+        webtoon_marquee_drag: None,
         editor_ai_stroke_pts: Vec::new(),
         last_ai_clipboard: None,
         last_ai_error: None,
         editor_tab_view_states: HashMap::new(),
-        quick_access_options_open: false,
         quick_access_editing: false,
         canvas_size_draft: None,
         reopen_canvas_size_after_picker: false,
+        new_doc_draft: None,
+        reopen_new_doc_after_picker: false,
     };
 
-    probe_viewer_image_sizes(&mut app);
+    let size_tasks = probe_viewer_image_sizes(&mut app);
     let thumb_tasks = schedule_missing_thumbnails(&mut app);
     let webtoon_tasks = if app.viewer_mode == ViewerViewMode::Webtoon {
         let center = app.snapshot.meta.viewer_index.unwrap_or(0);
@@ -1186,6 +1303,7 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
             load_task,
             tree_task,
             tree_load_tasks,
+            size_tasks,
             thumb_tasks,
             webtoon_tasks,
         ]),
@@ -1312,13 +1430,15 @@ pub fn subscription(state: &PhotonGui) -> Subscription<Message> {
         Subscription::run(state_watch_stream),
         Subscription::run(event_broadcast_stream),
         keyboard::listen().map(Message::KeyEvent),
-        event::listen_with(|ev, _status, _window| match ev {
+        event::listen_with(|ev, _status, win_id| match ev {
             iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 Some(Message::WindowCursorMoved(position))
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 Some(Message::WindowMouseUp)
             }
+            iced::Event::Window(window::Event::Focused) => Some(Message::WindowFocused(win_id)),
+            iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowUnfocused),
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
                 Some(Message::ModifiersChanged(m))
             }
@@ -1561,6 +1681,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             state.settings_open = false;
             state.settings_confirm_factory_reset = false;
             state.dialog_manager.close(&DesktopDialogId::Settings);
+            if state.dialog.is_none() && state.editor_ui.adjust_popup_tab.is_none() {
+                state.active_dialog_window = None;
+            }
             Task::batch([
                 dispatch_to_core(state.core.clone(), Command::SaveUiState { force: false }),
                 sync_ui_tree_task(state),
@@ -1708,6 +1831,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         Message::KeyEvent(ev) => handle_key_event(state, ev),
         Message::WindowOpened(id) => {
             tracing::debug!(target: "photon::desktop", ?id, "window opened");
+            state.last_active_window = Some(id);
             let mut tasks = vec![sync_ui_tree_task(state)];
             if state.main_window == Some(id) && !state.is_fullscreen {
                 let check_task = Task::batch([window::monitor_size(id).then(move |mon| {
@@ -1718,6 +1842,16 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             }
             Task::batch(tasks)
         }
+        Message::WindowFocused(id) => {
+            if state.windows.contains_key(&id) {
+                state.last_active_window = Some(id);
+            }
+            Task::none()
+        }
+        Message::FocusWindowAfterRestore(win_id) => Task::batch([
+            window::gain_focus(win_id),
+            window::request_user_attention(win_id, Some(window::UserAttention::Informational)),
+        ]),
         Message::WindowMonitorSizeCheck(id, Some(mon), is_maximized) => {
             if state.main_window == Some(id) && !state.is_fullscreen && !is_maximized {
                 let max_w = (mon.width * 0.94).max(680.0).min(mon.width);
@@ -1737,11 +1871,18 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         Message::WindowMonitorSizeCheck(_, None, _) => Task::none(),
         Message::WindowClosed(id) => {
             state.windows.remove(&id);
+            if state.last_active_window == Some(id) {
+                state.last_active_window = state.windows.keys().next().copied();
+            }
+            if state.active_dialog_window == Some(id) {
+                state.active_dialog_window = state.last_active_window;
+            }
             if state.main_window == Some(id) {
                 state.main_window = state.windows.keys().next().copied();
             }
             if state.windows.is_empty() {
                 if !is_standalone_viewer()
+                    && !is_standalone_editor()
                     && (state.snapshot.meta.save_ui_state_on_exit || state.ctrl_held)
                 {
                     let core = state.core.clone();
@@ -1850,6 +1991,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             let translation_changed = snap.meta.translation != state.snapshot.meta.translation;
             let saved_tr_changed =
                 snap.meta.viewer_saved_translation != state.snapshot.meta.viewer_saved_translation;
+            let archive_changed = snap.meta.viewer_archive != state.snapshot.meta.viewer_archive;
             let root_changed = snap.meta.root_folder != state.snapshot.meta.root_folder;
             let tree_changed = snap.meta.tree_revision != state.snapshot.meta.tree_revision;
             let folder_changed = snap.meta.current_folder != state.snapshot.meta.current_folder;
@@ -2015,6 +2157,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     state.viewer_adj = ColorAdjustments::default();
                 } else {
                     state.viewer_quarter_turns = 0;
+                    state.viewer_translate.space_pan_held = false;
+                    state.translate_drag = TranslateDragTarget::None;
+                    state.viewer_translate.active_drag_delta = None;
                 }
                 if snap.meta.workspace == Workspace::Editor {
                     if let Some(cached) = next_tab_id
@@ -2090,9 +2235,13 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 apply_live_layout_fields(state, &mut merged);
                 Arc::make_mut(&mut state.snapshot).meta.layout = merged;
             }
-            probe_viewer_image_sizes(state);
+            if archive_changed {
+                state.image_sizes.clear();
+                state.thumbnails_loading.clear();
+            }
+            let size_task = probe_viewer_image_sizes(state);
 
-            let mut tasks = vec![sync_ui_tree_task(state)];
+            let mut tasks = vec![sync_ui_tree_task(state), size_task];
             if caption_changed || editor_changed {
                 state.editor_ui.ai_caption_draft = state
                     .snapshot
@@ -2102,9 +2251,37 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     .unwrap_or_default();
             }
             if viewer_changed {
+                if let Some(prev_path) = state.viewer_translate.last_path.clone()
+                    && !state.viewer_translate.blocks.is_empty()
+                {
+                    state
+                        .viewer_translate
+                        .bubble_cache
+                        .insert(prev_path, state.viewer_translate.blocks.clone());
+                }
                 state.viewer_translate.picking_region = false;
                 state.viewer_translate.editing_block_idx = None;
-                state.viewer_translate.blocks.clear();
+                state.viewer_translate.result_card_visible = false;
+                state.viewer_translate.result_card_show_original = false;
+                state.viewer_translate.active_drag_delta = None;
+                state.viewer_translate.active_drag_page = None;
+                state.viewer_translate.active_page_path = state.snapshot.meta.viewer_path.clone();
+                state.viewer_translate.webtoon_marquee = None;
+                state.viewer_translate.space_pan_held = false;
+                state.translate_drag = TranslateDragTarget::None;
+                state.pending_translate_queue.clear();
+                state.active_translate_target = None;
+                state.webtoon_marquee_drag = None;
+                state.viewer_translate.show_original_indices.clear();
+                state.viewer_translate.pending_replace_idx = None;
+                state.viewer_translate.last_was_region = false;
+                state.viewer_translate.blocks = state
+                    .snapshot
+                    .meta
+                    .viewer_path
+                    .as_ref()
+                    .and_then(|p| state.viewer_translate.bubble_cache.get(p).cloned())
+                    .unwrap_or_default();
                 state.viewer_translate.saved_sidecar = false;
                 state.viewer_translate.last_path = state.snapshot.meta.viewer_path.clone();
             }
@@ -2113,21 +2290,92 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 && Some(saved.path.as_str()) == state.snapshot.meta.viewer_path.as_deref()
             {
                 state.viewer_translate.blocks = saved.blocks.clone();
+                state.viewer_translate.show_original_indices.clear();
+                state
+                    .viewer_translate
+                    .bubble_cache
+                    .insert(saved.path.clone(), saved.blocks.clone());
                 state.viewer_translate.saved_sidecar = true;
             } else if saved_tr_changed && state.snapshot.meta.viewer_saved_translation.is_none() {
                 state.viewer_translate.saved_sidecar = false;
             }
-            if translation_changed
-                && let Some(tr_res) = &state.snapshot.meta.translation
-                && Some(tr_res.path.as_str()) == state.snapshot.meta.viewer_path.as_deref()
-            {
-                state.viewer_translate.blocks = tr_res.blocks.clone();
-                state.viewer_translate.saved_sidecar =
-                    state.snapshot.meta.viewer_saved_translation.is_some();
+            if translation_changed && let Some(tr_res) = &state.snapshot.meta.translation {
+                let res_path = tr_res.path.clone();
+                let is_primary = Some(res_path.as_str())
+                    == state.snapshot.meta.viewer_path.as_deref()
+                    || state.viewer_translate.active_page_path.as_deref()
+                        == Some(res_path.as_str())
+                    || state.active_translate_target.as_deref() == Some(res_path.as_str());
+                if is_primary || state.viewer_mode != ViewerViewMode::Single {
+                    let mut target_blocks = state
+                        .viewer_translate
+                        .bubble_cache
+                        .get(&res_path)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            if Some(res_path.as_str()) == state.snapshot.meta.viewer_path.as_deref()
+                            {
+                                state.viewer_translate.blocks.clone()
+                            } else {
+                                Vec::new()
+                            }
+                        });
+                    let mut new_sel_idx = None;
+                    if let Some(rep_idx) = state.viewer_translate.pending_replace_idx.take()
+                        && rep_idx < target_blocks.len()
+                    {
+                        if let Some(first) = tr_res.blocks.first() {
+                            target_blocks[rep_idx] = first.clone();
+                            for (offset, extra) in tr_res.blocks.iter().skip(1).enumerate() {
+                                target_blocks.insert(rep_idx + 1 + offset, extra.clone());
+                            }
+                            new_sel_idx = Some(rep_idx);
+                        }
+                    } else if state.viewer_translate.last_was_region {
+                        let start_idx = target_blocks.len();
+                        target_blocks.extend(tr_res.blocks.iter().cloned());
+                        if !tr_res.blocks.is_empty() {
+                            new_sel_idx = Some(start_idx);
+                        }
+                    } else {
+                        target_blocks = tr_res.blocks.clone();
+                        state.viewer_translate.show_original_indices.clear();
+                        state
+                            .viewer_translate
+                            .show_original_page_blocks
+                            .retain(|(p, _)| p != &res_path);
+                    }
+                    state.viewer_translate.last_was_region = false;
+                    state
+                        .viewer_translate
+                        .bubble_cache
+                        .insert(res_path.clone(), target_blocks.clone());
+                    let should_focus_blocks = Some(res_path.as_str())
+                        == state.snapshot.meta.viewer_path.as_deref()
+                        || new_sel_idx.is_some()
+                        || state.viewer_translate.blocks.is_empty();
+                    if should_focus_blocks {
+                        state.viewer_translate.blocks = target_blocks;
+                        state.viewer_translate.active_page_path = Some(res_path);
+                        state.viewer_translate.editing_block_idx = new_sel_idx;
+                        state.viewer_translate.result_card_visible =
+                            !state.viewer_translate.blocks.is_empty() || new_sel_idx.is_some();
+                    }
+                    state.viewer_translate.saved_sidecar =
+                        state.snapshot.meta.viewer_saved_translation.is_some();
+                }
             }
             if let Some(task) = state.snapshot.meta.ai_task.clone()
                 && !task.running
             {
+                if let Some(next_cmd) = state.pending_translate_queue.pop_front() {
+                    if let Command::ViewerTranslate { ref path, .. } = next_cmd {
+                        state.active_translate_target = Some(path.clone());
+                    }
+                    tasks.push(dispatch_to_core(state.core.clone(), next_cmd));
+                } else {
+                    state.active_translate_target = None;
+                }
                 if let Some(err) = &task.error
                     && state.last_ai_error.as_ref() != Some(err)
                 {
@@ -2154,7 +2402,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                         && state.snapshot.meta.workspace == Workspace::Viewer
                         && let Some(vp) = state.snapshot.meta.viewer_path.clone()
                     {
-                        tasks.push(load_viewer_frame_task(vp));
+                        tasks.push(load_viewer_frame_task(&state.core, vp));
                     }
                 }
             } else if state
@@ -2196,18 +2444,18 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     let lp = left_slot.map(|(_, p)| p.to_owned());
                     let rp = right_slot.map(|(_, p)| p.to_owned());
                     if let Some(lp) = lp {
-                        tasks.push(load_viewer_frame_task(lp));
+                        tasks.push(load_viewer_frame_task(&state.core, lp));
                     } else {
                         state.viewer_frame = None;
                     }
                     if let Some(rp) = rp {
-                        tasks.push(load_viewer_pair_frame_task(Some(rp)));
+                        tasks.push(load_viewer_pair_frame_task(&state.core, Some(rp)));
                     } else {
                         state.viewer_pair_frame = None;
                     }
                 } else {
                     if let Some(path) = state.snapshot.meta.viewer_path.clone() {
-                        tasks.push(load_viewer_frame_task(path));
+                        tasks.push(load_viewer_frame_task(&state.core, path));
                     } else {
                         state.viewer_frame = None;
                     }
@@ -2340,13 +2588,19 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     |_| Message::Noop,
                 ));
             }
-            if focus_changed && let Some(win_id) = state.main_window {
-                tasks.push(window::minimize(win_id, false));
-                tasks.push(window::gain_focus(win_id));
-                tasks.push(window::request_user_attention(
-                    win_id,
-                    Some(window::UserAttention::Informational),
+            if focus_changed
+                && let Some(win_id) = state
+                    .last_active_window
+                    .filter(|id| state.windows.contains_key(id))
+                    .or(state.main_window)
+            {
+                let restore_and_focus = window::minimize(win_id, false).chain(Task::perform(
+                    async move {
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                    },
+                    move |_| Message::FocusWindowAfterRestore(win_id),
                 ));
+                tasks.push(restore_and_focus);
             }
             Task::batch(tasks)
         }
@@ -2405,11 +2659,34 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         }
         Message::Dispatch(cmd) => {
             state.active_menu = None;
+            if is_standalone_viewer()
+                && let Command::SetWorkspace { workspace } = cmd
+                && workspace != Workspace::Viewer
+            {
+                return switch_workspace_from_standalone_viewer(state, workspace);
+            }
+            if is_standalone_editor()
+                && let Command::SetWorkspace { workspace } = cmd
+                && workspace != Workspace::Editor
+            {
+                return match workspace {
+                    Workspace::Browser => forward_or_spawn_browser(browser_dir_for_state(state)),
+                    Workspace::Viewer => open_editor_doc_in_viewer(state),
+                    Workspace::Editor => Task::none(),
+                };
+            }
             dispatch_to_core(state.core.clone(), cmd)
         }
         Message::CommandCompleted(Ok(resp)) => {
             let lang = state.snapshot.meta.language;
             if !resp.ok {
+                if resp
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.code == "save_as_required")
+                {
+                    return update(state, Message::PickSaveAsDialog);
+                }
                 let msg = resp
                     .ui
                     .as_ref()
@@ -2621,6 +2898,8 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         }
         Message::EditorNewTabFilesPicked(_) => Task::none(),
         Message::OpenInViewerWindow(path) => open_or_focus_viewer_process(vec![path]),
+        Message::OpenBrowserWindow => forward_or_spawn_browser(browser_dir_for_state(state)),
+        Message::OpenEditorViewerWindow => open_editor_doc_in_viewer(state),
         Message::PickSaveAsDialog => {
             state.active_menu = None;
             let title = tr(state.snapshot.meta.language, "action-save-as");
@@ -2962,11 +3241,122 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     open_dialog_window(state, DesktopDialogId::CanvasSize);
                     return Task::none();
                 }
+                if let InAppDialog::ColorPicker {
+                    target: ColorPickerTarget::CanvasBackground,
+                    ..
+                } = &d
+                    && std::mem::take(&mut state.reopen_new_doc_after_picker)
+                    && let Some((dims, custom_rgb)) = state.new_doc_draft.take()
+                {
+                    state.dialog_manager.close(&DesktopDialogId::ColorPicker);
+                    state.dialog = Some(InAppDialog::NewDocument {
+                        dims,
+                        background: NewDocBackground::Custom(custom_rgb),
+                        custom_rgb,
+                        error: None,
+                    });
+                    open_dialog_window(state, DesktopDialogId::NewDocument);
+                    return Task::none();
+                }
                 state.canvas_size_draft = None;
                 state.reopen_canvas_size_after_picker = false;
+                state.new_doc_draft = None;
+                state.reopen_new_doc_after_picker = false;
                 state.dialog_manager.close(&dialog_id_for_in_app(&d));
             }
             Task::none()
+        }
+        Message::OpenNewDocumentDialog => {
+            state.active_menu = None;
+            state.context_menu = None;
+            state.new_doc_draft = None;
+            state.reopen_new_doc_after_picker = false;
+            state.dialog = Some(InAppDialog::NewDocument {
+                dims: DimensionInputState::from_dims(1920, 1080),
+                background: NewDocBackground::White,
+                custom_rgb: [255, 255, 255],
+                error: None,
+            });
+            open_dialog_window(state, DesktopDialogId::NewDocument);
+            Task::none()
+        }
+        Message::NewDocDimAction(action) => {
+            if let Some(InAppDialog::NewDocument { dims, error, .. }) = &mut state.dialog {
+                dims.apply(action);
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::NewDocApplyPreset(w, h) => {
+            if let Some(InAppDialog::NewDocument { dims, error, .. }) = &mut state.dialog {
+                dims.sync_from_px(w, h);
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::NewDocSetBackground(bg) => {
+            if let Some(InAppDialog::NewDocument {
+                background,
+                custom_rgb,
+                ..
+            }) = &mut state.dialog
+            {
+                *background = bg;
+                if let NewDocBackground::Custom(rgb) = bg {
+                    *custom_rgb = rgb;
+                }
+            }
+            Task::none()
+        }
+        Message::OpenNewDocColorPicker => {
+            if let Some(InAppDialog::NewDocument {
+                dims, custom_rgb, ..
+            }) = state.dialog.clone()
+            {
+                state.new_doc_draft = Some((dims, custom_rgb));
+                state.reopen_new_doc_after_picker = true;
+                state.dialog_manager.close(&DesktopDialogId::NewDocument);
+                state.dialog = Some(InAppDialog::ColorPicker {
+                    target: ColorPickerTarget::CanvasBackground,
+                    r: custom_rgb[0],
+                    g: custom_rgb[1],
+                    b: custom_rgb[2],
+                    hex: format_hex(custom_rgb),
+                    transparent: false,
+                    previous_viewport_bg: state.viewport_background,
+                });
+                open_dialog_window(state, DesktopDialogId::ColorPicker);
+            }
+            Task::none()
+        }
+        Message::ConfirmNewDocument => {
+            let Some(InAppDialog::NewDocument {
+                dims, background, ..
+            }) = state.dialog.clone()
+            else {
+                return Task::none();
+            };
+            let w = dims.width_px;
+            let h = dims.height_px;
+            if (1..=32_768).contains(&w) && (1..=32_768).contains(&h) {
+                state.dialog = None;
+                state.new_doc_draft = None;
+                state.reopen_new_doc_after_picker = false;
+                state.dialog_manager.close(&DesktopDialogId::NewDocument);
+                dispatch_to_core(
+                    state.core.clone(),
+                    Command::EditorNew {
+                        width: w,
+                        height: h,
+                        background: background.to_rgba(),
+                    },
+                )
+            } else {
+                if let Some(InAppDialog::NewDocument { error, .. }) = &mut state.dialog {
+                    *error = Some(tr(state.snapshot.meta.language, "dialog-error-title"));
+                }
+                Task::none()
+            }
         }
         Message::OpenCanvasSizeDialog => {
             state.active_menu = None;
@@ -3262,7 +3652,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     state.viewer_pair_frame = None;
                     // Reload current single image
                     if let Some(path) = state.snapshot.meta.viewer_path.clone() {
-                        tasks.push(load_viewer_frame_task(path));
+                        tasks.push(load_viewer_frame_task(&state.core, path));
                     }
                 }
                 ViewerViewMode::Double => {
@@ -3389,8 +3779,12 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::WebtoonPagesLoaded(items) => {
-            for (path, w, h, rgba) in items {
+            for (path, w, h, orig_w, orig_h, rgba) in items {
                 state.webtoon_loading.remove(&path);
+                state
+                    .image_sizes
+                    .entry(path.clone())
+                    .or_insert((orig_w, orig_h));
                 if !state.webtoon_pages.contains_key(&path) {
                     state.webtoon_order.push_back(path.clone());
                 }
@@ -3425,17 +3819,47 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 if is_image {
                     return open_or_focus_viewer_process(vec![path]);
                 }
+                if is_archive_path_str(&path) {
+                    return dispatch_to_core(state.core.clone(), Command::OpenArchive { path });
+                }
+                xdg_open(Path::new(&path));
                 return Task::none();
             }
             state.last_click = Some((path.clone(), now));
             dispatch_to_core(state.core.clone(), Command::Select { paths: vec![path] })
         }
-        Message::ThumbnailsLoaded(items) => {
+        Message::OpenExternally(path) => {
+            state.active_menu = None;
+            state.context_menu = None;
+            xdg_open(Path::new(&path));
+            Task::none()
+        }
+        Message::BrowserEditPath(path) => {
+            state.active_menu = None;
+            state.context_menu = None;
+            open_in_editor_or_forward(state, path)
+        }
+        Message::ThumbnailsLoaded(attempted, items) => {
+            for path in attempted {
+                state.thumbnails_loading.remove(&path);
+            }
             for (path, w, h, rgba) in items {
                 state.thumbnails_loading.remove(&path);
                 state
                     .thumbnails
                     .insert(path, iced_image::Handle::from_rgba(w, h, rgba));
+            }
+            Task::none()
+        }
+        Message::ViewerImageSizesProbed(items) => {
+            let mut changed = false;
+            for (path, dims) in items {
+                if state.image_sizes.insert(path, dims) != Some(dims) {
+                    changed = true;
+                }
+            }
+            if changed && state.viewer_mode == ViewerViewMode::Double {
+                return reload_dual_frames_task(state);
             }
             Task::none()
         }
@@ -4391,13 +4815,33 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                         layout.viewer_viewport_background = bg;
                     })
                 }
-                ColorPickerTarget::CanvasBackground => dispatch_to_core(
-                    state.core.clone(),
-                    Command::EditorSetCanvasBackground {
-                        color: picked,
-                        transparent,
-                    },
-                ),
+                ColorPickerTarget::CanvasBackground => {
+                    if std::mem::take(&mut state.reopen_new_doc_after_picker)
+                        && let Some((dims, prev_rgb)) = state.new_doc_draft.take()
+                    {
+                        let next_rgb = if transparent { prev_rgb } else { [r, g, b] };
+                        let bg = if transparent {
+                            NewDocBackground::Transparent
+                        } else {
+                            NewDocBackground::Custom(next_rgb)
+                        };
+                        state.dialog = Some(InAppDialog::NewDocument {
+                            dims,
+                            background: bg,
+                            custom_rgb: next_rgb,
+                            error: None,
+                        });
+                        open_dialog_window(state, DesktopDialogId::NewDocument);
+                        return Task::none();
+                    }
+                    dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorSetCanvasBackground {
+                            color: picked,
+                            transparent,
+                        },
+                    )
+                }
                 ColorPickerTarget::GradientStop(idx) => {
                     state.editor_ui.ensure_custom_gradient_stops();
                     if let Some(stop) = state.editor_ui.gradient_stops.get_mut(idx) {
@@ -5157,13 +5601,8 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 },
             )
         }
-        Message::ToggleQuickAccessOptions => {
-            state.quick_access_options_open = !state.quick_access_options_open;
-            Task::none()
-        }
         Message::ToggleQuickAccessEditing => {
             state.quick_access_editing = !state.quick_access_editing;
-            state.quick_access_options_open = false;
             Task::none()
         }
         Message::OpenExportDialog => {
@@ -5643,10 +6082,26 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ViewerFrameLoaded(frame) => {
+            if let Some(ref f) = frame
+                && let Some(path) = f.key.strip_prefix("viewer:")
+            {
+                state
+                    .image_sizes
+                    .entry(path.to_owned())
+                    .or_insert((f.width, f.height));
+            }
             state.viewer_frame = frame;
             Task::none()
         }
         Message::ViewerPairFrameLoaded(frame) => {
+            if let Some(ref f) = frame
+                && let Some(path) = f.key.strip_prefix("viewer:")
+            {
+                state
+                    .image_sizes
+                    .entry(path.to_owned())
+                    .or_insert((f.width, f.height));
+            }
             state.viewer_pair_frame = frame;
             Task::none()
         }
@@ -5693,11 +6148,92 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             if state.dialog_manager.is_dragging() {
                 state.dialog_manager.update_gesture(pt, state.window_size);
             }
+            if let Some(drag) = &mut state.webtoon_marquee_drag {
+                let lx = (drag.start_local[0] + (pt.x - drag.start_cursor.x))
+                    .clamp(0.0, drag.disp_w.max(1.0));
+                let ly = (drag.start_local[1] + (pt.y - drag.start_cursor.y))
+                    .clamp(0.0, drag.disp_h.max(1.0));
+                drag.cur_local = [lx, ly];
+                let x = drag.start_local[0].min(lx);
+                let y = drag.start_local[1].min(ly);
+                let w = (drag.start_local[0] - lx).abs();
+                let h = (drag.start_local[1] - ly).abs();
+                state.viewer_translate.webtoon_marquee = Some((drag.path.clone(), [x, y, w, h]));
+            }
+            match &mut state.translate_drag {
+                TranslateDragTarget::None => {}
+                TranslateDragTarget::Bubble {
+                    page_path,
+                    idx,
+                    start_cursor,
+                    dx_px,
+                    dy_px,
+                } => {
+                    *dx_px = pt.x - start_cursor.x;
+                    *dy_px = pt.y - start_cursor.y;
+                    state.viewer_translate.active_drag_delta = Some((*idx, [*dx_px, *dy_px]));
+                    state.viewer_translate.active_drag_page = page_path.clone();
+                }
+                TranslateDragTarget::TopBar {
+                    start_cursor,
+                    base_offset,
+                } => {
+                    state.viewer_translate.top_bar_offset = [
+                        base_offset[0] + (pt.x - start_cursor.x),
+                        base_offset[1] + (pt.y - start_cursor.y),
+                    ];
+                }
+                TranslateDragTarget::ResultCard {
+                    start_cursor,
+                    base_offset,
+                } => {
+                    state.viewer_translate.result_card_offset = [
+                        base_offset[0] + (pt.x - start_cursor.x),
+                        base_offset[1] + (pt.y - start_cursor.y),
+                    ];
+                }
+            }
             Task::none()
         }
         Message::WindowMouseUp => {
             if state.dialog_manager.is_dragging() {
                 state.dialog_manager.end_gesture();
+            }
+            let drag = std::mem::take(&mut state.translate_drag);
+            state.viewer_translate.active_drag_delta = None;
+            state.viewer_translate.active_drag_page = None;
+            if let TranslateDragTarget::Bubble {
+                page_path,
+                idx,
+                dx_px,
+                dy_px,
+                ..
+            } = drag
+            {
+                commit_translate_bubble_drag(state, page_path.as_deref(), idx, dx_px, dy_px);
+            }
+            if let Some(wb_drag) = state.webtoon_marquee_drag.take() {
+                state.viewer_translate.webtoon_marquee = None;
+                let rx = wb_drag.start_local[0].min(wb_drag.cur_local[0]);
+                let ry = wb_drag.start_local[1].min(wb_drag.cur_local[1]);
+                let rw = (wb_drag.start_local[0] - wb_drag.cur_local[0]).abs();
+                let rh = (wb_drag.start_local[1] - wb_drag.cur_local[1]).abs();
+                if rw >= 6.0 && rh >= 6.0 {
+                    let (img_w, img_h) = state
+                        .image_sizes
+                        .get(&wb_drag.path)
+                        .copied()
+                        .unwrap_or((wb_drag.disp_w.round() as u32, wb_drag.disp_h.round() as u32));
+                    let sx = img_w.max(1) as f32 / wb_drag.disp_w.max(1.0);
+                    let sy = img_h.max(1) as f32 / wb_drag.disp_h.max(1.0);
+                    let region = [
+                        (rx * sx).round().max(0.0) as i32,
+                        (ry * sy).round().max(0.0) as i32,
+                        (rw * sx).round().max(8.0) as i32,
+                        (rh * sy).round().max(8.0) as i32,
+                    ];
+                    return dispatch_viewer_translate_region(state, wb_drag.path, region);
+                }
             }
             let mut order_changed = false;
             if state.browser_left_panels.is_dragging()
@@ -5725,6 +6261,15 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 let layout_task = commit_layout_with(state, |_| {});
                 return Task::batch([layout_task, sync_ui_tree_task(state)]);
             }
+            Task::none()
+        }
+        Message::WindowUnfocused => {
+            state.viewer_translate.space_pan_held = false;
+            state.translate_drag = TranslateDragTarget::None;
+            state.viewer_translate.active_drag_delta = None;
+            state.viewer_translate.active_drag_page = None;
+            state.webtoon_marquee_drag = None;
+            state.viewer_translate.webtoon_marquee = None;
             Task::none()
         }
         Message::DialogEvent(ev) => {
@@ -5845,34 +6390,50 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 width,
                 height,
                 ..
-            } if state.viewer_translate.active && state.viewer_translate.picking_region => {
-                state.viewer_translate.picking_region = false;
+            } if state.viewer_translate.active
+                && (state.viewer_translate.picking_region
+                    || matches!(
+                        state.viewer_translate.mode,
+                        ViewerTranslateMode::Translate | ViewerTranslateMode::OcrOnly
+                    )) =>
+            {
+                if state.viewer_mode == ViewerViewMode::Double
+                    && let Some(left_frame) = &state.viewer_frame
+                {
+                    let (left_slot, right_slot) = dual_spread_slots(state.viewer_view_state(true));
+                    let left_path = left_slot.map(|(_, p)| p.to_owned());
+                    let right_path = right_slot.map(|(_, p)| p.to_owned());
+                    let left_size = (left_frame.width, left_frame.height);
+                    let right_size = state
+                        .viewer_pair_frame
+                        .as_ref()
+                        .map(|f| (f.width, f.height));
+                    if let Some((path, region)) = resolve_double_marquee_region(
+                        [x, y, width, height],
+                        left_path.as_deref(),
+                        left_size,
+                        right_path.as_deref(),
+                        right_size,
+                        f32::from(state.viewer_manga_page_gap),
+                        state.viewer_quarter_turns,
+                    ) {
+                        return dispatch_viewer_translate_region(state, path, region);
+                    }
+                    return Task::none();
+                }
                 let path = pane_path
                     .or_else(|| state.snapshot.meta.viewer_path.clone())
                     .unwrap_or_default();
                 if path.is_empty() {
                     return Task::none();
                 }
-                let target_lang = if state.viewer_translate.mode == ViewerTranslateMode::OcrOnly {
-                    String::new()
-                } else {
-                    state.viewer_translate.target_lang.clone()
-                };
-                dispatch_to_core(
-                    state.core.clone(),
-                    Command::ViewerTranslate {
-                        path,
-                        source_lang: state.viewer_translate.source_lang.clone(),
-                        target_lang,
-                        region: Some([
-                            x.round().max(0.0) as i32,
-                            y.round().max(0.0) as i32,
-                            width.round().max(8.0) as i32,
-                            height.round().max(8.0) as i32,
-                        ]),
-                        ocr_engine: state.viewer_translate.ocr_engine.as_str().to_owned(),
-                    },
-                )
+                let region = [
+                    x.round().max(0.0) as i32,
+                    y.round().max(0.0) as i32,
+                    width.round().max(8.0) as i32,
+                    height.round().max(8.0) as i32,
+                ];
+                dispatch_viewer_translate_region(state, path, region)
             }
             other => update(state, Message::Canvas(other)),
         },
@@ -6247,6 +6808,14 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
 }
 
 fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message> {
+    if let keyboard::Event::KeyReleased {
+        key: Key::Named(Named::Space),
+        ..
+    } = &ev
+    {
+        state.viewer_translate.space_pan_held = false;
+        return Task::none();
+    }
     let keyboard::Event::KeyPressed { key, modifiers, .. } = ev else {
         return Task::none();
     };
@@ -6317,8 +6886,27 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
                 open_dialog_window(state, DesktopDialogId::CanvasSize);
                 return Task::none();
             }
+            if let InAppDialog::ColorPicker {
+                target: ColorPickerTarget::CanvasBackground,
+                ..
+            } = &d
+                && std::mem::take(&mut state.reopen_new_doc_after_picker)
+                && let Some((dims, custom_rgb)) = state.new_doc_draft.take()
+            {
+                state.dialog_manager.close(&DesktopDialogId::ColorPicker);
+                state.dialog = Some(InAppDialog::NewDocument {
+                    dims,
+                    background: NewDocBackground::Custom(custom_rgb),
+                    custom_rgb,
+                    error: None,
+                });
+                open_dialog_window(state, DesktopDialogId::NewDocument);
+                return Task::none();
+            }
             state.canvas_size_draft = None;
             state.reopen_canvas_size_after_picker = false;
+            state.new_doc_draft = None;
+            state.reopen_new_doc_after_picker = false;
             state.dialog_manager.close(&dialog_id_for_in_app(&d));
             return Task::none();
         }
@@ -6414,8 +7002,15 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
             Key::Character("o") => {
                 return update(state, Message::PickFolderDialog);
             }
-            Key::Character("n") if state.snapshot.meta.workspace == Workspace::Browser => {
+            Key::Character("n") | Key::Character("N")
+                if state.snapshot.meta.workspace == Workspace::Browser =>
+            {
                 return update(state, Message::OpenNewFolderDialog);
+            }
+            Key::Character("n") | Key::Character("N")
+                if state.snapshot.meta.workspace == Workspace::Editor =>
+            {
+                return update(state, Message::OpenNewDocumentDialog);
             }
             Key::Character("s")
                 if modifiers.shift() && state.snapshot.meta.workspace == Workspace::Editor =>
@@ -6550,7 +7145,7 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
                 return update(state, Message::ToggleBrowserFilterBar);
             }
             Key::Character("q") | Key::Character("Q") => {
-                if is_standalone_viewer() {
+                if is_standalone_viewer() || is_standalone_editor() {
                     return iced::exit();
                 }
                 let core = state.core.clone();
@@ -6566,7 +7161,10 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
                     |_| Message::ShutdownAfterSave,
                 );
             }
-            Key::Character("1") if !is_standalone_viewer() => {
+            Key::Character("1") => {
+                if is_standalone_viewer() || is_standalone_editor() {
+                    return forward_or_spawn_browser(browser_dir_for_state(state));
+                }
                 return dispatch_to_core(
                     state.core.clone(),
                     Command::SetWorkspace {
@@ -6575,6 +7173,9 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
                 );
             }
             Key::Character("2") if !is_standalone_viewer() => {
+                if is_standalone_editor() {
+                    return open_editor_doc_in_viewer(state);
+                }
                 return dispatch_to_core(
                     state.core.clone(),
                     Command::SetWorkspace {
@@ -6582,13 +7183,24 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
                     },
                 );
             }
-            Key::Character("3") if !is_standalone_viewer() => {
-                return dispatch_to_core(
-                    state.core.clone(),
-                    Command::SetWorkspace {
-                        workspace: Workspace::Editor,
-                    },
-                );
+            Key::Character("3") => {
+                if is_standalone_viewer() {
+                    return switch_workspace_from_standalone_viewer(state, Workspace::Editor);
+                }
+                if is_standalone_editor() {
+                    return Task::none();
+                }
+                if let Some(path) = state
+                    .snapshot
+                    .meta
+                    .selection
+                    .first()
+                    .cloned()
+                    .or_else(|| state.snapshot.meta.viewer_path.clone())
+                {
+                    return open_in_editor_or_forward(state, path);
+                }
+                return forward_or_spawn_editor_only();
             }
             Key::Character("z") if modifiers.shift() => {
                 return dispatch_to_core(state.core.clone(), Command::EditorRedo);
@@ -6828,6 +7440,13 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
             }
             Key::Character("+") | Key::Character("=") => update(state, Message::ZoomStep(1.25)),
             Key::Character("-") => update(state, Message::ZoomStep(0.8)),
+            Key::Named(Named::Space)
+                if state.viewer_mode != ViewerViewMode::Webtoon
+                    && state.viewer_translate.active =>
+            {
+                state.viewer_translate.space_pan_held = true;
+                Task::none()
+            }
             Key::Named(Named::Space) if state.viewer_mode == ViewerViewMode::Webtoon => {
                 let step = (state.window_size.height - 140.0).max(240.0) * 0.85;
                 widget_operation::scroll_to(
@@ -6871,10 +7490,7 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
     let top_bar = build_toolbar(state, role, ws);
     let body: Element<'_, Message> = match ws {
         Workspace::Browser => build_browser_view(state.browser_view_state()).map(Message::Browser),
-        Workspace::Viewer => build_viewer_view(
-            state.viewer_view_state(!is_standalone_viewer() && role == WindowRole::Main),
-        )
-        .map(Message::Viewer),
+        Workspace::Viewer => build_viewer_view(state.viewer_view_state(true)).map(Message::Viewer),
         Workspace::Editor => build_editor_view(state.editor_view_state()).map(Message::Editor),
     };
 
@@ -6941,18 +7557,16 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
         }
         Some((None, menu_el)) => match state.active_menu {
             Some(ActiveMenu::WorkspaceSwitcher) => {
-                with_top_right_menu_at(shell, true, 48.0, 44.0, menu_el, Message::CloseMenu)
+                with_top_right_menu_at(shell, true, 52.0, 52.0, menu_el, Message::CloseMenu)
             }
             Some(ActiveMenu::WorkspacePanels) => {
-                with_top_right_menu_at(shell, true, 44.0, 44.0, menu_el, Message::CloseMenu)
+                with_top_right_menu_at(shell, true, 12.0, 52.0, menu_el, Message::CloseMenu)
             }
             Some(ActiveMenu::ReaderOptions) => with_top_right_menu_at(
                 shell,
                 true,
-                viewer_reader_options_right_offset(
-                    state.viewer_view_state(role == WindowRole::Main),
-                ),
-                44.0,
+                viewer_reader_options_right_offset(state.viewer_view_state(true)),
+                52.0,
                 menu_el,
                 Message::CloseMenu,
             ),
@@ -7092,14 +7706,27 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
     let with_toast = with_toast_banner(with_ctx, toast_spec);
 
     let theme = theme(state, window_id);
+    let dialog_target = state
+        .active_dialog_window
+        .filter(|id| state.windows.contains_key(id))
+        .or_else(|| {
+            state
+                .last_active_window
+                .filter(|id| state.windows.contains_key(id))
+        })
+        .or(state.main_window)
+        .or_else(|| state.windows.keys().next().copied());
+    let show_dialogs_here =
+        is_standalone_viewer() || state.windows.len() <= 1 || dialog_target == Some(window_id);
+
     let mut dialogs: Vec<HeaderedManagedDialogSpec<'_, DesktopDialogId, Message>> = Vec::new();
-    if role == WindowRole::Main
+    if show_dialogs_here
         && ws == Workspace::Editor
         && let Some(active_tab) = state.editor_ui.adjust_popup_tab
     {
         dialogs.push(build_editor_adjustment_dialog(state, active_tab, &theme).into());
     }
-    if state.settings_open && role == WindowRole::Main {
+    if state.settings_open && show_dialogs_here {
         let settings_header_strip = build_settings_header_strip(state);
         let settings_body = build_settings_body(state);
         let settings_footer = row![
@@ -7140,9 +7767,7 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
         });
     }
 
-    if role == WindowRole::Main
-        && let Some(active_dialog) = &state.dialog
-    {
+    if show_dialogs_here && let Some(active_dialog) = &state.dialog {
         dialogs.push(build_in_app_dialog(state, active_dialog, &theme).into());
     }
 
@@ -7154,7 +7779,7 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
     )
 }
 
-fn build_toolbar(state: &PhotonGui, role: WindowRole, ws: Workspace) -> Element<'_, Message> {
+fn build_toolbar(state: &PhotonGui, _role: WindowRole, ws: Workspace) -> Element<'_, Message> {
     match ws {
         Workspace::Browser => build_browser_toolbar(
             state.browser_view_state(),
@@ -7163,7 +7788,7 @@ fn build_toolbar(state: &PhotonGui, role: WindowRole, ws: Workspace) -> Element<
         )
         .map(Message::Browser),
         Workspace::Viewer => build_viewer_toolbar(
-            state.viewer_view_state(role == WindowRole::Main),
+            state.viewer_view_state(true),
             Element::from(toolbar_right_utilities(state))
                 .map(|_| ViewerMessage::ToggleWorkspacePanels),
         )
@@ -7183,7 +7808,7 @@ pub(crate) fn toolbar_right_utilities(state: &PhotonGui) -> row::Row<'_, Message
 
     row![with_tooltip_pos(
         button::icon_only(
-            Icon::Sliders,
+            Icon::PanelsTopLeft,
             ButtonVariant::Tab {
                 active: panels_open,
             },
@@ -7254,29 +7879,6 @@ fn build_workspace_panels_menu(state: &PhotonGui, ws: Workspace) -> Element<'_, 
             ));
         }
         Workspace::Viewer => {
-            entries.push(MenuEntry::Header(tr(lang, "panels-group-viewer")));
-            entries.push(MenuEntry::Item(
-                MenuItem::new(
-                    tr(lang, "panel-view-adjustments"),
-                    Message::PanelPopupToggleViewerAdj,
-                )
-                .icon(Icon::Palette)
-                .checked(state.viewer_adjustments_open),
-            ));
-            entries.push(MenuEntry::Item(
-                MenuItem::new(tr(lang, "panel-info"), Message::PanelPopupToggleViewerInfo)
-                    .icon(Icon::Info)
-                    .checked(state.viewer_info_open),
-            ));
-            entries.push(MenuEntry::Item(
-                MenuItem::new(
-                    tr(lang, "action-filmstrip"),
-                    Message::PanelPopupToggleViewerFilmstrip,
-                )
-                .icon(Icon::Filmstrip)
-                .checked(state.viewer_filmstrip_open),
-            ));
-            entries.push(MenuEntry::Separator);
             entries.push(MenuEntry::Header(tr(lang, "menu-viewer-backdrop")));
             let dark_bg = default_viewport_bg_rgb(true);
             let light_bg = default_viewport_bg_rgb(false);
@@ -7621,6 +8223,15 @@ fn build_active_menu(
         (Workspace::Editor, ActiveMenu::EditorFile) => (
             Some(12.0),
             vec![
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-editor-new"),
+                        Message::OpenNewDocumentDialog,
+                    )
+                    .icon(Icon::Plus)
+                    .shortcut("Ctrl+N"),
+                ),
+                MenuEntry::Separator,
                 MenuEntry::Item(
                     MenuItem::new(
                         tr(lang, "action-save"),
@@ -8226,33 +8837,26 @@ fn build_active_menu(
         ),
         (Workspace::Viewer, ActiveMenu::ReaderOptions) => {
             let mut entries = vec![
-                MenuEntry::Item(
-                    MenuItem::new(
-                        tr(lang, "action-viewer-single"),
+                MenuEntry::IconRow(vec![
+                    MenuIconButton::new(
+                        Icon::ViewSingle,
+                        format!("{} (S)", tr(lang, "action-viewer-single")),
                         Message::SetViewerViewMode(ViewerViewMode::Single),
                     )
-                    .icon(Icon::ViewSingle)
-                    .shortcut("S")
-                    .checked(state.viewer_mode == ViewerViewMode::Single),
-                ),
-                MenuEntry::Item(
-                    MenuItem::new(
-                        tr(lang, "action-viewer-double"),
+                    .active(state.viewer_mode == ViewerViewMode::Single),
+                    MenuIconButton::new(
+                        Icon::ViewDouble,
+                        format!("{} (D)", tr(lang, "action-viewer-double")),
                         Message::SetViewerViewMode(ViewerViewMode::Double),
                     )
-                    .icon(Icon::ViewDouble)
-                    .shortcut("D")
-                    .checked(state.viewer_mode == ViewerViewMode::Double),
-                ),
-                MenuEntry::Item(
-                    MenuItem::new(
-                        tr(lang, "action-viewer-manhwa"),
+                    .active(state.viewer_mode == ViewerViewMode::Double),
+                    MenuIconButton::new(
+                        Icon::ViewManhwa,
+                        format!("{} (M)", tr(lang, "action-viewer-manhwa")),
                         Message::SetViewerViewMode(ViewerViewMode::Webtoon),
                     )
-                    .icon(Icon::ViewManhwa)
-                    .shortcut("M")
-                    .checked(state.viewer_mode == ViewerViewMode::Webtoon),
-                ),
+                    .active(state.viewer_mode == ViewerViewMode::Webtoon),
+                ]),
                 MenuEntry::Separator,
                 MenuEntry::Item(
                     MenuItem::new(tr(lang, "action-dir-ltr"), Message::SetMangaRtl(false))
@@ -8568,7 +9172,8 @@ fn build_settings_general_tab(state: &PhotonGui) -> Element<'_, Message> {
                     ),
                 ]
                 .spacing(6)
-                .align_y(Alignment::Center),
+                .align_y(Alignment::Center)
+                .wrap(),
             ),
             text(tr(lang, "settings-system-open-hint"))
                 .size(11)
@@ -8828,7 +9433,8 @@ fn build_settings_viewer_tab(state: &PhotonGui) -> Element<'_, Message> {
                     ),
                 ]
                 .spacing(6)
-                .align_y(Alignment::Center),
+                .align_y(Alignment::Center)
+                .wrap(),
             ),
         ]
         .spacing(10),
@@ -9011,7 +9617,7 @@ fn build_settings_plugins_tab(state: &PhotonGui) -> Element<'_, Message> {
         .cloned()
         .unwrap_or_else(|| default_window_state_for(DesktopDialogId::Settings))
         .resolved_rect(state.window_size);
-    let list_pane_h = (dlg_rect.height - 340.0).clamp(180.0, 320.0);
+    let list_pane_h = (dlg_rect.height - 340.0).clamp(160.0, 260.0);
 
     let ai_card = section_card(
         tr(lang, "settings-section-plugins-ai"),
@@ -9140,7 +9746,8 @@ fn build_settings_translate_tab(state: &PhotonGui) -> Element<'_, Message> {
                     ),
                 ]
                 .spacing(6)
-                .align_y(Alignment::Center),
+                .align_y(Alignment::Center)
+                .wrap(),
             ),
             setting_row(
                 tr(lang, "settings-translate-libre-url"),
@@ -9210,12 +9817,13 @@ fn build_settings_translate_tab(state: &PhotonGui) -> Element<'_, Message> {
 
 pub(crate) fn default_window_state_for(id: DesktopDialogId) -> DialogWindowState {
     match id {
-        DesktopDialogId::Settings => DialogWindowState::new(660.0, 580.0)
-            .min_size(500.0, 380.0)
+        DesktopDialogId::Settings => DialogWindowState::new(700.0, 600.0)
+            .min_size(560.0, 420.0)
             .max_size(1040.0, 900.0),
         DesktopDialogId::NewFolder | DesktopDialogId::RenameItem => {
             DialogWindowState::new(440.0, 185.0).min_size(320.0, 160.0)
         }
+        DesktopDialogId::NewDocument => DialogWindowState::new(480.0, 460.0).min_size(380.0, 360.0),
         DesktopDialogId::ConfirmResetLayout | DesktopDialogId::ConfirmDeletePermanently => {
             DialogWindowState::new(440.0, 168.0).min_size(320.0, 148.0)
         }
@@ -9248,17 +9856,17 @@ pub(crate) fn default_window_state_for(id: DesktopDialogId) -> DialogWindowState
         DesktopDialogId::AdjustColorBalance => DialogWindowState::new(460.0, 365.0)
             .min_size(360.0, 280.0)
             .max_size(760.0, 760.0),
-        DesktopDialogId::AdjustCurves => DialogWindowState::new(460.0, 520.0)
-            .min_size(380.0, 440.0)
-            .max_size(760.0, 860.0),
+        DesktopDialogId::AdjustCurves => DialogWindowState::new(480.0, 560.0)
+            .min_size(400.0, 480.0)
+            .max_size(760.0, 880.0),
         DesktopDialogId::AdjustDenoise => DialogWindowState::new(440.0, 290.0)
             .min_size(340.0, 240.0)
             .max_size(720.0, 640.0),
         DesktopDialogId::SelectionModify => {
             DialogWindowState::new(400.0, 195.0).min_size(320.0, 170.0)
         }
-        DesktopDialogId::ManagePlugins => DialogWindowState::new(640.0, 480.0)
-            .min_size(500.0, 380.0)
+        DesktopDialogId::ManagePlugins => DialogWindowState::new(680.0, 520.0)
+            .min_size(580.0, 400.0)
             .max_size(1040.0, 820.0),
         DesktopDialogId::PluginParams => DialogWindowState::new(440.0, 420.0)
             .min_size(340.0, 280.0)
@@ -9365,6 +9973,11 @@ fn editor_status_summary(state: &PhotonGui, lang: Language) -> String {
 }
 
 fn open_dialog_window(state: &mut PhotonGui, id: DesktopDialogId) {
+    state.active_dialog_window = state
+        .last_active_window
+        .filter(|wid| state.windows.contains_key(wid))
+        .or(state.main_window)
+        .or_else(|| state.windows.keys().next().copied());
     state
         .dialog_manager
         .open_with(id, default_window_state_for(id), false);
@@ -9405,6 +10018,7 @@ fn dialog_id_for_in_app(dialog: &InAppDialog) -> DesktopDialogId {
     match dialog {
         InAppDialog::SelectionModify { .. } => DesktopDialogId::SelectionModify,
         InAppDialog::NewFolder { .. } => DesktopDialogId::NewFolder,
+        InAppDialog::NewDocument { .. } => DesktopDialogId::NewDocument,
         InAppDialog::ConfirmResetLayout => DesktopDialogId::ConfirmResetLayout,
         InAppDialog::ConfirmUnsavedLeave { .. } => DesktopDialogId::ConfirmUnsavedLeave,
         InAppDialog::Resize { .. } => DesktopDialogId::Resize,
@@ -9473,11 +10087,16 @@ pub(crate) fn resolved_editor_canvas_bounds(state: &PhotonGui) -> Rectangle {
 fn dialog_spec_to_managed<'a>(
     id: DesktopDialogId,
     spec: DialogSpec<'a, Message>,
-    defaults: DialogWindowState,
+    mut defaults: DialogWindowState,
     overlay: OverlayMode,
     lang: Language,
     theme: &IcedTheme,
 ) -> ManagedDialogSpec<'a, DesktopDialogId, Message> {
+    if spec.width > 0.0 {
+        let target_w = spec.width.max(defaults.min_width);
+        let h = defaults.height;
+        defaults = defaults.preferred_size(target_w, h);
+    }
     let close_btn = with_tooltip_pos(
         button::icon_only(
             Icon::Close,
@@ -9516,7 +10135,6 @@ fn build_editor_adjustment_dialog<'a>(
 
     let target_row = row![
         text(tr(lang, "label-apply-target")).size(11),
-        iced::widget::space::horizontal(),
         button::labeled(
             tr(lang, "target-active-layer"),
             None,
@@ -9543,7 +10161,8 @@ fn build_editor_adjustment_dialog<'a>(
         ),
     ]
     .spacing(4)
-    .align_y(Alignment::Center);
+    .align_y(Alignment::Center)
+    .wrap();
 
     let kv = |label: String, val: String| {
         row![
@@ -10105,17 +10724,15 @@ fn build_plugins_manager_body<'a>(
                 Some(Message::OpenPluginModels(p.id.clone())),
             ));
         }
-        btn_row = btn_row
-            .push(iced::widget::space::horizontal())
-            .push(button::labeled(
-                tr(lang, "action-uninstall-plugin"),
-                Some(Icon::Trash),
-                ButtonVariant::Danger,
-                Some(Message::Dispatch(Command::PluginUninstall {
-                    id: p.id.clone(),
-                })),
-            ));
-        det_col = det_col.push(btn_row);
+        btn_row = btn_row.push(button::labeled(
+            tr(lang, "action-uninstall-plugin"),
+            Some(Icon::Trash),
+            ButtonVariant::Danger,
+            Some(Message::Dispatch(Command::PluginUninstall {
+                id: p.id.clone(),
+            })),
+        ));
+        det_col = det_col.push(btn_row.wrap());
         scrollable(det_col).height(Fill).width(Fill).into()
     } else {
         container(
@@ -10204,6 +10821,130 @@ fn build_in_app_dialog<'a>(
             lang,
             theme,
         ),
+        InAppDialog::NewDocument {
+            dims,
+            background,
+            custom_rgb,
+            error,
+        } => {
+            let presets: &[(&str, u32, u32)] = &[
+                ("1920×1080", 1920, 1080),
+                ("1080×1080", 1080, 1080),
+                ("1280×720", 1280, 720),
+                ("2480×3508", 2480, 3508),
+                ("1080×1920", 1080, 1920),
+            ];
+            let mut preset_row = row![text(tr(lang, "label-presets")).size(12)]
+                .spacing(4)
+                .align_y(Alignment::Center);
+            for &(lbl, pw, ph) in presets {
+                preset_row = preset_row.push(button::labeled(
+                    lbl,
+                    None,
+                    ButtonVariant::Tab {
+                        active: dims.width_px == pw && dims.height_px == ph,
+                    },
+                    Some(Message::NewDocApplyPreset(pw, ph)),
+                ));
+            }
+            let preset_row = preset_row.wrap();
+            let custom_swatch_color = Some(rgb_to_color(*custom_rgb));
+            let bg_row = row![
+                button::labeled(
+                    tr(lang, "label-bg-transparent"),
+                    None,
+                    ButtonVariant::Tab {
+                        active: *background == NewDocBackground::Transparent,
+                    },
+                    Some(Message::NewDocSetBackground(NewDocBackground::Transparent)),
+                ),
+                button::labeled(
+                    tr(lang, "label-bg-white"),
+                    None,
+                    ButtonVariant::Tab {
+                        active: *background == NewDocBackground::White,
+                    },
+                    Some(Message::NewDocSetBackground(NewDocBackground::White)),
+                ),
+                button::labeled(
+                    tr(lang, "label-bg-black"),
+                    None,
+                    ButtonVariant::Tab {
+                        active: *background == NewDocBackground::Black,
+                    },
+                    Some(Message::NewDocSetBackground(NewDocBackground::Black)),
+                ),
+                button::labeled(
+                    tr(lang, "label-bg-custom"),
+                    None,
+                    ButtonVariant::Tab {
+                        active: matches!(background, NewDocBackground::Custom(_)),
+                    },
+                    Some(Message::NewDocSetBackground(NewDocBackground::Custom(
+                        *custom_rgb,
+                    ))),
+                ),
+                checker_swatch(
+                    custom_swatch_color,
+                    36.0,
+                    22.0,
+                    Some(Message::OpenNewDocColorPicker),
+                ),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .wrap();
+
+            let mut body_col = column![
+                preset_row,
+                dims.view(lang, Message::NewDocDimAction),
+                column![text(tr(lang, "label-background")).size(12), bg_row].spacing(6),
+            ]
+            .spacing(12);
+
+            if let Some(err) = error {
+                body_col = body_col.push(text(err.clone()).size(12).style(|theme| {
+                    let t = PaletteTokens::for_theme(theme);
+                    text::Style {
+                        color: Some(t.danger),
+                    }
+                }));
+            }
+
+            let footer = row![
+                button::labeled(
+                    tr(lang, "dialog-cancel"),
+                    None,
+                    ButtonVariant::Ghost,
+                    Some(Message::CloseDialog),
+                ),
+                iced::widget::space::horizontal(),
+                button::labeled(
+                    tr(lang, "dialog-create"),
+                    Some(Icon::Check),
+                    ButtonVariant::Primary,
+                    Some(Message::ConfirmNewDocument),
+                ),
+            ]
+            .align_y(Alignment::Center);
+
+            dialog_spec_to_managed(
+                id,
+                DialogSpec {
+                    open: true,
+                    title: tr(lang, "dialog-new-document-title"),
+                    width: 480.0,
+                    body: body_col.into(),
+                    footer: footer.into(),
+                    on_close: Message::CloseDialog,
+                    on_noop: Message::Noop,
+                },
+                default_window_state_for(id),
+                overlay,
+                lang,
+                theme,
+            )
+        }
         InAppDialog::ConfirmResetLayout => dialog_spec_to_managed(
             id,
             confirm_dialog_spec(ConfirmDialogSpec {
@@ -10579,7 +11320,6 @@ fn build_in_app_dialog<'a>(
             let body = column![
                 row![
                     text(tr(lang, "label-apply-target")).size(11),
-                    iced::widget::space::horizontal(),
                     button::labeled(
                         tr(lang, "target-active-layer"),
                         None,
@@ -10608,7 +11348,8 @@ fn build_in_app_dialog<'a>(
                     ),
                 ]
                 .spacing(4)
-                .align_y(Alignment::Center),
+                .align_y(Alignment::Center)
+                .wrap(),
                 row![
                     text(tr(lang, "label-strength")).size(12),
                     iced::widget::space::horizontal(),
@@ -10726,7 +11467,6 @@ fn build_in_app_dialog<'a>(
                 body_col = body_col.push(
                     row![
                         text(tr(lang, "label-apply-target")).size(11),
-                        iced::widget::space::horizontal(),
                         button::labeled(
                             tr(lang, "target-active-layer"),
                             None,
@@ -10753,7 +11493,8 @@ fn build_in_app_dialog<'a>(
                         ),
                     ]
                     .spacing(4)
-                    .align_y(Alignment::Center),
+                    .align_y(Alignment::Center)
+                    .wrap(),
                 );
             }
 
@@ -10854,8 +11595,8 @@ fn build_in_app_dialog<'a>(
                                 Some(Message::PluginParamChanged(k, PluginParamValue::Select(o))),
                             ));
                         }
-                        body_col =
-                            body_col.push(column![text(label).size(12), opts_row].spacing(4));
+                        body_col = body_col
+                            .push(column![text(label).size(12), opts_row.wrap()].spacing(4));
                     }
                     PluginParamKind::Color => {
                         let rgb = match current {
@@ -10973,9 +11714,7 @@ fn build_in_app_dialog<'a>(
                 .find(|p| &p.id == plugin_id)
                 .map(|p| format!("{} — {}", p.name, tr(lang, "action-plugin-settings-models")))
                 .unwrap_or_else(|| tr(lang, "settings-plugins-models-title"));
-            let body = scrollable(build_models_card_for_plugins(state, &[plugin_id.as_str()]))
-                .height(Fill)
-                .into();
+            let body = build_models_card_for_plugins(state, &[plugin_id.as_str()]);
             let footer = row![
                 iced::widget::space::horizontal(),
                 button::labeled(
@@ -11029,7 +11768,7 @@ fn build_in_app_dialog<'a>(
                     open: true,
                     title: tr(lang, "action-translate-settings"),
                     width: 560.0,
-                    body: scrollable(body).height(Fill).into(),
+                    body: body.into(),
                     footer: footer.into(),
                     on_close: Message::CloseDialog,
                     on_noop: Message::Noop,
@@ -11201,9 +11940,10 @@ fn map_browser_message(msg: BrowserMessage) -> Message {
         }
         BrowserMessage::BrowserRightSplitterDrag(w) => Message::BrowserRightSplitterDrag(w),
         BrowserMessage::BrowserRightSplitterRelease(w) => Message::BrowserRightSplitterRelease(w),
-        BrowserMessage::ToggleQuickAccessOptions => Message::ToggleQuickAccessOptions,
         BrowserMessage::ToggleQuickAccessEditing => Message::ToggleQuickAccessEditing,
         BrowserMessage::OpenInViewerWindow(p) => Message::OpenInViewerWindow(p),
+        BrowserMessage::OpenExternally(p) => Message::OpenExternally(p),
+        BrowserMessage::EditPath(p) => Message::BrowserEditPath(p),
     }
 }
 
@@ -11261,6 +12001,8 @@ fn map_editor_message(msg: EditorMessage) -> Message {
         EditorMessage::RequestEditorLeave { close_editor } => {
             Message::RequestEditorLeave { close_editor }
         }
+        EditorMessage::OpenBrowserWindow => Message::OpenBrowserWindow,
+        EditorMessage::OpenViewerWindow => Message::OpenEditorViewerWindow,
         EditorMessage::Canvas(ev) => Message::Canvas(ev),
         EditorMessage::CloseDialog => Message::CloseDialog,
         EditorMessage::OpenExportDialog => Message::OpenExportDialog,
@@ -11387,6 +12129,9 @@ fn map_editor_message(msg: EditorMessage) -> Message {
         EditorMessage::EditorSetApplyTarget(t) => Message::EditorSetApplyTarget(t),
         EditorMessage::CopyText(s) => Message::CopyText(s),
         EditorMessage::OpenPluginModels(id) => Message::OpenPluginModels(id),
+        EditorMessage::OpenNewDocumentDialog => Message::OpenNewDocumentDialog,
+        EditorMessage::OpenExternally(p) => Message::OpenExternally(p),
+        EditorMessage::OpenFileDialog => Message::EditorOpenNewTabDialog,
         other @ (EditorMessage::AiSetRembgModel(_)
         | EditorMessage::AiSetRembgFeather(_)
         | EditorMessage::AiSetRembgRefine(_)
@@ -11469,6 +12214,7 @@ fn map_viewer_message(msg: ViewerMessage) -> Message {
         ViewerMessage::SetViewerAdjShadows(v) => Message::SetViewerAdjShadows(v),
         ViewerMessage::ResetViewerAdj => Message::ResetViewerAdj,
         ViewerMessage::ViewerAdjOpenInEditor => Message::ViewerAdjOpenInEditor,
+        ViewerMessage::OpenBrowserWindow => Message::OpenBrowserWindow,
         ViewerMessage::WebtoonScrolled(vp) => Message::WebtoonScrolled(vp),
         ViewerMessage::OpenTranslateSettings => Message::OpenTranslateSettings,
         ViewerMessage::OpenInNewViewerWindow(p) => Message::OpenInViewerWindow(p),
@@ -11482,6 +12228,8 @@ fn map_viewer_message(msg: ViewerMessage) -> Message {
         | ViewerMessage::StartTranslateRegionPick
         | ViewerMessage::ScanTranslatePage
         | ViewerMessage::ToggleTranslateBubbles
+        | ViewerMessage::ToggleTranslateBubbleStyle
+        | ViewerMessage::ToggleTranslateBlockOriginal(_)
         | ViewerMessage::SetTranslateFontScale(_)
         | ViewerMessage::SelectTranslateBlock(_)
         | ViewerMessage::UpdateTranslateBlockText(_, _)
@@ -11490,7 +12238,22 @@ fn map_viewer_message(msg: ViewerMessage) -> Message {
         | ViewerMessage::RemoveTranslateBlock(_)
         | ViewerMessage::SaveTranslationSidecar
         | ViewerMessage::DeleteTranslationSidecar
-        | ViewerMessage::CopyTranslatedText) => Message::ViewerTranslate(other),
+        | ViewerMessage::CopyTranslatedText
+        | ViewerMessage::BeginDragTranslateBubble(_)
+        | ViewerMessage::BeginDragTranslateTopBar
+        | ViewerMessage::BeginDragTranslateResultCard
+        | ViewerMessage::ResetTranslateTopBarPos
+        | ViewerMessage::ResetTranslateResultCardPos
+        | ViewerMessage::DismissTranslateResultCard
+        | ViewerMessage::NextTranslateBubble
+        | ViewerMessage::ToggleTranslateResultCardOriginal(_)
+        | ViewerMessage::BeginDragTranslatePageBubble(_, _)
+        | ViewerMessage::SelectTranslatePageBlock(_, _)
+        | ViewerMessage::ToggleTranslatePageBlockOriginal(_, _)
+        | ViewerMessage::RetryTranslatePageBlock(_, _)
+        | ViewerMessage::RemoveTranslatePageBlock(_, _)
+        | ViewerMessage::BeginWebtoonTranslateRegion { .. }
+        | ViewerMessage::WebtoonHoverPage { .. }) => Message::ViewerTranslate(other),
     }
 }
 
@@ -11571,7 +12334,6 @@ impl PhotonGui {
             browser_filter_regex: self.browser_filter_regex,
             browser_quick_access_open: self.browser_quick_access_open,
             browser_quick_access_collapsed: self.browser_quick_access_collapsed,
-            quick_access_options_open: self.quick_access_options_open,
             quick_access_editing: self.quick_access_editing,
             browser_explorer_open: self.browser_explorer_open,
             browser_explorer_collapsed: self.browser_explorer_collapsed,
@@ -12161,6 +12923,7 @@ fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) -> Task<Mes
         "editor.crop" => update(state, Message::ToggleCropMode),
         "editor.resize" => update(state, Message::OpenResizeDialog),
         "editor.canvas_size" => update(state, Message::OpenCanvasSizeDialog),
+        "editor.new" => update(state, Message::OpenNewDocumentDialog),
         "editor.tab.new" => update(state, Message::EditorOpenNewTabDialog),
         "editor.undo" => dispatch_to_core(state.core.clone(), Command::EditorUndo),
         "editor.redo" => dispatch_to_core(state.core.clone(), Command::EditorRedo),
@@ -12513,56 +13276,152 @@ fn load_folder_children_task(core: CoreHandle, path: String) -> Task<Message> {
     )
 }
 
+const ARCHIVE_THUMB_WINDOW_BEFORE: usize = 10;
+const ARCHIVE_THUMB_WINDOW_AFTER: usize = 18;
+
+fn archive_thumbnail_window_indices(
+    total: usize,
+    center: usize,
+    before: usize,
+    after: usize,
+) -> Vec<usize> {
+    if total == 0 {
+        return Vec::new();
+    }
+    let c = center.min(total - 1);
+    let start = c.saturating_sub(before);
+    let end = (c + after + 1).min(total);
+    let mut indices = Vec::with_capacity(end - start);
+    indices.push(c);
+    let mut step = 1;
+    while indices.len() < end - start {
+        if c + step < end {
+            indices.push(c + step);
+        }
+        if let Some(left) = c.checked_sub(step)
+            && left >= start
+        {
+            indices.push(left);
+        }
+        step += 1;
+    }
+    indices
+}
+
 fn schedule_missing_thumbnails(state: &mut PhotonGui) -> Task<Message> {
+    let is_archive = state.snapshot.meta.viewer_archive.is_some();
     if state.thumbnails.len() > 256 {
-        let keep: BTreeSet<&str> = state
+        let mut keep: BTreeSet<&str> = state
             .snapshot
             .entries
             .iter()
             .map(|e| e.path.as_str())
-            .chain(state.snapshot.viewer_images.iter().map(String::as_str))
             .collect();
+        if is_archive {
+            let center = state.snapshot.meta.viewer_index.unwrap_or(0);
+            for idx in
+                archive_thumbnail_window_indices(state.snapshot.viewer_images.len(), center, 32, 32)
+            {
+                if let Some(p) = state.snapshot.viewer_images.get(idx) {
+                    keep.insert(p.as_str());
+                }
+            }
+        } else {
+            keep.extend(state.snapshot.viewer_images.iter().map(String::as_str));
+        }
         state.thumbnails.retain(|k, _| keep.contains(k.as_str()));
     }
 
-    let mut pending: Vec<String> = state
-        .snapshot
-        .entries
-        .iter()
-        .filter(|e| e.is_image)
-        .map(|e| e.path.clone())
-        .chain(state.snapshot.viewer_images.iter().cloned())
-        .filter(|p| !state.thumbnails.contains_key(p) && state.thumbnails_loading.insert(p.clone()))
-        .collect();
-    pending.sort();
-    pending.dedup();
+    let mut pending: Vec<String> = Vec::new();
+    if !is_archive || state.snapshot.meta.workspace == Workspace::Browser {
+        let mut browser_pending: Vec<String> = state
+            .snapshot
+            .entries
+            .iter()
+            .filter(|e| e.is_image)
+            .map(|e| e.path.clone())
+            .filter(|p| {
+                !state.thumbnails.contains_key(p) && state.thumbnails_loading.insert(p.clone())
+            })
+            .collect();
+        browser_pending.sort();
+        browser_pending.dedup();
+        pending.extend(browser_pending);
+    }
+
+    if is_archive {
+        let center = state.snapshot.meta.viewer_index.unwrap_or(0);
+        let indices = archive_thumbnail_window_indices(
+            state.snapshot.viewer_images.len(),
+            center,
+            ARCHIVE_THUMB_WINDOW_BEFORE,
+            ARCHIVE_THUMB_WINDOW_AFTER,
+        );
+        for idx in indices {
+            if let Some(p) = state.snapshot.viewer_images.get(idx)
+                && !state.thumbnails.contains_key(p)
+                && state.thumbnails_loading.insert(p.clone())
+            {
+                pending.push(p.clone());
+            }
+        }
+    } else {
+        let mut viewer_pending: Vec<String> = state
+            .snapshot
+            .viewer_images
+            .iter()
+            .filter(|p| {
+                !state.thumbnails.contains_key(*p) && state.thumbnails_loading.insert((*p).clone())
+            })
+            .cloned()
+            .collect();
+        viewer_pending.sort();
+        viewer_pending.dedup();
+        pending.extend(viewer_pending);
+    }
 
     if pending.is_empty() {
         return Task::none();
     }
 
+    let archive = is_archive.then(|| state.core.archive_session());
+    let chunk_size = if is_archive { 4 } else { 8 };
     let tasks = pending
-        .chunks(8)
+        .chunks(chunk_size)
         .map(|chunk| {
             let paths = chunk.to_vec();
+            let archive = archive.clone();
             Task::perform(
                 async move {
                     tokio::task::spawn_blocking(move || {
                         let mut out = Vec::new();
-                        for path in paths {
-                            if let Ok(thumb) =
-                                photon_image::generate_thumbnail(Path::new(&path), 240)
-                            {
+                        for path in &paths {
+                            let thumb_res = if let Some(ref session) = archive {
+                                match photon_core::Core::archive_thumbnail_for_path(
+                                    session,
+                                    Path::new(path),
+                                    240,
+                                ) {
+                                    Ok(Some(img)) => Ok(img),
+                                    Ok(None) => {
+                                        photon_image::generate_thumbnail(Path::new(path), 240)
+                                    }
+                                    Err(e) => Err(e),
+                                }
+                            } else {
+                                photon_image::generate_thumbnail(Path::new(path), 240)
+                            };
+                            if let Ok(thumb) = thumb_res {
                                 let (w, h) = thumb.dimensions();
-                                out.push((path, w, h, thumb.into_raw()));
+                                out.push((path.clone(), w, h, thumb.into_raw()));
                             }
                         }
-                        out
+                        (paths, out)
                     })
                     .await
                     .unwrap_or_default()
                 },
-                Message::ThumbnailsLoaded,
+                |(attempted, items)| Message::ThumbnailsLoaded(attempted, items),
             )
         })
         .collect::<Vec<_>>();
@@ -12612,14 +13471,53 @@ fn window_size_for_image(snap: &UiStateSnapshot, img_w: u32, img_h: u32) -> Size
     Size::new(w, h)
 }
 
-fn probe_viewer_image_sizes(state: &mut PhotonGui) {
+fn probe_viewer_image_sizes(state: &mut PhotonGui) -> Task<Message> {
+    let is_archive = state.snapshot.meta.viewer_archive.is_some();
     for path in &state.snapshot.viewer_images {
         if !state.image_sizes.contains_key(path)
+            && (!is_archive || Path::new(path).exists())
             && let Some(dims) = photon_image::probe_dimensions(Path::new(path))
         {
             state.image_sizes.insert(path.clone(), dims);
         }
     }
+    if !is_archive || state.snapshot.viewer_images.is_empty() {
+        return Task::none();
+    }
+    let center = state.snapshot.meta.viewer_index.unwrap_or(0);
+    let indices =
+        archive_thumbnail_window_indices(state.snapshot.viewer_images.len(), center, 2, 5);
+    let pending: Vec<String> = indices
+        .into_iter()
+        .filter_map(|idx| state.snapshot.viewer_images.get(idx))
+        .filter(|p| !state.image_sizes.contains_key(*p))
+        .cloned()
+        .collect();
+    if pending.is_empty() {
+        return Task::none();
+    }
+    let archive = state.core.archive_session();
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let mut probed = Vec::new();
+                for path in pending {
+                    let resolved =
+                        photon_core::Core::ensure_archive_page_for_path(&archive, Path::new(&path))
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| PathBuf::from(&path));
+                    if let Some(dims) = photon_image::probe_dimensions(&resolved) {
+                        probed.push((path, dims));
+                    }
+                }
+                probed
+            })
+            .await
+            .unwrap_or_default()
+        },
+        Message::ViewerImageSizesProbed,
+    )
 }
 
 fn schedule_webtoon_pages_near(state: &mut PhotonGui, center_idx: usize) -> Task<Message> {
@@ -12642,25 +13540,43 @@ fn schedule_webtoon_pages_near(state: &mut PhotonGui, center_idx: usize) -> Task
     if pending.is_empty() {
         return Task::none();
     }
+    let archive = state
+        .snapshot
+        .meta
+        .viewer_archive
+        .as_ref()
+        .map(|_| state.core.archive_session());
     let tasks = pending
         .chunks(4)
         .map(|chunk| {
             let paths = chunk.to_vec();
+            let archive = archive.clone();
             Task::perform(
                 async move {
                     tokio::task::spawn_blocking(move || {
                         let mut out = Vec::new();
                         for path in paths {
-                            if let Ok(rgba) = photon_image::decode_rgba(Path::new(&path)) {
+                            let resolved = if let Some(ref session) = archive {
+                                photon_core::Core::ensure_archive_page_for_path(
+                                    session,
+                                    Path::new(&path),
+                                )
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| PathBuf::from(&path))
+                            } else {
+                                PathBuf::from(&path)
+                            };
+                            if let Ok(rgba) = photon_image::decode_rgba(&resolved) {
                                 let (w, h) = rgba.dimensions();
                                 if w > 2200 || h > 4096 {
                                     let thumb =
                                         image::DynamicImage::ImageRgba8(rgba).thumbnail(2200, 4096);
                                     let r = thumb.to_rgba8();
                                     let (nw, nh) = r.dimensions();
-                                    out.push((path, nw, nh, r.into_raw()));
+                                    out.push((path, nw, nh, w, h, r.into_raw()));
                                 } else {
-                                    out.push((path, w, h, rgba.into_raw()));
+                                    out.push((path, w, h, w, h, rgba.into_raw()));
                                 }
                             }
                         }
@@ -12700,7 +13616,7 @@ fn reload_dual_frames_task(state: &PhotonGui) -> Task<Message> {
                 .as_ref()
                 .is_none_or(|f| f.key != format!("viewer:{lp}"))
             {
-                tasks.push(load_viewer_frame_task(lp.to_owned()));
+                tasks.push(load_viewer_frame_task(&state.core, lp.to_owned()));
             }
         }
         None => tasks.push(Task::done(Message::ViewerFrameLoaded(None))),
@@ -12712,10 +13628,13 @@ fn reload_dual_frames_task(state: &PhotonGui) -> Task<Message> {
                 .as_ref()
                 .is_none_or(|f| f.key != format!("viewer:{rp}"))
             {
-                tasks.push(load_viewer_pair_frame_task(Some(rp.to_owned())));
+                tasks.push(load_viewer_pair_frame_task(
+                    &state.core,
+                    Some(rp.to_owned()),
+                ));
             }
         }
-        None => tasks.push(load_viewer_pair_frame_task(None)),
+        None => tasks.push(load_viewer_pair_frame_task(&state.core, None)),
     }
     Task::batch(tasks)
 }
@@ -12736,13 +13655,14 @@ fn reload_active_frames(
             snap.meta.layout.manga_rtl,
         );
         if let Some((_, lp)) = left_slot {
-            tasks.push(load_viewer_frame_task(lp.to_owned()));
+            tasks.push(load_viewer_frame_task(core, lp.to_owned()));
         }
         tasks.push(load_viewer_pair_frame_task(
+            core,
             right_slot.map(|(_, rp)| rp.to_owned()),
         ));
     } else if let Some(path) = &snap.meta.viewer_path {
-        tasks.push(load_viewer_frame_task(path.clone()));
+        tasks.push(load_viewer_frame_task(core, path.clone()));
     }
     if snap.meta.editor.is_some() {
         tasks.push(load_editor_frame_task(core.clone()));
@@ -12752,8 +13672,19 @@ fn reload_active_frames(
     Task::batch(tasks)
 }
 
-fn decode_viewer_frame_sync(path: &Path) -> Option<CpuImageFrame> {
-    let rgba = photon_image::decode_rgba(path).ok()?;
+fn decode_viewer_frame_sync(
+    path: &Path,
+    archive: Option<&Arc<Mutex<Option<photon_image::archive::ArchiveSession>>>>,
+) -> Option<CpuImageFrame> {
+    let resolved = if let Some(session) = archive {
+        photon_core::Core::ensure_archive_page_for_path(session, path)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    let rgba = photon_image::decode_rgba(&resolved).ok()?;
     let (w, h) = rgba.dimensions();
     Some(CpuImageFrame {
         key: format!("viewer:{}", path.display()),
@@ -12764,28 +13695,34 @@ fn decode_viewer_frame_sync(path: &Path) -> Option<CpuImageFrame> {
     })
 }
 
-fn load_viewer_frame_task(path: String) -> Task<Message> {
+fn load_viewer_frame_task(core: &CoreHandle, path: String) -> Task<Message> {
+    let archive = core.archive_session();
     Task::perform(
         async move {
-            tokio::task::spawn_blocking(move || decode_viewer_frame_sync(Path::new(&path)))
-                .await
-                .ok()
-                .flatten()
+            tokio::task::spawn_blocking(move || {
+                decode_viewer_frame_sync(Path::new(&path), Some(&archive))
+            })
+            .await
+            .ok()
+            .flatten()
         },
         Message::ViewerFrameLoaded,
     )
 }
 
-fn load_viewer_pair_frame_task(path: Option<String>) -> Task<Message> {
+fn load_viewer_pair_frame_task(core: &CoreHandle, path: Option<String>) -> Task<Message> {
     let Some(path) = path else {
         return Task::done(Message::ViewerPairFrameLoaded(None));
     };
+    let archive = core.archive_session();
     Task::perform(
         async move {
-            tokio::task::spawn_blocking(move || decode_viewer_frame_sync(Path::new(&path)))
-                .await
-                .ok()
-                .flatten()
+            tokio::task::spawn_blocking(move || {
+                decode_viewer_frame_sync(Path::new(&path), Some(&archive))
+            })
+            .await
+            .ok()
+            .flatten()
         },
         Message::ViewerPairFrameLoaded,
     )
@@ -13035,14 +13972,33 @@ fn resolve_desktop_plugins_dir() -> PathBuf {
     photon_storage::AppPaths::current().data_dir.join("plugins")
 }
 
-fn open_folder_in_file_manager(dir: &Path) {
+fn xdg_open(target: &Path) {
     use std::process::{Command as ProcessCommand, Stdio};
     let _ = ProcessCommand::new("xdg-open")
-        .arg(dir)
+        .arg(target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
+}
+
+fn is_archive_path_str(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(photon_protocol::is_archive_extension)
+}
+
+fn is_supported_image_path_str(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|ext| ext.trim_start_matches('.').to_ascii_lowercase())
+        .is_some_and(|lower| photon_protocol::IMAGE_EXTENSIONS.contains(&lower.as_str()))
+}
+
+fn open_folder_in_file_manager(dir: &Path) {
+    xdg_open(dir);
 }
 
 fn default_value_for_plugin_param(spec: &PluginParamSpec) -> PluginParamValue {
@@ -13188,12 +14144,364 @@ fn build_models_card_for_plugins<'a>(
     col.into()
 }
 
+fn tesseract_to_iso(code: &str) -> String {
+    let primary = code.trim().split('+').next().unwrap_or("").trim();
+    match primary.to_ascii_lowercase().as_str() {
+        "eng" | "en" => "en".to_owned(),
+        "jpn" | "jpn_vert" | "ja" => "ja".to_owned(),
+        "chi_sim" | "chi_sim_vert" | "zh-cn" | "zh_cn" | "zh" => "zh-CN".to_owned(),
+        "chi_tra" | "chi_tra_vert" | "zh-tw" | "zh_tw" => "zh-TW".to_owned(),
+        "kor" | "kor_vert" | "ko" => "ko".to_owned(),
+        "vie" | "vi" => "vi".to_owned(),
+        "fra" | "fre" | "fr" => "fr".to_owned(),
+        "deu" | "ger" | "de" => "de".to_owned(),
+        "spa" | "es" => "es".to_owned(),
+        "rus" | "ru" => "ru".to_owned(),
+        "ita" | "it" => "it".to_owned(),
+        "por" | "pt" => "pt".to_owned(),
+        "ara" | "ar" => "ar".to_owned(),
+        "tha" | "th" => "th".to_owned(),
+        _ => primary.to_owned(),
+    }
+}
+
+fn iso_to_tesseract(code: &str) -> String {
+    let norm = code.trim().to_ascii_lowercase();
+    match norm.as_str() {
+        "en" | "eng" => "eng".to_owned(),
+        "ja" | "jpn" => "jpn".to_owned(),
+        "jpn_vert" => "jpn_vert".to_owned(),
+        "zh-cn" | "zh_cn" | "zh" | "chi_sim" => "chi_sim".to_owned(),
+        "zh-tw" | "zh_tw" | "chi_tra" => "chi_tra".to_owned(),
+        "ko" | "kor" => "kor".to_owned(),
+        "vi" | "vie" => "vie".to_owned(),
+        "fr" | "fra" => "fra".to_owned(),
+        "de" | "deu" => "deu".to_owned(),
+        "es" | "spa" => "spa".to_owned(),
+        "ru" | "rus" => "rus".to_owned(),
+        "it" | "ita" => "ita".to_owned(),
+        "pt" | "por" => "por".to_owned(),
+        "ar" | "ara" => "ara".to_owned(),
+        "th" | "tha" => "tha".to_owned(),
+        _ => code.trim().to_owned(),
+    }
+}
+
+fn viewer_viewport_size(state: &PhotonGui) -> (f32, f32) {
+    let layout = &state.snapshot.meta.layout;
+    let right_open = (state.viewer_adjustments_open
+        && state.viewer_mode != ViewerViewMode::Webtoon)
+        || state.viewer_info_open;
+    let right_w = if right_open {
+        state
+            .viewer_right_width_preview
+            .unwrap_or(layout.right_width as f32)
+            .clamp(200.0, 600.0)
+            + 7.0
+    } else {
+        0.0
+    };
+    let filmstrip_h = if state.viewer_mode != ViewerViewMode::Webtoon
+        && state.snapshot.viewer_images.len() > 1
+        && state.viewer_filmstrip_open
+    {
+        if state.snapshot.meta.viewer_archive.is_some() {
+            116.0
+        } else {
+            92.0
+        }
+    } else {
+        0.0
+    };
+    let vp_w = (state.window_size.width - right_w).max(120.0);
+    let vp_h = (state.window_size.height - 48.0 - 28.0 - filmstrip_h).max(120.0);
+    (vp_w, vp_h)
+}
+
+fn viewer_fit_scale(
+    doc_w: f32,
+    doc_h: f32,
+    quarter_turns: u8,
+    zoom: f32,
+    vp_w: f32,
+    vp_h: f32,
+) -> f32 {
+    let vp_w = vp_w.max(1.0);
+    let vp_h = vp_h.max(1.0);
+    let (fw, fh) = if quarter_turns % 2 == 1 {
+        (doc_h.max(1.0), doc_w.max(1.0))
+    } else {
+        (doc_w.max(1.0), doc_h.max(1.0))
+    };
+    let vp_aspect = vp_w / vp_h;
+    let img_aspect = fw / fh;
+    let fit_w = if img_aspect > vp_aspect {
+        vp_w
+    } else {
+        vp_h * img_aspect
+    };
+    ((fit_w * zoom.max(0.02)) / fw).max(1e-4)
+}
+
+fn screen_delta_to_image_delta(
+    dx_px: f32,
+    dy_px: f32,
+    scale: f32,
+    quarter_turns: u8,
+) -> (i32, i32) {
+    let s = scale.max(1e-4);
+    let rx = dx_px / s;
+    let ry = dy_px / s;
+    let (ix, iy) = match quarter_turns % 4 {
+        1 => (ry, -rx),
+        2 => (-rx, -ry),
+        3 => (-ry, rx),
+        _ => (rx, ry),
+    };
+    (ix.round() as i32, iy.round() as i32)
+}
+
+fn sync_translate_bubble_cache(state: &mut PhotonGui) {
+    if let Some(path) = state
+        .viewer_translate
+        .active_page_path
+        .as_ref()
+        .or(state.snapshot.meta.viewer_path.as_ref())
+        .or(state.viewer_translate.last_path.as_ref())
+        .cloned()
+    {
+        state
+            .viewer_translate
+            .bubble_cache
+            .insert(path, state.viewer_translate.blocks.clone());
+    }
+}
+
+fn dispatch_viewer_translate_region(
+    state: &mut PhotonGui,
+    path: String,
+    region: [i32; 4],
+) -> Task<Message> {
+    if path.is_empty() {
+        return Task::none();
+    }
+    state.viewer_translate.last_was_region = true;
+    state.viewer_translate.pending_replace_idx = None;
+    state.active_translate_target = Some(path.clone());
+    let target_lang = if state.viewer_translate.mode == ViewerTranslateMode::OcrOnly {
+        String::new()
+    } else {
+        state.viewer_translate.target_lang.clone()
+    };
+    dispatch_to_core(
+        state.core.clone(),
+        Command::ViewerTranslate {
+            path,
+            source_lang: state.viewer_translate.source_lang.clone(),
+            target_lang,
+            region: Some(region),
+            ocr_engine: state.viewer_translate.ocr_engine.as_str().to_owned(),
+        },
+    )
+}
+
+fn resolve_double_marquee_region(
+    marquee_display: [f32; 4],
+    left_path: Option<&str>,
+    left_size: (u32, u32),
+    right_path: Option<&str>,
+    right_size: Option<(u32, u32)>,
+    dual_gap_px: f32,
+    quarter_turns: u8,
+) -> Option<(String, [i32; 4])> {
+    let lp = left_path?;
+    let [dx, dy, dw, dh] = marquee_display;
+    let lw = left_size.0.max(1) as f32;
+    let lh = left_size.1.max(1) as f32;
+    let (Some(rp), Some(r_sz)) = (right_path, right_size) else {
+        // Single page shown in Double mode (e.g. separate cover or landscape)
+        let (ux, uy, uw, uh) = match quarter_turns % 4 {
+            1 => (dy, (lh - (dx + dw)).max(0.0), dh, dw),
+            2 => ((lw - (dx + dw)).max(0.0), (lh - (dy + dh)).max(0.0), dw, dh),
+            3 => ((lw - (dy + dh)).max(0.0), dx, dh, dw),
+            _ => (dx, dy, dw, dh),
+        };
+        return Some((
+            lp.to_owned(),
+            [
+                ux.round().max(0.0) as i32,
+                uy.round().max(0.0) as i32,
+                uw.round().max(8.0) as i32,
+                uh.round().max(8.0) as i32,
+            ],
+        ));
+    };
+
+    let (spread_w, spread_h, left_disp_w, gap_doc) =
+        photon_canvas::dual_spread_geometry(left_size, r_sz, dual_gap_px);
+    let right_disp_w = (spread_w - left_disp_w - gap_doc).max(1.0);
+    let (ux, uy, uw, uh) = match quarter_turns % 4 {
+        1 => (dy, (spread_h - (dx + dw)).max(0.0), dh, dw),
+        2 => (
+            (spread_w - (dx + dw)).max(0.0),
+            (spread_h - (dy + dh)).max(0.0),
+            dw,
+            dh,
+        ),
+        3 => ((spread_w - (dy + dh)).max(0.0), dx, dh, dw),
+        _ => (dx, dy, dw, dh),
+    };
+    let cx = ux + uw * 0.5;
+    if cx < left_disp_w + gap_doc * 0.5 {
+        let sx = lw / left_disp_w.max(1.0);
+        let sy = lh / spread_h.max(1.0);
+        Some((
+            lp.to_owned(),
+            [
+                (ux * sx).round().clamp(0.0, lw) as i32,
+                (uy * sy).round().clamp(0.0, lh) as i32,
+                (uw * sx).round().max(8.0) as i32,
+                (uh * sy).round().max(8.0) as i32,
+            ],
+        ))
+    } else {
+        let rw = r_sz.0.max(1) as f32;
+        let rh = r_sz.1.max(1) as f32;
+        let rx = (ux - (left_disp_w + gap_doc)).max(0.0);
+        let sx = rw / right_disp_w;
+        let sy = rh / spread_h.max(1.0);
+        Some((
+            rp.to_owned(),
+            [
+                (rx * sx).round().clamp(0.0, rw) as i32,
+                (uy * sy).round().clamp(0.0, rh) as i32,
+                (uw * sx).round().max(8.0) as i32,
+                (uh * sy).round().max(8.0) as i32,
+            ],
+        ))
+    }
+}
+
+fn commit_translate_bubble_drag(
+    state: &mut PhotonGui,
+    page_path: Option<&str>,
+    idx: usize,
+    dx_px: f32,
+    dy_px: f32,
+) {
+    if dx_px.abs() < 0.5 && dy_px.abs() < 0.5 {
+        return;
+    }
+    let resolved_path = page_path
+        .map(str::to_owned)
+        .or_else(|| state.viewer_translate.active_page_path.clone())
+        .or_else(|| state.snapshot.meta.viewer_path.clone());
+    let Some(target_path) = resolved_path else {
+        return;
+    };
+
+    let (dx_img, dy_img, max_x, max_y) = match state.viewer_mode {
+        ViewerViewMode::Webtoon => {
+            let Some((img_w, img_h)) = state.image_sizes.get(&target_path).copied() else {
+                return;
+            };
+            let (_, pages) = photon_viewer::compute_webtoon_layout(state.viewer_view_state(true));
+            let Some((_, disp_w, disp_h)) = pages.into_iter().find(|(p, _, _)| p == &target_path)
+            else {
+                return;
+            };
+            let dx = (dx_px * (img_w.max(1) as f32 / disp_w.max(1.0))).round() as i32;
+            let dy = (dy_px * (img_h.max(1) as f32 / disp_h.max(1.0))).round() as i32;
+            (dx, dy, img_w as i32, img_h as i32)
+        }
+        ViewerViewMode::Double => {
+            let Some(left_frame) = &state.viewer_frame else {
+                return;
+            };
+            let (left_slot, right_slot) = dual_spread_slots(state.viewer_view_state(true));
+            let is_right = right_slot.is_some_and(|(_, p)| p == target_path);
+            let left_size = (left_frame.width, left_frame.height);
+            let right_size = state
+                .viewer_pair_frame
+                .as_ref()
+                .map(|f| (f.width, f.height));
+            let (vp_w, vp_h) = viewer_viewport_size(state);
+            let geom = viewer_double_fit_geometries(
+                left_size,
+                right_size,
+                f32::from(state.viewer_manga_page_gap),
+                state.viewer_quarter_turns,
+                state.zoom,
+                state.pan_x,
+                state.pan_y,
+                vp_w,
+                vp_h,
+            );
+            let spread_scale = (geom.drawn_w / geom.fw.max(1.0)).max(1e-4);
+            let (dx_s, dy_s) =
+                screen_delta_to_image_delta(dx_px, dy_px, spread_scale, state.viewer_quarter_turns);
+            let (img_w, img_h, page_disp_w) = if is_right && let Some((rw, rh)) = right_size {
+                (rw, rh, geom.right_disp_w.max(1.0))
+            } else if left_slot.is_some_and(|(_, p)| p == target_path) {
+                (left_size.0, left_size.1, geom.left_disp_w.max(1.0))
+            } else {
+                return;
+            };
+            let dx = (dx_s as f32 * (img_w.max(1) as f32 / page_disp_w)).round() as i32;
+            let dy = (dy_s as f32 * (img_h.max(1) as f32 / geom.spread_h.max(1.0))).round() as i32;
+            (dx, dy, img_w as i32, img_h as i32)
+        }
+        ViewerViewMode::Single => {
+            let Some(frame) = &state.viewer_frame else {
+                return;
+            };
+            let doc_w = frame.width.max(1) as f32;
+            let doc_h = frame.height.max(1) as f32;
+            let (vp_w, vp_h) = viewer_viewport_size(state);
+            let scale = viewer_fit_scale(
+                doc_w,
+                doc_h,
+                state.viewer_quarter_turns,
+                state.zoom,
+                vp_w,
+                vp_h,
+            );
+            let (dx, dy) =
+                screen_delta_to_image_delta(dx_px, dy_px, scale, state.viewer_quarter_turns);
+            (dx, dy, frame.width as i32, frame.height as i32)
+        }
+    };
+    if dx_img == 0 && dy_img == 0 {
+        return;
+    }
+
+    if let Some(cached) = state.viewer_translate.bubble_cache.get_mut(&target_path)
+        && let Some(b) = cached.get_mut(idx)
+    {
+        b.x = (b.x + dx_img).clamp(0, (max_x - b.w).max(0));
+        b.y = (b.y + dy_img).clamp(0, (max_y - b.h).max(0));
+        if state.viewer_translate.active_page_path.as_deref() == Some(target_path.as_str())
+            || state.snapshot.meta.viewer_path.as_deref() == Some(target_path.as_str())
+        {
+            state.viewer_translate.blocks = cached.clone();
+        }
+        return;
+    }
+
+    if let Some(b) = state.viewer_translate.blocks.get_mut(idx) {
+        b.x = (b.x + dx_img).clamp(0, (max_x - b.w).max(0));
+        b.y = (b.y + dy_img).clamp(0, (max_y - b.h).max(0));
+    }
+    sync_translate_bubble_cache(state);
+}
+
 fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) -> Task<Message> {
     let lang = state.snapshot.meta.language;
     match msg {
         ViewerMessage::ToggleTranslateOverlay => {
             state.viewer_translate.active = !state.viewer_translate.active;
             if state.viewer_translate.active {
+                state.viewer_translate.active_page_path = state.snapshot.meta.viewer_path.clone();
                 if let Some(saved) = &state.snapshot.meta.viewer_saved_translation
                     && Some(saved.path.as_str()) == state.snapshot.meta.viewer_path.as_deref()
                 {
@@ -13203,6 +14511,15 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
             } else {
                 state.viewer_translate.picking_region = false;
                 state.viewer_translate.editing_block_idx = None;
+                state.viewer_translate.result_card_visible = false;
+                state.viewer_translate.active_drag_delta = None;
+                state.viewer_translate.active_drag_page = None;
+                state.viewer_translate.webtoon_marquee = None;
+                state.viewer_translate.space_pan_held = false;
+                state.translate_drag = TranslateDragTarget::None;
+                state.pending_translate_queue.clear();
+                state.active_translate_target = None;
+                state.webtoon_marquee_drag = None;
             }
             sync_ui_tree_task(state)
         }
@@ -13210,6 +14527,15 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
             state.viewer_translate.active = false;
             state.viewer_translate.picking_region = false;
             state.viewer_translate.editing_block_idx = None;
+            state.viewer_translate.result_card_visible = false;
+            state.viewer_translate.active_drag_delta = None;
+            state.viewer_translate.active_drag_page = None;
+            state.viewer_translate.webtoon_marquee = None;
+            state.viewer_translate.space_pan_held = false;
+            state.translate_drag = TranslateDragTarget::None;
+            state.pending_translate_queue.clear();
+            state.active_translate_target = None;
+            state.webtoon_marquee_drag = None;
             sync_ui_tree_task(state)
         }
         ViewerMessage::SetTranslateMode(mode) => {
@@ -13232,10 +14558,10 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
             Task::none()
         }
         ViewerMessage::SwapTranslateLangs => {
-            std::mem::swap(
-                &mut state.viewer_translate.source_lang,
-                &mut state.viewer_translate.target_lang,
-            );
+            let old_src = state.viewer_translate.source_lang.clone();
+            let old_dst = state.viewer_translate.target_lang.clone();
+            state.viewer_translate.source_lang = iso_to_tesseract(&old_dst);
+            state.viewer_translate.target_lang = tesseract_to_iso(&old_src);
             Task::none()
         }
         ViewerMessage::StartTranslateRegionPick => {
@@ -13245,28 +14571,86 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
             sync_ui_tree_task(state)
         }
         ViewerMessage::ScanTranslatePage => {
-            let Some(path) = state.snapshot.meta.viewer_path.clone() else {
-                return Task::none();
-            };
             state.viewer_translate.picking_region = false;
+            state.viewer_translate.last_was_region = false;
+            state.viewer_translate.pending_replace_idx = None;
+            state.pending_translate_queue.clear();
             let target_lang = if state.viewer_translate.mode == ViewerTranslateMode::OcrOnly {
                 String::new()
             } else {
                 state.viewer_translate.target_lang.clone()
             };
+            let ocr_engine = state.viewer_translate.ocr_engine.as_str().to_owned();
+            let source_lang = state.viewer_translate.source_lang.clone();
+
+            let mut scan_paths: Vec<String> = Vec::new();
+            match state.viewer_mode {
+                ViewerViewMode::Double => {
+                    let (left_slot, right_slot) = dual_spread_slots(state.viewer_view_state(true));
+                    if let Some((_, lp)) = left_slot {
+                        scan_paths.push(lp.to_owned());
+                    }
+                    if let Some((_, rp)) = right_slot
+                        && !scan_paths.iter().any(|p| p == rp)
+                    {
+                        scan_paths.push(rp.to_owned());
+                    }
+                }
+                ViewerViewMode::Webtoon => {
+                    let vis_path = state
+                        .webtoon_visible_index
+                        .or(state.snapshot.meta.viewer_index)
+                        .and_then(|i| state.snapshot.viewer_images.get(i).cloned())
+                        .or_else(|| state.snapshot.meta.viewer_path.clone());
+                    if let Some(p) = vis_path {
+                        scan_paths.push(p);
+                    }
+                }
+                ViewerViewMode::Single => {
+                    if let Some(p) = state.snapshot.meta.viewer_path.clone() {
+                        scan_paths.push(p);
+                    }
+                }
+            }
+            if scan_paths.is_empty() {
+                return Task::none();
+            }
+            let first = scan_paths.remove(0);
+            for rest in scan_paths {
+                state
+                    .pending_translate_queue
+                    .push_back(Command::ViewerTranslate {
+                        path: rest,
+                        source_lang: source_lang.clone(),
+                        target_lang: target_lang.clone(),
+                        region: None,
+                        ocr_engine: ocr_engine.clone(),
+                    });
+            }
+            state.active_translate_target = Some(first.clone());
             dispatch_to_core(
                 state.core.clone(),
                 Command::ViewerTranslate {
-                    path,
-                    source_lang: state.viewer_translate.source_lang.clone(),
+                    path: first,
+                    source_lang,
                     target_lang,
                     region: None,
-                    ocr_engine: state.viewer_translate.ocr_engine.as_str().to_owned(),
+                    ocr_engine,
                 },
             )
         }
         ViewerMessage::ToggleTranslateBubbles => {
             state.viewer_translate.show_bubbles = !state.viewer_translate.show_bubbles;
+            Task::none()
+        }
+        ViewerMessage::ToggleTranslateBubbleStyle => {
+            state.viewer_translate.frosted_bubbles = !state.viewer_translate.frosted_bubbles;
+            Task::none()
+        }
+        ViewerMessage::ToggleTranslateBlockOriginal(idx) => {
+            if !state.viewer_translate.show_original_indices.remove(&idx) {
+                state.viewer_translate.show_original_indices.insert(idx);
+            }
             Task::none()
         }
         ViewerMessage::SetTranslateFontScale(scale) => {
@@ -13275,6 +14659,7 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
         }
         ViewerMessage::SelectTranslateBlock(idx) => {
             state.viewer_translate.editing_block_idx = idx;
+            state.viewer_translate.result_card_visible = idx.is_some();
             Task::none()
         }
         ViewerMessage::UpdateTranslateBlockText(idx, text_val) => {
@@ -13285,6 +14670,7 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
                     b.translated = text_val;
                 }
             }
+            sync_translate_bubble_cache(state);
             Task::none()
         }
         ViewerMessage::MoveTranslateBlock(idx, dx, dy) => {
@@ -13292,6 +14678,7 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
                 b.x = (b.x + dx).max(0);
                 b.y = (b.y + dy).max(0);
             }
+            sync_translate_bubble_cache(state);
             Task::none()
         }
         ViewerMessage::RetryTranslateBlock(idx) => {
@@ -13301,6 +14688,8 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
             let Some(b) = state.viewer_translate.blocks.get(idx).cloned() else {
                 return Task::none();
             };
+            state.viewer_translate.last_was_region = true;
+            state.viewer_translate.pending_replace_idx = Some(idx);
             let target_lang = if state.viewer_translate.mode == ViewerTranslateMode::OcrOnly {
                 String::new()
             } else {
@@ -13322,8 +14711,202 @@ fn handle_viewer_translate_message(state: &mut PhotonGui, msg: ViewerMessage) ->
                 state.viewer_translate.blocks.remove(idx);
                 if state.viewer_translate.editing_block_idx == Some(idx) {
                     state.viewer_translate.editing_block_idx = None;
+                    state.viewer_translate.result_card_visible = false;
+                }
+                sync_translate_bubble_cache(state);
+            }
+            Task::none()
+        }
+        ViewerMessage::BeginDragTranslateBubble(idx) => {
+            if idx < state.viewer_translate.blocks.len() {
+                let start_cursor = state.last_cursor.unwrap_or(Point::ORIGIN);
+                state.translate_drag = TranslateDragTarget::Bubble {
+                    page_path: None,
+                    idx,
+                    start_cursor,
+                    dx_px: 0.0,
+                    dy_px: 0.0,
+                };
+                state.viewer_translate.active_drag_delta = Some((idx, [0.0, 0.0]));
+                state.viewer_translate.active_drag_page = None;
+                state.viewer_translate.editing_block_idx = Some(idx);
+                state.viewer_translate.result_card_visible = true;
+            }
+            Task::none()
+        }
+        ViewerMessage::BeginDragTranslatePageBubble(path, idx) => {
+            if let Some(cached) = state.viewer_translate.bubble_cache.get(&path).cloned()
+                && idx < cached.len()
+            {
+                let start_cursor = state.last_cursor.unwrap_or(Point::ORIGIN);
+                state.viewer_translate.blocks = cached;
+                state.viewer_translate.active_page_path = Some(path.clone());
+                state.viewer_translate.active_drag_page = Some(path.clone());
+                state.viewer_translate.active_drag_delta = Some((idx, [0.0, 0.0]));
+                state.viewer_translate.editing_block_idx = Some(idx);
+                state.viewer_translate.result_card_visible = true;
+                state.translate_drag = TranslateDragTarget::Bubble {
+                    page_path: Some(path),
+                    idx,
+                    start_cursor,
+                    dx_px: 0.0,
+                    dy_px: 0.0,
+                };
+            }
+            Task::none()
+        }
+        ViewerMessage::SelectTranslatePageBlock(path, idx) => {
+            if let Some(cached) = state.viewer_translate.bubble_cache.get(&path).cloned()
+                && idx < cached.len()
+            {
+                state.viewer_translate.blocks = cached;
+                state.viewer_translate.active_page_path = Some(path);
+                state.viewer_translate.editing_block_idx = Some(idx);
+                state.viewer_translate.result_card_visible = true;
+            }
+            Task::none()
+        }
+        ViewerMessage::ToggleTranslatePageBlockOriginal(path, idx) => {
+            let key = (path, idx);
+            if !state
+                .viewer_translate
+                .show_original_page_blocks
+                .remove(&key)
+            {
+                state.viewer_translate.show_original_page_blocks.insert(key);
+            }
+            Task::none()
+        }
+        ViewerMessage::RetryTranslatePageBlock(path, idx) => {
+            let Some(b) = state
+                .viewer_translate
+                .bubble_cache
+                .get(&path)
+                .and_then(|v| v.get(idx))
+                .cloned()
+            else {
+                return Task::none();
+            };
+            state.viewer_translate.active_page_path = Some(path.clone());
+            state.viewer_translate.last_was_region = true;
+            state.viewer_translate.pending_replace_idx = Some(idx);
+            state.active_translate_target = Some(path.clone());
+            let target_lang = if state.viewer_translate.mode == ViewerTranslateMode::OcrOnly {
+                String::new()
+            } else {
+                state.viewer_translate.target_lang.clone()
+            };
+            dispatch_to_core(
+                state.core.clone(),
+                Command::ViewerTranslate {
+                    path,
+                    source_lang: state.viewer_translate.source_lang.clone(),
+                    target_lang,
+                    region: Some([b.x.max(0), b.y.max(0), b.w.max(8), b.h.max(8)]),
+                    ocr_engine: state.viewer_translate.ocr_engine.as_str().to_owned(),
+                },
+            )
+        }
+        ViewerMessage::RemoveTranslatePageBlock(path, idx) => {
+            if let Some(cached) = state.viewer_translate.bubble_cache.get_mut(&path)
+                && idx < cached.len()
+            {
+                cached.remove(idx);
+                if state.viewer_translate.active_page_path.as_deref() == Some(path.as_str()) {
+                    state.viewer_translate.blocks = cached.clone();
+                    if state.viewer_translate.editing_block_idx == Some(idx) {
+                        state.viewer_translate.editing_block_idx = None;
+                        state.viewer_translate.result_card_visible = false;
+                    }
                 }
             }
+            Task::none()
+        }
+        ViewerMessage::WebtoonHoverPage {
+            path,
+            local_pos,
+            disp_w,
+            disp_h,
+        } => {
+            state.webtoon_hover = Some((path.clone(), local_pos, disp_w, disp_h));
+            if let Some(drag) = &mut state.webtoon_marquee_drag
+                && drag.path == path
+            {
+                drag.cur_local = local_pos;
+                let x = drag.start_local[0].min(local_pos[0]);
+                let y = drag.start_local[1].min(local_pos[1]);
+                let w = (drag.start_local[0] - local_pos[0]).abs();
+                let h = (drag.start_local[1] - local_pos[1]).abs();
+                state.viewer_translate.webtoon_marquee = Some((path, [x, y, w, h]));
+            }
+            Task::none()
+        }
+        ViewerMessage::BeginWebtoonTranslateRegion {
+            path,
+            disp_w,
+            disp_h,
+        } => {
+            let start_local = state
+                .webtoon_hover
+                .as_ref()
+                .filter(|(p, _, _, _)| p == &path)
+                .map(|(_, pos, _, _)| *pos)
+                .unwrap_or([0.0, 0.0]);
+            state.webtoon_marquee_drag = Some(WebtoonMarqueeDrag {
+                path: path.clone(),
+                start_local,
+                cur_local: start_local,
+                start_cursor: state.last_cursor.unwrap_or(Point::ORIGIN),
+                disp_w,
+                disp_h,
+            });
+            state.viewer_translate.webtoon_marquee =
+                Some((path, [start_local[0], start_local[1], 0.0, 0.0]));
+            Task::none()
+        }
+        ViewerMessage::BeginDragTranslateTopBar => {
+            let start_cursor = state.last_cursor.unwrap_or(Point::ORIGIN);
+            state.translate_drag = TranslateDragTarget::TopBar {
+                start_cursor,
+                base_offset: state.viewer_translate.top_bar_offset,
+            };
+            Task::none()
+        }
+        ViewerMessage::BeginDragTranslateResultCard => {
+            let start_cursor = state.last_cursor.unwrap_or(Point::ORIGIN);
+            state.translate_drag = TranslateDragTarget::ResultCard {
+                start_cursor,
+                base_offset: state.viewer_translate.result_card_offset,
+            };
+            Task::none()
+        }
+        ViewerMessage::ResetTranslateTopBarPos => {
+            state.viewer_translate.top_bar_offset = [0.0, 0.0];
+            Task::none()
+        }
+        ViewerMessage::ResetTranslateResultCardPos => {
+            state.viewer_translate.result_card_offset = [0.0, 0.0];
+            Task::none()
+        }
+        ViewerMessage::DismissTranslateResultCard => {
+            state.viewer_translate.result_card_visible = false;
+            state.viewer_translate.editing_block_idx = None;
+            Task::none()
+        }
+        ViewerMessage::NextTranslateBubble => {
+            let len = state.viewer_translate.blocks.len();
+            if len > 0 {
+                let next = match state.viewer_translate.editing_block_idx {
+                    Some(i) => (i + 1) % len,
+                    None => 0,
+                };
+                state.viewer_translate.editing_block_idx = Some(next);
+                state.viewer_translate.result_card_visible = true;
+            }
+            Task::none()
+        }
+        ViewerMessage::ToggleTranslateResultCardOriginal(show_orig) => {
+            state.viewer_translate.result_card_show_original = show_orig;
             Task::none()
         }
         ViewerMessage::SaveTranslationSidecar => {
@@ -13813,19 +15396,12 @@ fn copy_image_png_to_clipboard(
 }
 
 fn reveal_path_in_folder(path: &str) {
-    use std::process::{Command as ProcessCommand, Stdio};
-
     let p = Path::new(path);
     let target_dir = p
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let _ = ProcessCommand::new("xdg-open")
-        .arg(target_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    xdg_open(target_dir);
 }
 
 fn canonicalize_path_str(raw: &str) -> PathBuf {
@@ -13842,6 +15418,198 @@ fn spawn_detached_exe(args: &[String]) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     let _ = cmd.spawn();
+}
+
+fn browser_dir_for_state(state: &PhotonGui) -> Option<String> {
+    state
+        .snapshot
+        .meta
+        .viewer_archive
+        .as_ref()
+        .and_then(|arch| {
+            Path::new(&arch.container_path)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+        })
+        .or_else(|| {
+            state.snapshot.meta.viewer_path.as_deref().and_then(|p| {
+                Path::new(p)
+                    .parent()
+                    .map(|d| d.to_string_lossy().into_owned())
+            })
+        })
+        .or_else(|| {
+            state
+                .snapshot
+                .meta
+                .editor
+                .as_ref()
+                .and_then(|d| (!d.path.is_empty()).then_some(d.path.as_str()))
+                .and_then(|p| {
+                    Path::new(p)
+                        .parent()
+                        .map(|d| d.to_string_lossy().into_owned())
+                })
+        })
+        .or_else(|| {
+            state
+                .snapshot
+                .meta
+                .editor_unsupported
+                .as_ref()
+                .and_then(|u| {
+                    Path::new(&u.path)
+                        .parent()
+                        .map(|d| d.to_string_lossy().into_owned())
+                })
+        })
+        .or_else(|| state.snapshot.meta.current_folder.clone())
+        .filter(|dir| !dir.is_empty())
+}
+
+fn forward_or_spawn_browser(browse_dir: Option<String>) -> Task<Message> {
+    if !is_standalone_viewer() && !is_standalone_editor() {
+        return Task::none();
+    }
+    Task::perform(
+        async move {
+            let app_paths = photon_storage::AppPaths::current();
+            if app_paths.socket_path.exists() {
+                let env = Envelope::new(
+                    format!("gui-{}", std::process::id()),
+                    ClientKind::Gui,
+                    Command::SetWorkspace {
+                        workspace: Workspace::Browser,
+                    },
+                );
+                if photon_ipc::send_once(
+                    &app_paths.socket_path,
+                    &photon_ipc::IpcRequest::Dispatch { envelope: env },
+                )
+                .await
+                .is_ok()
+                {
+                    let focus_env = Envelope::new(
+                        format!("gui-{}", std::process::id()),
+                        ClientKind::Gui,
+                        Command::FocusWindow,
+                    );
+                    let _ = photon_ipc::send_once(
+                        &app_paths.socket_path,
+                        &photon_ipc::IpcRequest::Dispatch {
+                            envelope: focus_env,
+                        },
+                    )
+                    .await;
+                    return;
+                }
+            }
+            if let Some(dir) = browse_dir {
+                spawn_detached_exe(&["browse".to_owned(), dir]);
+            } else {
+                spawn_detached_exe(&["browse".to_owned()]);
+            }
+        },
+        |()| Message::Noop,
+    )
+}
+
+fn open_editor_doc_in_viewer(state: &PhotonGui) -> Task<Message> {
+    let target = state
+        .snapshot
+        .meta
+        .editor
+        .as_ref()
+        .and_then(|d| (!d.path.is_empty()).then(|| d.path.clone()))
+        .or_else(|| {
+            state
+                .snapshot
+                .meta
+                .editor_unsupported
+                .as_ref()
+                .map(|u| u.path.clone())
+        })
+        .or_else(|| state.snapshot.meta.viewer_path.clone());
+    if let Some(path) = target {
+        open_or_focus_viewer_process(vec![path])
+    } else {
+        Task::none()
+    }
+}
+
+fn forward_or_spawn_editor_only() -> Task<Message> {
+    if is_standalone_editor() {
+        return Task::none();
+    }
+    Task::perform(
+        async move {
+            let app_paths = photon_storage::AppPaths::current();
+            let editor_sock = app_paths.editor_socket_path();
+            if editor_sock.exists() {
+                let focus_env = Envelope::new(
+                    format!("gui-{}", std::process::id()),
+                    ClientKind::Gui,
+                    Command::FocusWindow,
+                );
+                if photon_ipc::send_once(
+                    &editor_sock,
+                    &photon_ipc::IpcRequest::Dispatch {
+                        envelope: focus_env,
+                    },
+                )
+                .await
+                .is_ok()
+                {
+                    return;
+                }
+            }
+            spawn_detached_exe(&["edit".to_owned()]);
+        },
+        |()| Message::Noop,
+    )
+}
+
+fn switch_workspace_from_standalone_viewer(
+    state: &PhotonGui,
+    target_ws: Workspace,
+) -> Task<Message> {
+    match target_ws {
+        Workspace::Browser | Workspace::Viewer => {
+            forward_or_spawn_browser(browser_dir_for_state(state))
+        }
+        Workspace::Editor => {
+            if let Some(path) = state.snapshot.meta.viewer_path.clone() {
+                open_in_editor_or_forward(state, path)
+            } else {
+                forward_or_spawn_editor_only()
+            }
+        }
+    }
+}
+
+async fn main_instance_is_viewing_path(socket_path: &Path, canon: &Path) -> bool {
+    if !socket_path.exists() {
+        return false;
+    }
+    let Ok(photon_ipc::IpcResponse::Query { data }) = photon_ipc::send_once(
+        socket_path,
+        &photon_ipc::IpcRequest::Query {
+            query: Query::State,
+        },
+    )
+    .await
+    else {
+        return false;
+    };
+    let ws = data
+        .get("meta")
+        .and_then(|m| m.get("workspace"))
+        .and_then(|v| v.as_str());
+    let vp = data
+        .get("meta")
+        .and_then(|m| m.get("viewerPath"))
+        .and_then(|v| v.as_str());
+    ws == Some("viewer") && vp.is_some_and(|p| canonicalize_path_str(p) == canon)
 }
 
 fn open_or_focus_viewer_process(paths: Vec<String>) -> Task<Message> {
@@ -13871,6 +15639,19 @@ fn open_or_focus_viewer_process(paths: Vec<String>) -> Task<Message> {
                     .await;
                     continue;
                 }
+                if main_instance_is_viewing_path(&app_paths.socket_path, &canon).await {
+                    let env = Envelope::new(
+                        format!("gui-{}", std::process::id()),
+                        ClientKind::Gui,
+                        Command::FocusWindow,
+                    );
+                    let _ = photon_ipc::send_once(
+                        &app_paths.socket_path,
+                        &photon_ipc::IpcRequest::Dispatch { envelope: env },
+                    )
+                    .await;
+                    continue;
+                }
                 spawn_detached_exe(&["--viewer-window".to_owned(), raw]);
                 // Hold the per-path lock briefly until the child registers so rapid double-clicks
                 // deduplicate against the new process instead of racing a duplicate window.
@@ -13888,20 +15669,24 @@ fn open_or_focus_viewer_process(paths: Vec<String>) -> Task<Message> {
 }
 
 fn open_in_editor_or_forward(state: &PhotonGui, path: String) -> Task<Message> {
-    if !is_standalone_viewer() {
-        return dispatch_to_core(state.core.clone(), Command::EditorOpen { path });
+    if is_standalone_editor() {
+        return dispatch_to_core(
+            state.core.clone(),
+            Command::OpenInEditorOrUnsupported { path },
+        );
     }
     Task::perform(
         async move {
             let app_paths = photon_storage::AppPaths::current();
+            let editor_sock = app_paths.editor_socket_path();
             let env = Envelope::new(
                 format!("gui-{}", std::process::id()),
                 ClientKind::Gui,
-                Command::EditorOpen { path: path.clone() },
+                Command::OpenInEditorOrUnsupported { path: path.clone() },
             );
-            if app_paths.socket_path.exists()
+            if editor_sock.exists()
                 && photon_ipc::send_once(
-                    &app_paths.socket_path,
+                    &editor_sock,
                     &photon_ipc::IpcRequest::Dispatch { envelope: env },
                 )
                 .await
@@ -13913,7 +15698,7 @@ fn open_in_editor_or_forward(state: &PhotonGui, path: String) -> Task<Message> {
                     Command::FocusWindow,
                 );
                 let _ = photon_ipc::send_once(
-                    &app_paths.socket_path,
+                    &editor_sock,
                     &photon_ipc::IpcRequest::Dispatch {
                         envelope: focus_env,
                     },
@@ -14038,17 +15823,30 @@ mod tests {
     #[test]
     fn dialog_defaults_cover_curves_denoise_and_plugins() {
         let curves = default_window_state_for(DesktopDialogId::AdjustCurves);
-        assert_eq!(curves.width, 460.0);
-        assert_eq!(curves.height, 520.0);
-        assert_eq!(curves.min_width, 380.0);
-        assert_eq!(curves.min_height, 440.0);
+        assert_eq!(curves.width, 480.0);
+        assert_eq!(curves.height, 560.0);
+        assert_eq!(curves.min_width, 400.0);
+        assert_eq!(curves.min_height, 480.0);
 
         let plugins = default_window_state_for(DesktopDialogId::ManagePlugins);
-        assert_eq!(plugins.width, 640.0);
-        assert_eq!(plugins.height, 480.0);
+        assert_eq!(plugins.width, 680.0);
+        assert_eq!(plugins.height, 520.0);
+        assert_eq!(plugins.min_width, 580.0);
 
         let denoise = default_window_state_for(DesktopDialogId::AdjustDenoise);
         assert_eq!(denoise.width, 440.0);
+    }
+
+    #[test]
+    fn translate_lang_swap_maps_tesseract_and_iso_codes() {
+        assert_eq!(tesseract_to_iso("eng"), "en");
+        assert_eq!(tesseract_to_iso("jpn_vert"), "ja");
+        assert_eq!(tesseract_to_iso("chi_sim"), "zh-CN");
+        assert_eq!(tesseract_to_iso("eng+jpn"), "en");
+        assert_eq!(iso_to_tesseract("vi"), "vie");
+        assert_eq!(iso_to_tesseract("ja"), "jpn");
+        assert_eq!(iso_to_tesseract("zh-CN"), "chi_sim");
+        assert_eq!(iso_to_tesseract("en"), "eng");
     }
 
     #[test]
@@ -14080,5 +15878,94 @@ mod tests {
             error: None,
         };
         assert_eq!(dialog_id_for_in_app(&dlg), DesktopDialogId::CanvasSize);
+    }
+
+    #[test]
+    fn new_document_dialog_defaults_and_background_presets() {
+        let state = default_window_state_for(DesktopDialogId::NewDocument);
+        assert_eq!(state.width, 480.0);
+        assert_eq!(state.height, 460.0);
+        let dlg = InAppDialog::NewDocument {
+            dims: DimensionInputState::from_dims(1920, 1080),
+            background: NewDocBackground::White,
+            custom_rgb: [12, 34, 56],
+            error: None,
+        };
+        assert_eq!(dialog_id_for_in_app(&dlg), DesktopDialogId::NewDocument);
+        assert_eq!(NewDocBackground::Transparent.to_rgba(), [0, 0, 0, 0]);
+        assert_eq!(NewDocBackground::White.to_rgba(), [255, 255, 255, 255]);
+        assert_eq!(NewDocBackground::Black.to_rgba(), [0, 0, 0, 255]);
+        assert_eq!(
+            NewDocBackground::Custom([12, 34, 56]).to_rgba(),
+            [12, 34, 56, 255]
+        );
+    }
+
+    #[test]
+    fn translate_drag_target_inverse_rotation_and_scale() {
+        assert_eq!(TranslateDragTarget::default(), TranslateDragTarget::None);
+        // Scale 2.0 (drawn 2x image): +20 screen px => +10 image px at 0 turns.
+        assert_eq!(screen_delta_to_image_delta(20.0, -10.0, 2.0, 0), (10, -5));
+        // 90 deg CW: screen +dx => -dy_img, screen +dy => +dx_img
+        assert_eq!(screen_delta_to_image_delta(20.0, 10.0, 2.0, 1), (5, -10));
+        // 180 deg: screen +dx => -dx_img, screen +dy => -dy_img
+        assert_eq!(screen_delta_to_image_delta(20.0, 10.0, 2.0, 2), (-10, -5));
+        // 270 deg CW: screen +dx => +dy_img, screen +dy => -dx_img
+        assert_eq!(screen_delta_to_image_delta(20.0, 10.0, 2.0, 3), (-5, 10));
+    }
+
+    #[test]
+    fn archive_thumbnail_window_indices_centers_and_orders_outward() {
+        let win = archive_thumbnail_window_indices(120, 50, 2, 3);
+        assert_eq!(win, vec![50, 51, 49, 52, 48, 53]);
+        let start = archive_thumbnail_window_indices(120, 0, 10, 18);
+        assert_eq!(start.first(), Some(&0));
+        assert_eq!(start.len(), 19);
+        assert!(start.iter().all(|&i| i < 19));
+        assert!(archive_thumbnail_window_indices(0, 0, 10, 18).is_empty());
+    }
+
+    #[test]
+    fn resolve_double_marquee_region_splits_left_and_right_pages() {
+        // Left (800x1000), Right (1200x1500), gap 10 -> target_h=1500, left_disp_w=1200, gap_doc=16.67, right_disp_w=1200
+        let left = resolve_double_marquee_region(
+            [150.0, 300.0, 300.0, 150.0],
+            Some("/tmp/left.png"),
+            (800, 1000),
+            Some("/tmp/right.png"),
+            Some((1200, 1500)),
+            10.0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(left.0, "/tmp/left.png");
+        assert_eq!(left.1, [100, 200, 200, 100]);
+
+        let right = resolve_double_marquee_region(
+            [1317.0, 300.0, 200.0, 100.0],
+            Some("/tmp/left.png"),
+            (800, 1000),
+            Some("/tmp/right.png"),
+            Some((1200, 1500)),
+            10.0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(right.0, "/tmp/right.png");
+        assert_eq!(right.1[1], 300);
+        assert_eq!(right.1[2], 200);
+    }
+
+    #[test]
+    fn window_app_ids_are_distinct_per_mode() {
+        let browser = window_app_id_for(false, false);
+        let editor = window_app_id_for(false, true);
+        let viewer = window_app_id_for(true, false);
+        assert_eq!(browser, "io.github.tienv2i.Photon");
+        assert_eq!(editor, "io.github.tienv2i.Photon.Editor");
+        assert_eq!(viewer, "io.github.tienv2i.Photon.Viewer");
+        assert_ne!(browser, editor);
+        assert_ne!(browser, viewer);
+        assert_ne!(editor, viewer);
     }
 }

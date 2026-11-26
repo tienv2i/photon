@@ -119,6 +119,8 @@ pub enum Icon {
     Denoise,
     Cut,
     Paste,
+    BookOpen,
+    PanelsTopLeft,
 }
 
 impl Icon {
@@ -466,6 +468,12 @@ impl Icon {
             Self::Paste => {
                 r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M9 12h6M9 16h4"/></svg>"##
             }
+            Self::BookOpen => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>"##
+            }
+            Self::PanelsTopLeft => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>"##
+            }
         }
     }
 }
@@ -531,6 +539,8 @@ mod tests {
             Icon::Copy,
             Icon::Cut,
             Icon::Paste,
+            Icon::BookOpen,
+            Icon::PanelsTopLeft,
         ];
         for icon in new_and_core_icons {
             let src = icon.svg_source();

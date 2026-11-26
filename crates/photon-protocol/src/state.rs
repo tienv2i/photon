@@ -151,6 +151,26 @@ pub enum TaskRunStatus {
     Failed,
 }
 
+/// Active paged archive (`.cbz`/`.zip`) or `.pdf` session metadata for Viewer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveViewerSessionMeta {
+    pub container_path: String,
+    pub kind: String,
+    pub page_count: usize,
+    pub page_labels: Vec<String>,
+}
+
+/// Metadata published when Editor is switched to an unsupported or undecodable file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsupportedEditorFile {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<String>,
+    pub reason: String,
+}
+
 /// Lightweight state snapshot excluding folder listing (`entries`, `viewerImages`).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -208,6 +228,12 @@ pub struct UiStateMeta {
     pub editor_caption: Option<String>,
     #[serde(default)]
     pub has_pixel_clipboard: bool,
+    #[serde(default)]
+    pub viewer_archive: Option<ArchiveViewerSessionMeta>,
+    #[serde(default)]
+    pub editor_unsupported: Option<UnsupportedEditorFile>,
+    #[serde(default)]
+    pub editor_source_is_virtual: bool,
 }
 
 /// Full state snapshot returned by `Query::State`.

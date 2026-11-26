@@ -39,7 +39,7 @@ use photon_ui::theme::{
     PaletteTokens, RADIUS_SM, TEXT_SIZE_CAPTION, TEXT_SIZE_CONTROL, canvas_backdrop_style,
     hairline_rule_style, input_style, slider_style,
 };
-use photon_ui::toolbar::{WorkspaceTab, toolbar, workspace_switcher_responsive};
+use photon_ui::toolbar::toolbar;
 use photon_ui::{TooltipPosition, with_tooltip, with_tooltip_pos};
 
 pub mod panel_splitter;
@@ -48,7 +48,6 @@ use iced::widget::container as iced_container;
 use iced::widget::image as iced_image;
 use photon_panels::SidebarOrderState;
 use photon_protocol::UiStateSnapshot;
-use photon_ui::toolbar::workspace_switcher_mode;
 use std::collections::{BTreeMap, HashMap};
 
 use panel_splitter::{DockSplitterKind, dock_splitter_handle, editor_vertical_splitter};
@@ -115,6 +114,8 @@ pub enum EditorMessage {
     ToggleWorkspacePanels,
     RequestEditorLeaveToBrowser,
     RequestEditorLeave { close_editor: bool },
+    OpenBrowserWindow,
+    OpenViewerWindow,
     Canvas(photon_canvas::CanvasEvent),
     CloseDialog,
     OpenExportDialog,
@@ -262,6 +263,9 @@ pub enum EditorMessage {
     AiRunCaption,
     AiSaveCaption(String),
     OpenPluginModels(String),
+    OpenNewDocumentDialog,
+    OpenExternally(String),
+    OpenFileDialog,
 }
 use photon_canvas::{CanvasTool, ImageCanvasProgram, default_viewport_bg_rgb};
 
@@ -1294,47 +1298,113 @@ pub fn build_editor_toolbar<'a>(
     .spacing(8)
     .align_y(Alignment::Center);
 
-    let switcher = workspace_switcher_responsive(
-        vec![
-            WorkspaceTab::new(
-                tr(lang, "workspace-browser"),
-                Icon::Browser,
-                false,
-                EditorMessage::RequestEditorLeaveToBrowser,
-            )
-            .tooltip(tr(lang, "tooltip-workspace-browser")),
-            WorkspaceTab::new(
-                tr(lang, "workspace-viewer"),
-                Icon::Viewer,
-                false,
-                EditorMessage::RequestEditorLeave {
-                    close_editor: false,
-                },
-            )
-            .tooltip(tr(lang, "tooltip-workspace-viewer")),
-            WorkspaceTab::new(
-                tr(lang, "workspace-editor"),
-                Icon::Editor,
-                true,
-                EditorMessage::Noop,
-            )
-            .tooltip(tr(lang, "tooltip-workspace-editor")),
-        ],
-        workspace_switcher_mode(state.window_size.width),
-        state.active_menu == Some(EditorMenuKind::WorkspaceSwitcher),
-        Some(EditorMessage::ToggleMenu(EditorMenuKind::WorkspaceSwitcher)),
-    );
-
-    let right = row![switcher, toolbar_divider(), right_utilities]
-        .spacing(8)
-        .align_y(Alignment::Center);
-
-    toolbar(left, right)
+    toolbar(left, right_utilities)
 }
 
 pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMessage> {
     let lang = state.snapshot.meta.language;
     let dark = state.snapshot.meta.theme == Theme::Dark;
+    if let Some(info) = &state.snapshot.meta.editor_unsupported {
+        let name = std::path::Path::new(&info.path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(info.path.as_str())
+            .to_owned();
+        let ext_label = info
+            .extension
+            .as_deref()
+            .map(str::to_ascii_uppercase)
+            .unwrap_or_else(|| "FILE".to_owned());
+        let mut actions = row![
+            button::labeled(
+                tr(lang, "action-new-canvas"),
+                Some(Icon::Plus),
+                ButtonVariant::Primary,
+                Some(EditorMessage::OpenNewDocumentDialog),
+            ),
+            button::labeled(
+                tr(lang, "action-open-system"),
+                Some(Icon::Globe),
+                ButtonVariant::Secondary,
+                Some(EditorMessage::OpenExternally(info.path.clone())),
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        actions = actions.push(button::labeled(
+            tr(lang, "action-back-to-viewer"),
+            Some(Icon::Viewer),
+            ButtonVariant::Secondary,
+            Some(EditorMessage::OpenViewerWindow),
+        ));
+        actions = actions.push(button::labeled(
+            tr(lang, "action-back-to-browser"),
+            Some(Icon::Browser),
+            ButtonVariant::Ghost,
+            Some(EditorMessage::OpenBrowserWindow),
+        ));
+
+        return container(
+            container(
+                column![
+                    photon_ui::icons::render(Icon::Info, 36.0, None),
+                    text(tr(lang, "editor-unsupported-title")).size(16),
+                    row![
+                        text(name).size(13),
+                        container(text(ext_label).size(11))
+                            .padding([2, 6])
+                            .style(|theme| {
+                                let t = PaletteTokens::for_theme(theme);
+                                container::Style {
+                                    background: Some(t.bg_hover.into()),
+                                    border: iced::Border {
+                                        radius: RADIUS_SM.into(),
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                }
+                            }),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                    text(tr(lang, "editor-unsupported-desc"))
+                        .size(12)
+                        .style(|theme| {
+                            let t = PaletteTokens::for_theme(theme);
+                            text::Style {
+                                color: Some(t.text_muted),
+                            }
+                        }),
+                    text(info.reason.clone()).size(12).style(|theme| {
+                        let t = PaletteTokens::for_theme(theme);
+                        text::Style {
+                            color: Some(t.text_muted),
+                        }
+                    }),
+                    actions,
+                ]
+                .spacing(10)
+                .align_x(Alignment::Center),
+            )
+            .padding([24, 28])
+            .style(|theme| {
+                let t = PaletteTokens::for_theme(theme);
+                container::Style {
+                    background: Some(t.bg_surface.into()),
+                    border: iced::Border {
+                        radius: RADIUS_SM.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            }),
+        )
+        .center_x(Fill)
+        .center_y(Fill)
+        .style(canvas_backdrop_style)
+        .into();
+    }
+
     let Some(ed) = &state.snapshot.meta.editor else {
         return container(
             column![
@@ -1345,8 +1415,24 @@ pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMe
                         color: Some(t.text_muted),
                     }
                 }),
+                row![
+                    button::labeled(
+                        tr(lang, "action-new-canvas"),
+                        Some(Icon::Plus),
+                        ButtonVariant::Primary,
+                        Some(EditorMessage::OpenNewDocumentDialog),
+                    ),
+                    button::labeled(
+                        tr(lang, "action-open-file-dialog"),
+                        Some(Icon::FolderOpen),
+                        ButtonVariant::Secondary,
+                        Some(EditorMessage::OpenFileDialog),
+                    ),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
             ]
-            .spacing(10)
+            .spacing(12)
             .align_x(Alignment::Center),
         )
         .center_x(Fill)

@@ -71,6 +71,14 @@ fn google_sl_for(tess_lang: &str) -> &'static str {
         "chi_tra" => "zh-TW",
         "kor" => "ko",
         "vie" => "vi",
+        "fra" => "fr",
+        "deu" => "de",
+        "spa" => "es",
+        "rus" => "ru",
+        "ita" => "it",
+        "por" => "pt",
+        "ara" => "ar",
+        "tha" => "th",
         _ => "auto",
     }
 }
@@ -110,8 +118,8 @@ fn google_translate(text: &str, sl: &str, tl: &str) -> Result<String, String> {
         return Err(format!("Google Translate request failed: {}", err.trim()));
     }
     let body = String::from_utf8_lossy(&output.stdout);
-    let parsed: Value =
-        serde_json::from_str(&body).map_err(|e| format!("invalid Google Translate response: {e}"))?;
+    let parsed: Value = serde_json::from_str(&body)
+        .map_err(|e| format!("invalid Google Translate response: {e}"))?;
 
     let mut translated = String::new();
     if let Some(sentences) = parsed.get(0).and_then(Value::as_array) {
@@ -208,7 +216,11 @@ fn run_tesseract_args(
     cmd
 }
 
-fn ocr_crop_file(img_path: &Path, lang: &str, models_dir: &str) -> Result<String, (String, String)> {
+fn ocr_crop_file(
+    img_path: &Path,
+    lang: &str,
+    models_dir: &str,
+) -> Result<String, (String, String)> {
     let ocr_out = run_tesseract_args(img_path, lang, models_dir, false, true)
         .output()
         .map_err(|e| {
@@ -292,7 +304,10 @@ fn run_translate(req: &Request) -> Result<Value, (String, String)> {
         let cw = (rw.max(1) as u32).min(img.width().saturating_sub(cx));
         let ch = (rh.max(1) as u32).min(img.height().saturating_sub(cy));
         if cw == 0 || ch == 0 {
-            return Err(("invalid_region".to_owned(), "empty selection region".to_owned()));
+            return Err((
+                "invalid_region".to_owned(),
+                "empty selection region".to_owned(),
+            ));
         }
 
         let cropped = imageops::crop_imm(&img, cx, cy, cw, ch).to_image();
@@ -330,9 +345,13 @@ fn run_translate(req: &Request) -> Result<Value, (String, String)> {
             ));
         }
 
-        emit_progress(&req.id, 75, "Translating with Google Translate…");
-        let translated = google_translate(&original, sl, target_lang)
-            .map_err(|e| ("translate_failed".to_owned(), e))?;
+        let translated = if target_lang.trim().is_empty() {
+            String::new()
+        } else {
+            emit_progress(&req.id, 75, "Translating with Google Translate…");
+            google_translate(&original, sl, target_lang)
+                .map_err(|e| ("translate_failed".to_owned(), e))?
+        };
 
         let block = TranslationBlock {
             x: cx as i32,
@@ -359,7 +378,12 @@ fn run_translate(req: &Request) -> Result<Value, (String, String)> {
     emit_progress(&req.id, 30, &format!("Scanning full page ({src_lang})…"));
     let tsv_out = run_tesseract_args(input_path, src_lang, models_dir, true, false)
         .output()
-        .map_err(|e| ("tesseract_missing".to_owned(), format!("cannot run tesseract: {e}")))?;
+        .map_err(|e| {
+            (
+                "tesseract_missing".to_owned(),
+                format!("cannot run tesseract: {e}"),
+            )
+        })?;
     if !tsv_out.status.success() {
         let err = String::from_utf8_lossy(&tsv_out.stderr);
         return Err((
@@ -413,19 +437,36 @@ fn run_translate(req: &Request) -> Result<Value, (String, String)> {
     let mut blocks = Vec::new();
     let mut all_orig = Vec::new();
     let mut all_trans = Vec::new();
+    let mut any_trans_ok = false;
+    let mut last_trans_err: Option<String> = None;
+    let skip_translate = target_lang.trim().is_empty();
 
     for (idx, (_, (x1, y1, x2, y2, words))) in groups.into_iter().enumerate() {
         let orig = words.join(" ");
-        let pct = 45 + (((idx + 1) as f32 / total as f32) * 50.0) as u8;
-        emit_progress(
-            &req.id,
-            pct.min(95),
-            &format!("Translating block {}/{total}…", idx + 1),
-        );
-        let trans = google_translate(&orig, sl, target_lang)
-            .map_err(|e| ("translate_failed".to_owned(), e))?;
+        let trans = if skip_translate {
+            String::new()
+        } else {
+            let pct = 45 + (((idx + 1) as f32 / total as f32) * 50.0) as u8;
+            emit_progress(
+                &req.id,
+                pct.min(95),
+                &format!("Translating block {}/{total}…", idx + 1),
+            );
+            match google_translate(&orig, sl, target_lang) {
+                Ok(t) => {
+                    any_trans_ok = true;
+                    t
+                }
+                Err(err) => {
+                    last_trans_err = Some(err);
+                    String::new()
+                }
+            }
+        };
         all_orig.push(orig.clone());
-        all_trans.push(trans.clone());
+        if !trans.is_empty() {
+            all_trans.push(trans.clone());
+        }
         blocks.push(TranslationBlock {
             x: x1,
             y: y1,
@@ -434,6 +475,13 @@ fn run_translate(req: &Request) -> Result<Value, (String, String)> {
             original: orig,
             translated: trans,
         });
+    }
+
+    if !skip_translate && !blocks.is_empty() && !any_trans_ok {
+        return Err((
+            "translate_failed".to_owned(),
+            last_trans_err.unwrap_or_else(|| "Google Translate failed".to_owned()),
+        ));
     }
 
     Ok(json!({
@@ -460,7 +508,11 @@ fn main() {
         let req: Request = match serde_json::from_str(trimmed) {
             Ok(req) => req,
             Err(err) => {
-                emit_error("", "invalid_request", &format!("invalid JSON request: {err}"));
+                emit_error(
+                    "",
+                    "invalid_request",
+                    &format!("invalid JSON request: {err}"),
+                );
                 continue;
             }
         };
@@ -491,5 +543,21 @@ fn main() {
                 &format!("unsupported op '{other}'"),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn google_sl_maps_common_tesseract_codes() {
+        assert_eq!(google_sl_for("eng"), "en");
+        assert_eq!(google_sl_for("jpn_vert"), "ja");
+        assert_eq!(google_sl_for("fra"), "fr");
+        assert_eq!(google_sl_for("deu"), "de");
+        assert_eq!(google_sl_for("spa"), "es");
+        assert_eq!(google_sl_for("rus"), "ru");
+        assert_eq!(google_sl_for("unknown"), "auto");
     }
 }

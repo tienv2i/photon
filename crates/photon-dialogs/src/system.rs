@@ -13,11 +13,16 @@ pub struct FileFilter<'a> {
 
 /// Default raster & layered image formats supported by Photon.
 pub const IMAGE_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "jpe", "jfif", "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "ico", "pnm",
-    "pbm", "pgm", "ppm", "qoi", "tga", "hdr", "exr", "ora", "svg", "svgz", "apng", "pam", "dds",
-    "ff", "cur", "jxl", "psd", "heic", "heif", "dng", "cr2", "cr3", "nef", "arw", "raf", "orf",
-    "rw2",
+    "jpg", "jpeg", "jpe", "jfif", "png", "webp", "gif", "bmp", "tif", "tiff", "avif", "ico",
+    "icns", "pnm", "pbm", "pgm", "ppm", "qoi", "tga", "hdr", "exr", "ora", "kra", "svg", "svgz",
+    "apng", "pam", "dds", "ff", "cur", "jxl", "psd", "heic", "heif", "hif", "jp2", "j2k", "jpx",
+    "jpf", "dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2", "ari", "crm", "crw", "dcr",
+    "dcs", "erf", "iiq", "kdc", "mef", "mos", "mrw", "nrw", "ori", "pef", "raw", "rwl", "srw",
+    "3fr", "fff", "x3f", "qtk",
 ];
+
+/// Supported archive/document container extensions for open dialogs.
+pub const ARCHIVE_EXTENSIONS: &[&str] = &["cbz", "zip", "pdf"];
 
 /// Open a native OS directory picker dialog.
 pub async fn pick_folder(title: &str, starting_dir: Option<PathBuf>) -> Option<PathBuf> {
@@ -127,6 +132,14 @@ mod tests {
         assert!(IMAGE_EXTENSIONS.contains(&"psd"));
         assert!(IMAGE_EXTENSIONS.contains(&"jxl"));
         assert!(IMAGE_EXTENSIONS.contains(&"svg"));
+        assert!(IMAGE_EXTENSIONS.contains(&"jp2"));
+        assert!(IMAGE_EXTENSIONS.contains(&"j2k"));
+        assert!(IMAGE_EXTENSIONS.contains(&"jpx"));
+        assert!(IMAGE_EXTENSIONS.contains(&"jpf"));
+        assert!(IMAGE_EXTENSIONS.contains(&"heic"));
+        assert!(IMAGE_EXTENSIONS.contains(&"heif"));
+        assert!(IMAGE_EXTENSIONS.contains(&"hif"));
+        assert!(IMAGE_EXTENSIONS.contains(&"icns"));
     }
 
     #[test]

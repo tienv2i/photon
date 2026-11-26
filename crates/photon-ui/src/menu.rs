@@ -15,15 +15,62 @@ use crate::theme::{
 pub enum MenuEntry<'a, M> {
     Header(String),
     Item(MenuItem<'a, M>),
+    IconRow(Vec<MenuIconButton<'a, M>>),
     Separator,
 }
 
 impl<'a, M> MenuEntry<'a, M> {
-    pub fn map<N>(self, f: impl FnOnce(M) -> N) -> MenuEntry<'a, N> {
+    pub fn map<N>(self, mut f: impl FnMut(M) -> N) -> MenuEntry<'a, N> {
         match self {
             Self::Header(h) => MenuEntry::Header(h),
             Self::Item(item) => MenuEntry::Item(item.map(f)),
+            Self::IconRow(buttons) => {
+                MenuEntry::IconRow(buttons.into_iter().map(|b| b.map(&mut f)).collect())
+            }
             Self::Separator => MenuEntry::Separator,
+        }
+    }
+}
+
+pub struct MenuIconButton<'a, M> {
+    pub icon: Icon,
+    pub tooltip: String,
+    pub active: bool,
+    pub enabled: bool,
+    pub on_press: M,
+    _marker: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a, M> MenuIconButton<'a, M> {
+    pub fn new(icon: Icon, tooltip: impl Into<String>, on_press: M) -> Self {
+        Self {
+            icon,
+            tooltip: tooltip.into(),
+            active: false,
+            enabled: true,
+            on_press,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub fn map<N>(self, f: impl FnOnce(M) -> N) -> MenuIconButton<'a, N> {
+        MenuIconButton {
+            icon: self.icon,
+            tooltip: self.tooltip,
+            active: self.active,
+            enabled: self.enabled,
+            on_press: f(self.on_press),
+            _marker: std::marker::PhantomData,
         }
     }
 }
@@ -157,6 +204,7 @@ pub fn estimate_menu_height<M>(entries: &[MenuEntry<'_, M>]) -> f32 {
         match entry {
             MenuEntry::Header(_) => h += 22.0,
             MenuEntry::Item(_) => h += 31.0,
+            MenuEntry::IconRow(_) => h += 34.0,
             MenuEntry::Separator => h += 9.0,
         }
     }
@@ -188,6 +236,39 @@ pub fn menu_panel_entries<'a, M: Clone + 'a>(
             MenuEntry::Separator => {
                 col = col.push(
                     container(rule::horizontal(1).style(hairline_rule_style)).padding([3, 4]),
+                );
+            }
+            MenuEntry::IconRow(buttons) => {
+                let mut r = row![].spacing(4).align_y(Alignment::Center);
+                for btn in buttons {
+                    let el = crate::button::toolbar_icon(
+                        btn.icon,
+                        btn.active,
+                        btn.enabled.then_some(btn.on_press),
+                        Some(btn.tooltip),
+                    );
+                    r = r.push(
+                        container(el)
+                            .width(Length::FillPortion(1))
+                            .align_x(iced::alignment::Horizontal::Center),
+                    );
+                }
+                col = col.push(
+                    container(r)
+                        .padding([4, 6])
+                        .width(Length::Fill)
+                        .style(|theme| {
+                            let t = PaletteTokens::for_theme(theme);
+                            container::Style {
+                                background: Some(t.bg_surface.into()),
+                                border: Border {
+                                    radius: RADIUS_SM.into(),
+                                    width: 1.0,
+                                    color: t.border,
+                                },
+                                ..Default::default()
+                            }
+                        }),
                 );
             }
             MenuEntry::Item(item) => {
@@ -314,7 +395,8 @@ pub fn with_top_right_menu_at<'a, M: Clone + 'a>(
     ]
     .width(Length::Fill)
     .height(Length::Fill);
-    let positioned = container(menu.into())
+    let clamped_menu = opaque(scrollable(menu.into()).height(Length::Shrink));
+    let positioned = container(clamped_menu)
         .width(Length::Fill)
         .height(Length::Fill)
         .align_x(iced::alignment::Horizontal::Right)
@@ -361,7 +443,8 @@ pub fn with_anchored_menu<'a, M: Clone + 'a>(
     ]
     .width(Length::Fill)
     .height(Length::Fill);
-    let positioned = container(menu.into())
+    let clamped_menu = opaque(scrollable(menu.into()).height(Length::Shrink));
+    let positioned = container(clamped_menu)
         .width(Length::Fill)
         .height(Length::Fill)
         .align_x(iced::alignment::Horizontal::Left)
@@ -398,7 +481,8 @@ pub fn with_bottom_right_menu_at<'a, M: Clone + 'a>(
     )
     .on_press(on_dismiss.clone())
     .on_right_press(on_dismiss);
-    let positioned = container(menu.into())
+    let clamped_menu = opaque(scrollable(menu.into()).height(Length::Shrink));
+    let positioned = container(clamped_menu)
         .width(Length::Fill)
         .height(Length::Fill)
         .align_x(iced::alignment::Horizontal::Right)
@@ -587,5 +671,57 @@ mod tests {
             MenuEntry::Item(MenuItem::new("Disabled", ()).enabled(false)),
         ];
         assert_eq!(estimate_menu_height(&entries), 12.0 + 31.0 * 2.0 + 9.0);
+    }
+
+    #[test]
+    fn anchored_and_corner_menus_build_scrollable_opaque_overlays() {
+        let items: Vec<_> = (0..20)
+            .map(|i| MenuEntry::Item(MenuItem::new(format!("Item {i}"), ())))
+            .collect();
+        let _tr: Element<'_, ()> = with_top_right_menu_at(
+            Space::new(),
+            true,
+            16.0,
+            44.0,
+            menu_panel_entries(items, 220.0),
+            (),
+        );
+        let _tl: Element<'_, ()> =
+            with_anchored_menu(Space::new(), true, 12.0, 44.0, text("menu"), ());
+        let _br: Element<'_, ()> =
+            with_bottom_right_menu_at(Space::new(), true, 14.0, 60.0, text("menu"), ());
+    }
+
+    #[test]
+    fn icon_row_maps_estimates_height_and_renders() {
+        let entry: MenuEntry<'_, i32> = MenuEntry::IconRow(vec![
+            MenuIconButton::new(Icon::Check, "Single", 1).active(true),
+            MenuIconButton::new(Icon::Check, "Double", 2),
+            MenuIconButton::new(Icon::Check, "Manhwa", 3).enabled(false),
+        ]);
+
+        let mapped = entry.map(|v| format!("msg-{v}"));
+        match &mapped {
+            MenuEntry::IconRow(buttons) => {
+                assert_eq!(buttons.len(), 3);
+                assert_eq!(buttons[0].tooltip, "Single");
+                assert!(buttons[0].active);
+                assert!(buttons[0].enabled);
+                assert_eq!(buttons[0].on_press, "msg-1");
+                assert!(!buttons[1].active);
+                assert_eq!(buttons[1].on_press, "msg-2");
+                assert!(!buttons[2].enabled);
+                assert_eq!(buttons[2].on_press, "msg-3");
+            }
+            _ => panic!("expected MenuEntry::IconRow"),
+        }
+
+        let entries = vec![
+            MenuEntry::Header("Reader Mode".to_owned()),
+            mapped,
+            MenuEntry::Separator,
+        ];
+        assert_eq!(estimate_menu_height(&entries), 12.0 + 22.0 + 34.0 + 9.0);
+        let _panel: Element<'_, String> = menu_panel_entries(entries, 220.0);
     }
 }

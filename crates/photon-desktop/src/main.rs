@@ -199,7 +199,9 @@ fn main() {
             }
             return;
         }
-        let _ = std::fs::remove_file(&editor_sock);
+        // Stale socket files are reclaimed atomically by `bind_socket` after the
+        // launch lock is held; removing the path here could delete a live
+        // instance's socket while it is busy.
         if initial_cmd.is_none() {
             initial_cmd = Some(Command::SetWorkspace {
                 workspace: photon_protocol::Workspace::Editor,
@@ -236,7 +238,13 @@ fn main() {
     // near-simultaneous launches can never open duplicate windows.
     let mut _launch_lock: Option<LaunchLock> = None;
     let mut prebound_listener: Option<PreboundListener> = None;
-    if !standalone_viewer {
+    // Only singleton roles claim the runtime socket. `--new-window` and
+    // `--headless` use `DirectStart` and must remain able to start alongside
+    // an existing Browser/Editor.
+    if matches!(
+        route,
+        LaunchRoute::ForwardOrStartBrowser | LaunchRoute::StandaloneEditor
+    ) {
         let lock = match acquire_launch_lock(&socket_path, LAUNCH_LOCK_WAIT) {
             Ok(lock) => lock,
             Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {

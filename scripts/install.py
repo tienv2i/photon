@@ -22,6 +22,12 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PACKAGING = ROOT / "packaging" / "linux"
 APP_ID = "io.github.tienv2i.Photon"
+# Distinct taskbar/app-menu icons per process role (desktop entry `Icon=` names).
+ICON_ROLES = {
+    APP_ID: "browser",
+    f"{APP_ID}.Viewer": "viewer",
+    f"{APP_ID}.Editor": "editor",
+}
 ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
 
 # Exact MIME types matching image codecs decoded by `photon-image`.
@@ -147,12 +153,16 @@ def install_targets(prefix: pathlib.Path) -> dict[str, pathlib.Path]:
         "standalone viewer desktop": share / "applications" / f"{APP_ID}.Viewer.desktop",
         "editor desktop": share / "applications" / f"{APP_ID}.Editor.desktop",
         "metainfo": share / "metainfo" / f"{APP_ID}.metainfo.xml",
-        "icon svg": share / "icons" / "hicolor" / "scalable" / "apps" / f"{APP_ID}.svg",
     }
-    for edge in ICON_SIZES:
-        targets[f"icon {edge}"] = (
-            share / "icons" / "hicolor" / f"{edge}x{edge}" / "apps" / f"{APP_ID}.png"
+    icons_dir = share / "icons" / "hicolor"
+    for icon_name, role in ICON_ROLES.items():
+        targets[f"icon {role} svg"] = (
+            icons_dir / "scalable" / "apps" / f"{icon_name}.svg"
         )
+        for edge in ICON_SIZES:
+            targets[f"icon {role} {edge}"] = (
+                icons_dir / f"{edge}x{edge}" / "apps" / f"{icon_name}.png"
+            )
     return targets
 
 
@@ -255,15 +265,15 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
             print(res.stdout or res.stderr, file=sys.stderr)
             return res.returncode
 
-    svg_src = PACKAGING / f"{APP_ID}.svg"
     sources: dict[str, tuple[pathlib.Path, str]] = {
         "photonctl": (ctl_bin, "755"),
         "browser desktop": (browser_desktop, "644"),
         "standalone viewer desktop": (standalone_viewer_desktop, "644"),
         "editor desktop": (editor_desktop, "644"),
         "metainfo": (metainfo, "644"),
-        "icon svg": (svg_src, "644"),
     }
+    for icon_name, role in ICON_ROLES.items():
+        sources[f"icon {role} svg"] = (PACKAGING / f"{icon_name}.svg", "644")
 
     targets = install_targets(prefix)
     if dev:
@@ -281,10 +291,14 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
     else:
         sources["photon"] = (photon_bin, "755")
 
-    for edge in ICON_SIZES:
-        staged_png = stage / "icons" / f"{edge}x{edge}" / f"{APP_ID}.png"
-        if rasterise_svg(svg_src, edge, staged_png):
-            sources[f"icon {edge}"] = (staged_png, "644")
+    for icon_name, role in ICON_ROLES.items():
+        svg_src = PACKAGING / f"{icon_name}.svg"
+        for edge in ICON_SIZES:
+            staged_png = (
+                stage / "icons" / role / f"{edge}x{edge}" / f"{icon_name}.png"
+            )
+            if rasterise_svg(svg_src, edge, staged_png):
+                sources[f"icon {role} {edge}"] = (staged_png, "644")
 
     for key, (src, mode) in sources.items():
         dst = targets[key]
@@ -301,7 +315,7 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
 
     print(f"Installed Photon ({APP_ID}) into {prefix}:")
     for key, (src, _) in sources.items():
-        print(f"  {key:16} -> {targets[key]}")
+        print(f"  {key:22} -> {targets[key]}")
     print("Registered MIME handlers:")
     print(f"  Browser: {targets['browser desktop']} (Exec: photon %U)")
     print(

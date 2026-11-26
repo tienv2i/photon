@@ -29,14 +29,16 @@ modules:
   - name: photon
     buildsystem: simple
     build-options:
-      append-path: /usr/lib/sdk/rust-stable/bin
       build-args:
         - --share=network
       env:
         CARGO_HOME: /run/build/photon/.cargo
+        RUSTUP_HOME: /run/build/photon/.rustup
         CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: cc
         RUSTFLAGS: ""
     build-commands:
+      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+      - export PATH="/run/build/photon/.cargo/bin:$PATH"
       - cargo build --release -p photon-desktop -p photon-cli
       - install -Dm755 target/release/photon /app/bin/photon
       - install -Dm755 target/release/photonctl /app/bin/photonctl

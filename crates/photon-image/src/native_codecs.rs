@@ -362,10 +362,10 @@ pub mod heif {
             chroma: c_int,
             options: *const c_void,
         ) -> HeifError;
-        fn heif_image_get_plane_readonly2(
+        fn heif_image_get_plane_readonly(
             img: *const c_void,
             channel: c_int,
-            out_stride: *mut usize,
+            out_stride: *mut c_int,
         ) -> *const u8;
         fn heif_image_release(img: *const c_void);
     }
@@ -462,9 +462,11 @@ pub mod heif {
         }
         let img = HeifImg(raw_img);
 
-        let mut stride: usize = 0;
-        let plane =
-            unsafe { heif_image_get_plane_readonly2(img.0, HEIF_CHANNEL_INTERLEAVED, &mut stride) };
+        let mut stride_c: c_int = 0;
+        let plane = unsafe {
+            heif_image_get_plane_readonly(img.0, HEIF_CHANNEL_INTERLEAVED, &mut stride_c)
+        };
+        let stride = usize::try_from(stride_c).unwrap_or(0);
         let row_bytes = (w as usize).saturating_mul(4);
         if plane.is_null() || stride < row_bytes {
             return Err(map_err("invalid HEIF RGBA plane".to_owned()));

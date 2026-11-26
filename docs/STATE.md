@@ -48,6 +48,10 @@ All workspace checks below were executed after the final Rust edits:
     - Popup/dialog & menu/icon polish: `resolve_card_and_body_limits` + resize handles (`photon-dialogs`), `opaque(scrollable(...))` + `MenuEntry::IconRow` (`photon-ui`), `Icon::BookOpen` & `Icon::PanelsTopLeft`, Quick Access header pencil toggle, responsive `ReaderOptions`.
     - Extended codecs & hybrid archive/PDF: `.jp2`/`.j2k`/`.jpx`/`.jpf` (`libopenjp2`), `.heic`/`.heif`/`.hif` (`libheif`), `avif-native`, 29 `rawler` RAWs, `.kra`, `.icns` (`image/x-icns`), `ArchiveSession` (`.cbz`/`.zip`/`.pdf`) + windowed Filmstrip, Browser Open/Edit/`xdg-open`, Editor `New` (`Ctrl+N`), Unsupported Format screen, virtual `Save As`.
     - 3-process architecture & Linux taskbar separation: Browser singleton (`photon.sock`), Editor singleton (`editor.sock`), Viewer multi-instance (`v-<pid>.sock` with focus+restore), Viewer `[ Browser | Editor ]` + `Filmstrip → Fullscreen → Info → Adjustment`, distinct `application_id`/`StartupWMClass` (`io.github.tienv2i.Photon`, `.Editor`, `.Viewer`), and MIME defaults (`scripts/install.py`).
+12. **Window Wake/Focus & Launch Maximization**:
+    - Re-opening an already-open file, or switching Viewer → Browser/Editor, now forwards `Command::FocusWindow` and runs a wake sequence (`minimize(false)`, clear attention, `gain_focus`, brief `AlwaysOnTop` pulse) without changing the window's saved maximized/windowed/fullscreen state.
+    - Because `iced`/`winit` cannot raise or unminimize on Wayland, `photon-desktop::window_activation` adds a KDE Plasma (KWin) D-Bus scripting fallback (`qdbus6`/`qdbus` `org.kde.KWin.Scripting`) that unminimizes and activates the window by PID. X11 and non-KDE paths keep the native iced behavior.
+    - Browser/Editor launch maximized by default (`AppLaunchWindowMode::Maximized`), including `photon edit <file>` spawned from a Viewer; `Remembered` still restores the last window state, and standalone Viewer keeps `SystemOpenWindowMode` sizing.
 
 ## Verification Scope Notes
 

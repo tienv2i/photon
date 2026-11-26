@@ -77,6 +77,67 @@ def maybe_privileged(cmd: list[str], needs_root: bool) -> list[str]:
     return ["sudo", "--", *cmd]
 
 
+def invoking_user() -> tuple[str, pathlib.Path] | None:
+    """Return `(name, home)` of the sudo caller, if the script runs as root."""
+    name = os.environ.get("SUDO_USER")
+    if os.geteuid() != 0 or not name:
+        return None
+    import pwd
+
+    try:
+        return name, pathlib.Path(pwd.getpwnam(name).pw_dir)
+    except KeyError:
+        return None
+
+
+def warn_if_user_install_shadows(prefix: pathlib.Path) -> None:
+    """A stale `~/.local` install shadows `/usr/local` for the same desktop IDs."""
+    caller = invoking_user()
+    home = caller[1] if caller else pathlib.Path.home()
+    user_prefix = (home / ".local").resolve()
+    if prefix.resolve() == user_prefix:
+        return
+    user_apps = user_prefix / "share" / "applications"
+    shadowing = sorted(user_apps.glob(f"{APP_ID}*.desktop"))
+    if not shadowing:
+        return
+    print(
+        "WARNING: a user-local Photon install shadows this one:\n"
+        + "".join(f"  {path}\n" for path in shadowing)
+        + "  Remove it with: python3 scripts/install.py uninstall --user\n"
+        + "  (or reinstall into ~/.local with `just install-user`).",
+        file=sys.stderr,
+    )
+
+
+def set_default_viewer_mime_types() -> None:
+    """Point the desktop's MIME defaults at the Viewer entry.
+
+    When the installer is run through sudo, `xdg-mime` must run as the real
+    user: otherwise it rewrites root's `mimeapps.list` and the desktop user
+    keeps the old default handler.
+    """
+    xdg_mime = shutil.which("xdg-mime")
+    if not xdg_mime:
+        return
+    caller = invoking_user()
+    mimes = [m for m in IMAGE_MIME_TYPES.split(";") if m]
+    for mime in mimes:
+        cmd = [xdg_mime, "default", f"{APP_ID}.Viewer.desktop", mime]
+        if caller:
+            name, home = caller
+            cmd = [
+                "sudo",
+                "-u",
+                name,
+                "env",
+                f"HOME={home}",
+                f"XDG_CONFIG_HOME={home / '.config'}",
+                *cmd,
+            ]
+        subprocess.run(cmd, check=False)
+
+
 def install_targets(prefix: pathlib.Path) -> dict[str, pathlib.Path]:
     share = prefix / "share"
     targets = {
@@ -233,12 +294,10 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
 
     refresh_caches(prefix, needs_root)
 
-    if set_default_viewer and shutil.which("xdg-mime"):
-        for mime in [m for m in IMAGE_MIME_TYPES.split(";") if m]:
-            subprocess.run(
-                ["xdg-mime", "default", f"{APP_ID}.Viewer.desktop", mime],
-                check=False,
-            )
+    warn_if_user_install_shadows(prefix)
+
+    if set_default_viewer:
+        set_default_viewer_mime_types()
 
     print(f"Installed Photon ({APP_ID}) into {prefix}:")
     for key, (src, _) in sources.items():

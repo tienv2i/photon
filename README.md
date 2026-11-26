@@ -101,6 +101,12 @@ just uninstall-user
 just uninstall
 ```
 
+Use one prefix at a time: a `~/.local` install shadows `/usr/local` because both
+ship the same desktop IDs. If you switch between them, uninstall the other one
+first (`just uninstall-user` before `just install`, or vice versa). Add
+`--set-default` to either install command (e.g. `just install --set-default`) to
+make the standalone Viewer the default image handler for the current user.
+
 ## CLI & Automation (`photon` & `photonctl`)
 
 ```sh

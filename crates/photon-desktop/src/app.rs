@@ -80,7 +80,8 @@ use photon_viewer::{
     build_viewer_context_menu, build_viewer_quality_menu_entries, build_viewer_toolbar,
     build_viewer_view, dual_spread_slots, dual_spread_slots_for, step_dual_spread,
     viewer_counter_summary, viewer_double_fit_geometries, viewer_reader_options_right_offset,
-    viewer_status_summary, webtoon_index_at_scroll, webtoon_offset_for_index, webtoon_scroll_id,
+    viewer_status_summary, viewer_utilities_menu_right_offset, webtoon_index_at_scroll,
+    webtoon_offset_for_index, webtoon_scroll_id,
 };
 
 static CORE_HANDLE: OnceLock<CoreHandle> = OnceLock::new();
@@ -141,6 +142,7 @@ pub(crate) enum ActiveMenu {
     BrowserHelp,
     BrowserSort,
     ReaderOptions,
+    ViewerUtilities,
     EditorFile,
     EditorEdit,
     EditorImage,
@@ -1633,6 +1635,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             sync_ui_tree_task(state)
         }
         Message::ToggleFullscreen => {
+            state.active_menu = None;
             state.context_menu = None;
             state.is_fullscreen = !state.is_fullscreen;
             if let Some(win_id) = state.main_window {
@@ -1652,6 +1655,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             Task::batch([layout_task, sync_ui_tree_task(state)])
         }
         Message::ToggleFilmstrip => {
+            state.active_menu = None;
             state.context_menu = None;
             state.viewer_filmstrip_open = !state.viewer_filmstrip_open;
             let thumb_task = if state.viewer_filmstrip_open {
@@ -1663,6 +1667,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             Task::batch([thumb_task, layout_task, sync_ui_tree_task(state)])
         }
         Message::ToggleViewerInspector => {
+            state.active_menu = None;
             state.context_menu = None;
             state.viewer_info_open = !state.viewer_info_open;
             let layout_task = commit_layout_with(state, |_| {});
@@ -6839,6 +6844,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             dispatch_to_core(state.core.clone(), Command::DeletePermanently { paths })
         }
         Message::ToggleViewerColorPopover => {
+            state.active_menu = None;
             state.context_menu = None;
             state.viewer_adjustments_open = !state.viewer_adjustments_open;
             state.viewer_color_popover_open = state.viewer_adjustments_open;
@@ -7650,6 +7656,14 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
                 shell,
                 true,
                 viewer_reader_options_right_offset(state.viewer_view_state(true)),
+                52.0,
+                menu_el,
+                Message::CloseMenu,
+            ),
+            Some(ActiveMenu::ViewerUtilities) => with_top_right_menu_at(
+                shell,
+                true,
+                viewer_utilities_menu_right_offset(state.window_size.width),
                 52.0,
                 menu_el,
                 Message::CloseMenu,
@@ -9031,6 +9045,42 @@ fn build_active_menu(
                     .into_iter()
                     .map(|e| e.map(Message::Viewer)),
             );
+            (None, entries)
+        }
+        (Workspace::Viewer, ActiveMenu::ViewerUtilities) => {
+            // Same order as the expanded toolbar group: Filmstrip → Fullscreen →
+            // View Adjustments → Info. Info stays last.
+            let entries = vec![
+                MenuEntry::Item(
+                    MenuItem::new(tr(lang, "action-filmstrip"), Message::ToggleFilmstrip)
+                        .icon(Icon::Filmstrip)
+                        .checked(state.viewer_filmstrip_open),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(tr(lang, "action-fullscreen"), Message::ToggleFullscreen)
+                        .icon(if state.is_fullscreen {
+                            Icon::FullscreenExit
+                        } else {
+                            Icon::Fullscreen
+                        })
+                        .shortcut("F11")
+                        .checked(state.is_fullscreen),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "panel-view-adjustments"),
+                        Message::ToggleViewerColorPopover,
+                    )
+                    .icon(Icon::Palette)
+                    .checked(state.viewer_adjustments_open),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(tr(lang, "action-info"), Message::ToggleViewerInspector)
+                        .icon(Icon::Info)
+                        .shortcut("I")
+                        .checked(state.viewer_info_open),
+                ),
+            ];
             (None, entries)
         }
         _ => return None,
@@ -12273,6 +12323,7 @@ fn map_viewer_message(msg: ViewerMessage) -> Message {
         ViewerMessage::ToggleWorkspaceSwitcher => {
             Message::ToggleMenu(ActiveMenu::WorkspaceSwitcher)
         }
+        ViewerMessage::ToggleViewerUtilities => Message::ToggleMenu(ActiveMenu::ViewerUtilities),
         ViewerMessage::ToggleWorkspacePanels => Message::ToggleMenu(ActiveMenu::WorkspacePanels),
         ViewerMessage::OpenViewerContextMenu { path, pos } => {
             Message::OpenViewerContextMenu { path, pos }
@@ -12470,6 +12521,7 @@ impl PhotonGui {
             is_main_window,
             reader_options_open: self.active_menu == Some(ActiveMenu::ReaderOptions),
             workspace_switcher_open: self.active_menu == Some(ActiveMenu::WorkspaceSwitcher),
+            utilities_menu_open: self.active_menu == Some(ActiveMenu::ViewerUtilities),
             aa_mode: self.snapshot.meta.layout.canvas_anti_aliasing,
             denoise_mode: self.snapshot.meta.layout.viewport_denoise,
             viewport_background: self.viewer_viewport_background,
@@ -12676,6 +12728,7 @@ fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) -> Task<Mes
         "viewer.rotate_right" => update(state, Message::ViewerRotatePreview(1)),
         "viewer.filmstrip_toggle" => update(state, Message::ToggleFilmstrip),
         "viewer.fullscreen" => update(state, Message::ToggleFullscreen),
+        "viewer.utilities_menu" => update(state, Message::ToggleMenu(ActiveMenu::ViewerUtilities)),
         "viewer.color_popover.toggle" => update(state, Message::ToggleViewerColorPopover),
         "viewer.color_popover.reset" => update(state, Message::ResetViewerAdj),
         "viewer.color_popover.open_editor" => update(state, Message::ViewerAdjOpenInEditor),

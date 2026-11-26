@@ -162,6 +162,7 @@ pub struct ViewerViewState<'a> {
     pub is_main_window: bool,
     pub reader_options_open: bool,
     pub workspace_switcher_open: bool,
+    pub utilities_menu_open: bool,
     pub aa_mode: CanvasAntiAliasingMode,
     pub denoise_mode: ViewportDenoiseMode,
     pub viewport_background: Option<[u8; 3]>,
@@ -187,6 +188,7 @@ pub enum ViewerMessage {
     SetViewportDenoiseMode(ViewportDenoiseMode),
     ToggleReaderOptions,
     ToggleWorkspaceSwitcher,
+    ToggleViewerUtilities,
     ToggleWorkspacePanels,
     OpenViewerContextMenu {
         path: Option<String>,
@@ -431,6 +433,34 @@ pub fn viewer_toolbar_switcher_kind(
     ViewerToolbarSwitcherKind::StandaloneTwoButton {
         show_labels: window_width >= 1120.0,
     }
+}
+
+/// Width below which the four Viewer utility toggles
+/// (Filmstrip, Fullscreen, View Adjustments, Info) collapse into one menu button.
+pub const VIEWER_UTILITY_COLLAPSE_WIDTH: f32 = 720.0;
+
+pub fn viewer_utility_collapsed(window_width: f32) -> bool {
+    window_width < VIEWER_UTILITY_COLLAPSE_WIDTH
+}
+
+/// Right-edge offset (from the window's right edge) of the collapsed utility
+/// button, used to anchor its dropdown menu underneath it.
+pub fn viewer_utilities_menu_right_offset(window_width: f32) -> f32 {
+    let utilities_w = 12.0 + 32.0; // right padding + single Panels button
+    let switcher_w = match viewer_toolbar_switcher_kind(false, window_width) {
+        ViewerToolbarSwitcherKind::MainThreeTab(WorkspaceSwitcherMode::Full) => 252.0,
+        ViewerToolbarSwitcherKind::MainThreeTab(WorkspaceSwitcherMode::CompactIcons) => 112.0,
+        ViewerToolbarSwitcherKind::MainThreeTab(WorkspaceSwitcherMode::Dropdown) => 56.0,
+        ViewerToolbarSwitcherKind::StandaloneTwoButton { show_labels: true } => 164.0,
+        ViewerToolbarSwitcherKind::StandaloneTwoButton { show_labels: false } => 72.0,
+    };
+    let view_mode_w = if window_width >= 1120.0 {
+        138.0 // Single / Double / Manhwa + Reader Options
+    } else {
+        36.0 // Reader Options only
+    };
+    // utilities + spacing + divider + spacing + switcher + spacing + view mode + spacing
+    utilities_w + 17.0 + switcher_w + 8.0 + view_mode_w + 8.0
 }
 
 pub fn viewer_reader_options_right_offset(state: ViewerViewState<'_>) -> f32 {
@@ -708,36 +738,47 @@ pub fn build_viewer_toolbar<'a>(
             }
         }
     };
-    let utility_group = toolbar_button_group(vec![
-        button::toolbar_icon(
-            Icon::Filmstrip,
-            state.viewer_filmstrip_open,
-            Some(ViewerMessage::ToggleFilmstrip),
-            Some(tr(lang, "tooltip-viewer-filmstrip")),
-        ),
-        button::toolbar_icon(
-            if state.is_fullscreen {
-                Icon::FullscreenExit
-            } else {
-                Icon::Fullscreen
-            },
-            state.is_fullscreen,
-            Some(ViewerMessage::ToggleFullscreen),
-            Some(tr(lang, "tooltip-viewer-fullscreen")),
-        ),
-        button::toolbar_icon(
-            Icon::Info,
-            state.viewer_info_open,
-            Some(ViewerMessage::ToggleViewerInspector),
-            Some(tr(lang, "action-info")),
-        ),
-        button::toolbar_icon(
-            Icon::Palette,
-            state.viewer_adjustments_open,
-            Some(ViewerMessage::ToggleViewerColorPopover),
-            Some(tr(lang, "panel-view-adjustments")),
-        ),
-    ]);
+    // Utility toggles: Filmstrip → Fullscreen → View Adjustments → Info.
+    // Below `VIEWER_UTILITY_COLLAPSE_WIDTH` they collapse into a single "More" menu.
+    let utility_group = if viewer_utility_collapsed(state.window_size.width) {
+        toolbar_button_group(vec![button::toolbar_icon(
+            Icon::More,
+            state.utilities_menu_open,
+            Some(ViewerMessage::ToggleViewerUtilities),
+            Some(tr(lang, "tooltip-viewer-more")),
+        )])
+    } else {
+        toolbar_button_group(vec![
+            button::toolbar_icon(
+                Icon::Filmstrip,
+                state.viewer_filmstrip_open,
+                Some(ViewerMessage::ToggleFilmstrip),
+                Some(tr(lang, "tooltip-viewer-filmstrip")),
+            ),
+            button::toolbar_icon(
+                if state.is_fullscreen {
+                    Icon::FullscreenExit
+                } else {
+                    Icon::Fullscreen
+                },
+                state.is_fullscreen,
+                Some(ViewerMessage::ToggleFullscreen),
+                Some(tr(lang, "tooltip-viewer-fullscreen")),
+            ),
+            button::toolbar_icon(
+                Icon::Palette,
+                state.viewer_adjustments_open,
+                Some(ViewerMessage::ToggleViewerColorPopover),
+                Some(tr(lang, "panel-view-adjustments")),
+            ),
+            button::toolbar_icon(
+                Icon::Info,
+                state.viewer_info_open,
+                Some(ViewerMessage::ToggleViewerInspector),
+                Some(tr(lang, "action-info")),
+            ),
+        ])
+    };
 
     let right: Element<'a, ViewerMessage> = row![
         utility_group,
@@ -3216,5 +3257,23 @@ mod tests {
             viewer_toolbar_switcher_kind(false, 1119.0),
             ViewerToolbarSwitcherKind::StandaloneTwoButton { show_labels: false }
         );
+    }
+
+    #[test]
+    fn utility_toggles_collapse_only_below_threshold() {
+        assert!(!viewer_utility_collapsed(VIEWER_UTILITY_COLLAPSE_WIDTH));
+        assert!(!viewer_utility_collapsed(1280.0));
+        assert!(viewer_utility_collapsed(
+            VIEWER_UTILITY_COLLAPSE_WIDTH - 1.0
+        ));
+        assert!(viewer_utility_collapsed(680.0));
+    }
+
+    #[test]
+    fn collapsed_utilities_menu_anchors_left_of_view_mode_group() {
+        // At narrow widths: utilities(44) + divider gap(17) + switcher(72)
+        // + spacing(8) + reader options(36) + spacing(8).
+        assert_eq!(viewer_utilities_menu_right_offset(680.0), 185.0);
+        assert!(viewer_utilities_menu_right_offset(680.0) > 0.0);
     }
 }

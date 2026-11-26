@@ -8,6 +8,7 @@ use photon_protocol::{
 
 use crate::app::ActiveContextMenu;
 use photon_editor::{AdjustmentPopupTab, CompareMode, EditorTool, EditorUiState};
+use photon_viewer::viewer_utility_collapsed;
 
 pub struct ViewerUiPresentation {
     pub view_mode: ViewerViewMode,
@@ -568,13 +569,14 @@ pub fn build_ui_tree(
                 bounds: None,
                 value: None,
             });
+            let utilities_collapsed = viewer_utility_collapsed(window_size.width);
             widgets.push(SemanticWidgetNode {
                 id: "viewer.filmstrip_toggle".to_owned(),
                 role: "toggle".to_owned(),
                 label: tr(lang, "action-filmstrip"),
                 workspace: ws,
                 enabled: has_nav,
-                visible: true,
+                visible: !utilities_collapsed,
                 bounds: None,
                 value: Some(viewer_ui.filmstrip_open.to_string()),
             });
@@ -584,7 +586,7 @@ pub fn build_ui_tree(
                 label: tr(lang, "action-fullscreen"),
                 workspace: ws,
                 enabled: true,
-                visible: true,
+                visible: !utilities_collapsed,
                 bounds: None,
                 value: None,
             });
@@ -604,9 +606,19 @@ pub fn build_ui_tree(
                 label: tr(lang, "action-info"),
                 workspace: ws,
                 enabled: true,
-                visible: true,
+                visible: !utilities_collapsed,
                 bounds: None,
                 value: Some(info_open.to_string()),
+            });
+            widgets.push(SemanticWidgetNode {
+                id: "viewer.utilities_menu".to_owned(),
+                role: "menu_button".to_owned(),
+                label: tr(lang, "tooltip-viewer-more"),
+                workspace: ws,
+                enabled: true,
+                visible: utilities_collapsed,
+                bounds: None,
+                value: Some("collapsed".to_owned()),
             });
             let vmode = viewer_ui.view_mode;
             widgets.push(SemanticWidgetNode {
@@ -779,7 +791,7 @@ pub fn build_ui_tree(
                     "toggle",
                     "action-viewer-color",
                     has_img && !is_webtoon,
-                    true,
+                    !utilities_collapsed,
                     Some(viewer_ui.color_popover_open.to_string()),
                 ),
                 (

@@ -3,9 +3,10 @@
 
 Installs:
 - `photon` and `photonctl` binaries into `<prefix>/bin`
-- Viewer desktop entry (`io.github.tienv2i.Photon.desktop` -> `photon view %F`)
+- Browser desktop entry (`io.github.tienv2i.Photon.desktop` -> `photon %U`)
+- Standalone Viewer desktop entry (`io.github.tienv2i.Photon.Viewer.desktop` -> `photon --viewer-window %F`)
 - Editor desktop entry (`io.github.tienv2i.Photon.Editor.desktop` -> `photon edit %f`)
-- Image MIME type associations (Viewer + Editor)
+- Image MIME type associations (Viewer + Editor; `--set-default` makes the Viewer the default handler)
 - AppStream metadata & hicolor SVG + PNG icons
 """
 
@@ -81,7 +82,7 @@ def install_targets(prefix: pathlib.Path) -> dict[str, pathlib.Path]:
     targets = {
         "photon": prefix / "bin" / "photon",
         "photonctl": prefix / "bin" / "photonctl",
-        "viewer desktop": share / "applications" / f"{APP_ID}.desktop",
+        "browser desktop": share / "applications" / f"{APP_ID}.desktop",
         "standalone viewer desktop": share / "applications" / f"{APP_ID}.Viewer.desktop",
         "editor desktop": share / "applications" / f"{APP_ID}.Editor.desktop",
         "metainfo": share / "metainfo" / f"{APP_ID}.metainfo.xml",
@@ -156,10 +157,10 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
         return 1
 
     bindir = prefix / "bin"
-    viewer_desktop = stage / f"{APP_ID}.desktop"
+    browser_desktop = stage / f"{APP_ID}.desktop"
     standalone_viewer_desktop = stage / f"{APP_ID}.Viewer.desktop"
     editor_desktop = stage / f"{APP_ID}.Editor.desktop"
-    viewer_desktop.write_text(
+    browser_desktop.write_text(
         render_desktop(PACKAGING / f"{APP_ID}.desktop.in", bindir),
         encoding="utf-8",
     )
@@ -174,7 +175,7 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
 
     validator = shutil.which("desktop-file-validate")
     if validator:
-        for df in (viewer_desktop, standalone_viewer_desktop, editor_desktop):
+        for df in (browser_desktop, standalone_viewer_desktop, editor_desktop):
             res = subprocess.run([validator, str(df)], capture_output=True, text=True, check=False)
             if res.returncode != 0:
                 print(res.stdout or res.stderr, file=sys.stderr)
@@ -196,7 +197,7 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
     svg_src = PACKAGING / f"{APP_ID}.svg"
     sources: dict[str, tuple[pathlib.Path, str]] = {
         "photonctl": (ctl_bin, "755"),
-        "viewer desktop": (viewer_desktop, "644"),
+        "browser desktop": (browser_desktop, "644"),
         "standalone viewer desktop": (standalone_viewer_desktop, "644"),
         "editor desktop": (editor_desktop, "644"),
         "metainfo": (metainfo, "644"),
@@ -234,18 +235,26 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
 
     if set_default_viewer and shutil.which("xdg-mime"):
         for mime in [m for m in IMAGE_MIME_TYPES.split(";") if m]:
-            subprocess.run(["xdg-mime", "default", f"{APP_ID}.desktop", mime], check=False)
+            subprocess.run(
+                ["xdg-mime", "default", f"{APP_ID}.Viewer.desktop", mime],
+                check=False,
+            )
 
     print(f"Installed Photon ({APP_ID}) into {prefix}:")
     for key, (src, _) in sources.items():
         print(f"  {key:16} -> {targets[key]}")
     print("Registered MIME handlers:")
-    print(f"  Viewer: {targets['viewer desktop']} (Exec: photon view %F)")
-    print(f"  Editor: {targets['editor desktop']} (Exec: photon edit %f)")
+    print(f"  Browser: {targets['browser desktop']} (Exec: photon %U)")
+    print(
+        f"  Viewer:  {targets['standalone viewer desktop']} "
+        "(Exec: photon --viewer-window %F)"
+    )
+    print(f"  Editor:  {targets['editor desktop']} (Exec: photon edit %f)")
     if not set_default_viewer:
         print(
             "Default image handler unchanged. Set Photon Viewer as default e.g. with:\n"
-            f"  xdg-mime default {APP_ID}.desktop image/jpeg image/png image/webp"
+            f"  xdg-mime default {APP_ID}.Viewer.desktop "
+            "image/jpeg image/png image/webp"
         )
     return 0
 

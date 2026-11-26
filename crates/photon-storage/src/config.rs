@@ -4,16 +4,39 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use photon_protocol::{AiSettings, Language, LayoutState, Theme, TranslateSettings};
+use photon_protocol::{
+    AiSettings, AppLaunchWindowMode, Language, LayoutState, Theme, TranslateSettings,
+};
 use serde::{Deserialize, Serialize};
+
+/// Current on-disk `Config` schema version.
+///
+/// Version `0` means the file predates this marker (legacy config). Bump this
+/// whenever a migration must run exactly once per config file.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
 fn default_true() -> bool {
     true
 }
 
+fn is_legacy_schema_version(version: &u32) -> bool {
+    *version == 0
+}
+
+/// The pre-`Maximized` default layout was `remembered` with a maximized window.
+/// This isn't a perfect oracle (a user could have deliberately picked
+/// `remembered` while the window happened to be maximized), but it is the only
+/// signal available in legacy files and matches the old factory default.
+fn is_legacy_remembered_default(layout: &LayoutState) -> bool {
+    layout.app_launch_window_mode == AppLaunchWindowMode::Remembered && layout.window_maximized
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// On-disk schema version. Legacy files omit it (deserialized as `0`).
+    #[serde(default, skip_serializing_if = "is_legacy_schema_version")]
+    pub schema_version: u32,
     pub theme: Theme,
     pub language: Language,
     pub last_folder: Option<String>,
@@ -38,6 +61,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            schema_version: CONFIG_SCHEMA_VERSION,
             theme: Theme::Dark,
             language: Language::System,
             last_folder: None,
@@ -118,10 +142,45 @@ impl Config {
         (cfg, note)
     }
 
+    /// Applies one-time migrations for configs written before `schema_version`
+    /// existed. Returns `true` when the config was changed and should be
+    /// persisted.
+    ///
+    /// Migration rule (legacy files only):
+    /// - If `layout.app_launch_window_mode == Remembered` **and**
+    ///   `layout.window_maximized`, the layout matches the old factory default
+    ///   (before `Maximized` became the launch default), so switch it to
+    ///   `Maximized`.
+    /// - Any other legacy value (including an explicit `remembered` with a
+    ///   non-maximized window) is left untouched.
+    /// - The version is always stamped to `CONFIG_SCHEMA_VERSION`, so the
+    ///   migration runs exactly once even when no layout change was needed.
+    fn migrate_legacy_schema(&mut self) -> bool {
+        if self.schema_version >= CONFIG_SCHEMA_VERSION {
+            return false;
+        }
+        if is_legacy_remembered_default(&self.layout) {
+            self.layout.app_launch_window_mode = AppLaunchWindowMode::Maximized;
+        }
+        self.schema_version = CONFIG_SCHEMA_VERSION;
+        true
+    }
+
     pub fn load_or_create(path: &Path) -> (Self, Option<String>) {
         match fs::read_to_string(path) {
             Ok(text) => match serde_json::from_str::<Self>(&text) {
-                Ok(cfg) => (cfg.sanitized(), None),
+                Ok(mut cfg) => {
+                    let migrated = cfg.migrate_legacy_schema();
+                    let cfg = cfg.sanitized();
+                    let warn = if migrated {
+                        cfg.save(path)
+                            .err()
+                            .map(|e| format!("config migrated in memory, save failed: {e}"))
+                    } else {
+                        None
+                    };
+                    (cfg, warn)
+                }
                 Err(error) => {
                     let backup = path.with_extension("json.corrupt");
                     let _ = fs::copy(path, &backup);
@@ -183,10 +242,37 @@ impl UiState {
         self
     }
 
+    /// `ui_state.json` has no schema version of its own. A UI-state layout that
+    /// still carries the old `remembered` + maximized default is stale unless
+    /// the current config explicitly asks for `remembered` (a deliberate user
+    /// choice). In that case migrate it to `Maximized` so it cannot overwrite
+    /// the config migration on the next launch.
+    fn migrate_legacy_launch_mode(&mut self, config: &Config) -> bool {
+        let config_explicitly_remembers = config.schema_version >= CONFIG_SCHEMA_VERSION
+            && config.layout.app_launch_window_mode == AppLaunchWindowMode::Remembered;
+        if !config_explicitly_remembers && is_legacy_remembered_default(&self.layout) {
+            self.layout.app_launch_window_mode = AppLaunchWindowMode::Maximized;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn load_or_migrate(path: &Path, legacy_config: &Config) -> (Self, Option<String>) {
         match fs::read_to_string(path) {
             Ok(text) => match serde_json::from_str::<Self>(&text) {
-                Ok(state) => (state.sanitized(), None),
+                Ok(state) => {
+                    let mut state = state.sanitized();
+                    if state.migrate_legacy_launch_mode(legacy_config) {
+                        let warn = state
+                            .save(path)
+                            .err()
+                            .map(|e| format!("ui_state migrated in memory, save failed: {e}"));
+                        (state, warn)
+                    } else {
+                        (state, None)
+                    }
+                }
                 Err(error) => {
                     let backup = path.with_extension("json.corrupt");
                     let _ = fs::copy(path, &backup);
@@ -202,11 +288,12 @@ impl UiState {
                 }
             },
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                let migrated = Self {
+                let mut migrated = Self {
                     last_folder: legacy_config.last_folder.clone(),
                     layout: legacy_config.layout.clone(),
                 }
                 .sanitized();
+                migrated.migrate_legacy_launch_mode(legacy_config);
                 let warn = migrated
                     .save(path)
                     .err()
@@ -367,6 +454,192 @@ mod tests {
         let (loaded, warn) = Config::load_or_create(&path);
         assert!(warn.is_none());
         assert_eq!(loaded.disabled_plugins, vec!["com.example.one"]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_config_migrates_remembered_launch_mode_to_maximized() {
+        let dir = std::env::temp_dir().join(format!("photon-cfg-migrate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        // No `schema_version`: this is a legacy file with the old default state.
+        fs::write(
+            &path,
+            r#"{
+                "theme": "dark",
+                "layout": {
+                    "windowWidth": 1280,
+                    "windowHeight": 800,
+                    "appLaunchWindowMode": "remembered",
+                    "windowMaximized": true
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let (loaded, warn) = Config::load_or_create(&path);
+        assert!(warn.is_none());
+        assert_eq!(loaded.schema_version, CONFIG_SCHEMA_VERSION);
+        assert_eq!(
+            loaded.layout.app_launch_window_mode,
+            AppLaunchWindowMode::Maximized
+        );
+
+        // The migration is persisted, including the version marker.
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk["schema_version"], CONFIG_SCHEMA_VERSION);
+        assert_eq!(
+            on_disk["layout"]["appLaunchWindowMode"],
+            serde_json::json!("maximized")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn current_version_remembered_launch_mode_is_preserved() {
+        let dir = std::env::temp_dir().join(format!("photon-cfg-version-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(
+            &path,
+            format!(
+                r#"{{
+                    "schema_version": {CONFIG_SCHEMA_VERSION},
+                    "layout": {{
+                        "appLaunchWindowMode": "remembered",
+                        "windowMaximized": true
+                    }}
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let (loaded, warn) = Config::load_or_create(&path);
+        assert!(warn.is_none());
+        assert_eq!(loaded.schema_version, CONFIG_SCHEMA_VERSION);
+        assert_eq!(
+            loaded.layout.app_launch_window_mode,
+            AppLaunchWindowMode::Remembered
+        );
+
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk["layout"]["appLaunchWindowMode"],
+            serde_json::json!("remembered")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_launch_mode_defaults_to_maximized() {
+        let dir =
+            std::env::temp_dir().join(format!("photon-cfg-missing-mode-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(
+            &path,
+            r#"{
+                "layout": {
+                    "windowWidth": 1280,
+                    "windowHeight": 800
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let (loaded, warn) = Config::load_or_create(&path);
+        assert!(warn.is_none());
+        assert_eq!(
+            loaded.layout.app_launch_window_mode,
+            AppLaunchWindowMode::Maximized
+        );
+        assert_eq!(loaded.schema_version, CONFIG_SCHEMA_VERSION);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ui_state_legacy_remembered_launch_mode_is_migrated() {
+        let dir = std::env::temp_dir().join(format!("photon-ui-mode-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let ui_path = dir.join("ui_state.json");
+        fs::write(
+            &ui_path,
+            r#"{
+                "layout": {
+                    "appLaunchWindowMode": "remembered",
+                    "windowMaximized": true
+                }
+            }"#,
+        )
+        .unwrap();
+
+        // Config has already been migrated to the new Maximized default.
+        let config = Config::default();
+        assert_eq!(
+            config.layout.app_launch_window_mode,
+            AppLaunchWindowMode::Maximized
+        );
+
+        let (state, warn) = UiState::load_or_migrate(&ui_path, &config);
+        assert!(warn.is_none());
+        assert_eq!(
+            state.layout.app_launch_window_mode,
+            AppLaunchWindowMode::Maximized
+        );
+
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ui_path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk["layout"]["appLaunchWindowMode"],
+            serde_json::json!("maximized")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ui_state_keeps_remembered_when_config_explicitly_chooses_it() {
+        let dir = std::env::temp_dir().join(format!("photon-ui-mode-keep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let ui_path = dir.join("ui_state.json");
+        fs::write(
+            &ui_path,
+            r#"{
+                "layout": {
+                    "appLaunchWindowMode": "remembered",
+                    "windowMaximized": true
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let config = Config {
+            schema_version: CONFIG_SCHEMA_VERSION,
+            layout: LayoutState {
+                app_launch_window_mode: AppLaunchWindowMode::Remembered,
+                window_maximized: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let (state, warn) = UiState::load_or_migrate(&ui_path, &config);
+        assert!(warn.is_none());
+        assert_eq!(
+            state.layout.app_launch_window_mode,
+            AppLaunchWindowMode::Remembered
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

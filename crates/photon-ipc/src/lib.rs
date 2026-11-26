@@ -34,7 +34,12 @@ pub mod transport {
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::{UnixListener, UnixStream};
 
-    pub async fn serve(socket_path: &Path, core: CoreHandle) -> std::io::Result<()> {
+    /// Bind the Unix listener without serving it yet.
+    ///
+    /// Callers that must win a single-instance race (e.g. the desktop launcher)
+    /// use this to claim the socket *before* doing expensive initialisation.
+    /// A pre-existing path is only reclaimed when no process answers on it.
+    pub async fn bind_socket(socket_path: &Path) -> std::io::Result<UnixListener> {
         if let Some(parent) = socket_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -54,7 +59,16 @@ pub mod transport {
 
         let listener = UnixListener::bind(socket_path)?;
         std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
-        tracing::info!(target: "photon::ipc", socket = %socket_path.display(), "local IPC listening");
+        Ok(listener)
+    }
+
+    /// Serve an already-bound listener. The socket path is already claimed.
+    pub async fn serve_bound(listener: UnixListener, core: CoreHandle) -> std::io::Result<()> {
+        if let Ok(addr) = listener.local_addr()
+            && let Some(path) = addr.as_pathname()
+        {
+            tracing::info!(target: "photon::ipc", socket = %path.display(), "local IPC listening");
+        }
 
         loop {
             let (stream, _) = listener.accept().await?;
@@ -65,6 +79,13 @@ pub mod transport {
                 }
             });
         }
+    }
+
+    /// Bind and serve in one call. Kept as the convenience entry point for
+    /// tests, headless mode, and callers that do not need a pre-bound claim.
+    pub async fn serve(socket_path: &Path, core: CoreHandle) -> std::io::Result<()> {
+        let listener = bind_socket(socket_path).await?;
+        serve_bound(listener, core).await
     }
 
     async fn handle_client(stream: UnixStream, core: CoreHandle) -> std::io::Result<()> {
@@ -138,6 +159,51 @@ pub mod transport {
         serde_json::from_str(&line).map_err(|e| format!("invalid IPC response: {e}"))
     }
 
+    /// Bounded variant of [`send_once`] for launch-time forwarding.
+    ///
+    /// `connect_timeout` bounds the socket connect and `response_timeout`
+    /// bounds the write + response exchange. The unbounded [`send_once`]
+    /// remains available for CLI calls that may legitimately run long.
+    pub async fn send_once_timeout(
+        socket_path: &Path,
+        request: &IpcRequest,
+        connect_timeout: std::time::Duration,
+        response_timeout: std::time::Duration,
+    ) -> Result<IpcResponse, String> {
+        let stream = tokio::time::timeout(connect_timeout, UnixStream::connect(socket_path))
+            .await
+            .map_err(|_| {
+                format!(
+                    "timed out connecting to {} after {connect_timeout:?}",
+                    socket_path.display()
+                )
+            })?
+            .map_err(|e| format!("cannot connect to {}: {e}", socket_path.display()))?;
+        let (reader, mut writer) = stream.into_split();
+
+        let exchange = async {
+            write_line(&mut writer, request)
+                .await
+                .map_err(|e| format!("IPC write failed: {e}"))?;
+            let mut lines = BufReader::new(reader).lines();
+            let line = lines
+                .next_line()
+                .await
+                .map_err(|e| format!("IPC read failed: {e}"))?
+                .ok_or_else(|| "IPC closed without response".to_owned())?;
+            serde_json::from_str(&line).map_err(|e| format!("invalid IPC response: {e}"))
+        };
+
+        tokio::time::timeout(response_timeout, exchange)
+            .await
+            .map_err(|_| {
+                format!(
+                    "timed out waiting for {} after {response_timeout:?}",
+                    socket_path.display()
+                )
+            })?
+    }
+
     pub async fn subscribe_stream(
         socket_path: &Path,
         mut on_event: impl FnMut(Event) -> bool,
@@ -179,6 +245,23 @@ pub mod transport {
 #[cfg(not(unix))]
 pub mod transport {
     use super::*;
+
+    /// Unsupported on this platform; named-pipe transport is not implemented.
+    #[derive(Debug)]
+    pub struct UnixListener;
+
+    pub async fn bind_socket(_socket_path: &Path) -> std::io::Result<UnixListener> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "named pipe transport not yet implemented on this OS",
+        ))
+    }
+    pub async fn serve_bound(_listener: UnixListener, _core: CoreHandle) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "named pipe transport not yet implemented on this OS",
+        ))
+    }
     pub async fn serve(socket_path: &Path, _core: CoreHandle) -> std::io::Result<()> {
         let _ = socket_path;
         Err(std::io::Error::new(
@@ -192,6 +275,14 @@ pub mod transport {
     ) -> Result<IpcResponse, String> {
         Err("named pipe transport not yet implemented on this OS".to_owned())
     }
+    pub async fn send_once_timeout(
+        _socket_path: &Path,
+        _request: &IpcRequest,
+        _connect_timeout: std::time::Duration,
+        _response_timeout: std::time::Duration,
+    ) -> Result<IpcResponse, String> {
+        Err("named pipe transport not yet implemented on this OS".to_owned())
+    }
     pub async fn subscribe_stream(
         _socket_path: &Path,
         _on_event: impl FnMut(Event) -> bool,
@@ -200,7 +291,9 @@ pub mod transport {
     }
 }
 
-pub use transport::{send_once, serve, subscribe_stream};
+pub use transport::{
+    bind_socket, send_once, send_once_timeout, serve, serve_bound, subscribe_stream,
+};
 
 pub mod viewer_registry {
     use std::fs::{self, OpenOptions};
@@ -562,6 +655,95 @@ mod tests {
         assert!(reacquired.is_ok());
 
         drop(reacquired);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_socket_twice_reports_addr_in_use() {
+        let root = temp_sandbox("bind-twice");
+        let sock = root.join("control.sock");
+
+        let _first = bind_socket(&sock).await.unwrap();
+        let err = bind_socket(&sock).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_socket_reclaims_stale_socket_file() {
+        use std::os::unix::net::UnixListener as StdUnixListener;
+
+        let root = temp_sandbox("bind-stale");
+        let sock = root.join("control.sock");
+
+        // Drop the listener without removing the path: a classic post-crash stale socket.
+        let stale = StdUnixListener::bind(&sock).unwrap();
+        drop(stale);
+        assert!(sock.exists());
+
+        let _listener = bind_socket(&sock).await.unwrap();
+        assert!(sock.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn send_once_timeout_returns_promptly_without_responder() {
+        let root = temp_sandbox("send-timeout");
+        let sock = root.join("control.sock");
+        let listener = bind_socket(&sock).await.unwrap();
+
+        // Accept the connection but never answer.
+        let server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                drop(stream);
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let err = send_once_timeout(
+            &sock,
+            &IpcRequest::Query {
+                query: Query::State,
+            },
+            Duration::from_millis(200),
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("timed out"), "unexpected error: {err}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        server.abort();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn serve_bound_answers_queries() {
+        let root = temp_sandbox("serve-bound");
+        let sock = root.join("control.sock");
+        let listener = bind_socket(&sock).await.unwrap();
+
+        let handle = photon_core::CoreRuntime::spawn(photon_core::Core::for_sandbox(&root));
+        let server = tokio::spawn(serve_bound(listener, handle));
+
+        let response = send_once(
+            &sock,
+            &IpcRequest::Query {
+                query: Query::State,
+            },
+        )
+        .await
+        .expect("serve_bound should answer");
+        assert!(matches!(response, IpcResponse::Query { .. }));
+
+        server.abort();
         let _ = fs::remove_dir_all(&root);
     }
 }

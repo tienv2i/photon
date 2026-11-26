@@ -6,17 +6,39 @@ mod window_activation;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use photon_core::{Core, CoreRuntime};
 use photon_ipc::{
-    IpcRequest, IpcResponse, ViewerInstanceInfo, acquire_viewer_path_lock,
-    find_live_viewer_for_path, register_viewer_instance, send_once, serve, viewer_socket_path,
+    IpcRequest, IpcResponse, ViewerInstanceInfo, acquire_viewer_path_lock, bind_socket,
+    find_live_viewer_for_path, register_viewer_instance, send_once_timeout, serve, serve_bound,
+    viewer_socket_path,
 };
 use photon_protocol::{ClientKind, Command, Envelope, Language, Query};
 use photon_storage::logging::{initialize, log_shutdown, log_startup};
 use photon_storage::{AppIdentity, AppPaths, Config, UiState};
+
+/// How long a losing launch waits for the winner to publish its socket.
+const LAUNCH_LOCK_WAIT: Duration = Duration::from_millis(1500);
+/// Per-attempt connect bound for launch-time forwarding.
+const FORWARD_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+/// Total budget for launch-time forwarding retries.
+const FORWARD_TOTAL_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum single response wait inside the forwarding budget.
+const FORWARD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[cfg(unix)]
+type PreboundListener = tokio::net::UnixListener;
+#[cfg(not(unix))]
+type PreboundListener = ();
+
+/// Exclusive per-socket launch claim. Released when the process exits or the
+/// file handle is dropped; the lock file itself is left in place.
+struct LaunchLock {
+    #[cfg(unix)]
+    _file: std::fs::File,
+}
 
 #[derive(Parser)]
 #[command(
@@ -195,10 +217,93 @@ fn main() {
 
     log_startup(&identity, &paths, cli.headless);
 
+    let pid = std::process::id();
+    let socket_path = if standalone_viewer {
+        viewer_socket_path(&paths, pid)
+    } else if standalone_editor {
+        paths.editor_socket_path()
+    } else {
+        paths.socket_path.clone()
+    };
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
+
+    // Claim singleton ownership *before* heavy Core/GUI initialisation. The
+    // winner binds the socket immediately; losers forward and exit so two
+    // near-simultaneous launches can never open duplicate windows.
+    let mut _launch_lock: Option<LaunchLock> = None;
+    let mut prebound_listener: Option<PreboundListener> = None;
+    if !standalone_viewer {
+        let lock = match acquire_launch_lock(&socket_path, LAUNCH_LOCK_WAIT) {
+            Ok(lock) => lock,
+            Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
+                tracing::warn!(
+                    target: "photon::startup",
+                    socket = %socket_path.display(),
+                    %err,
+                    "another launch holds the instance lock; forwarding"
+                );
+                if forward_to_owner(&socket_path, &initial_cmd) {
+                    return;
+                }
+                eprintln!(
+                    "photon: another instance is starting for {} but did not answer within the launch timeout; not opening a duplicate window",
+                    socket_path.display()
+                );
+                std::process::exit(1);
+            }
+            Err(err) => {
+                tracing::error!(
+                    target: "photon::startup",
+                    socket = %socket_path.display(),
+                    %err,
+                    "failed to acquire launch lock"
+                );
+                eprintln!(
+                    "photon: cannot acquire launch lock for {}: {err}",
+                    socket_path.display()
+                );
+                std::process::exit(1);
+            }
+        };
+        _launch_lock = Some(lock);
+
+        #[cfg(unix)]
+        {
+            match rt.block_on(bind_socket(&socket_path)) {
+                Ok(listener) => prebound_listener = Some(listener),
+                Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+                    tracing::warn!(
+                        target: "photon::startup",
+                        socket = %socket_path.display(),
+                        %err,
+                        "another instance already owns the socket; forwarding"
+                    );
+                    if forward_to_owner(&socket_path, &initial_cmd) {
+                        return;
+                    }
+                    eprintln!(
+                        "photon: {} is owned by another instance that did not answer within the launch timeout; not opening a duplicate window",
+                        socket_path.display()
+                    );
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    tracing::error!(
+                        target: "photon::startup",
+                        socket = %socket_path.display(),
+                        %err,
+                        "failed to bind IPC socket"
+                    );
+                    eprintln!("photon: failed to bind {}: {err}", socket_path.display());
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
 
     let mut core = if standalone_viewer || standalone_editor {
         Core::new_viewer_ephemeral(cli.headless, cli.safe_mode)
@@ -224,14 +329,6 @@ fn main() {
         let _ = core.dispatch(Envelope::new("boot-open", ClientKind::Cli, cmd));
     }
 
-    let pid = std::process::id();
-    let socket_path = if standalone_viewer {
-        viewer_socket_path(&paths, pid)
-    } else if standalone_editor {
-        paths.editor_socket_path()
-    } else {
-        paths.socket_path.clone()
-    };
     let initial_viewer_canon = core
         .snapshot()
         .meta
@@ -246,7 +343,17 @@ fn main() {
         let ipc_handle = handle.clone();
         let ipc_socket = socket_path.clone();
         rt.spawn(async move {
-            if let Err(err) = serve(&ipc_socket, ipc_handle).await {
+            #[cfg(unix)]
+            let result = match prebound_listener {
+                Some(listener) => serve_bound(listener, ipc_handle).await,
+                None => serve(&ipc_socket, ipc_handle).await,
+            };
+            #[cfg(not(unix))]
+            let result = {
+                let _ = prebound_listener;
+                serve(&ipc_socket, ipc_handle).await
+            };
+            if let Err(err) = result {
                 tracing::error!(target: "photon::ipc", %err, "IPC server stopped");
             }
         });
@@ -399,11 +506,13 @@ fn main_instance_viewing_path(socket_path: &Path, canon: &Path) -> bool {
         return false;
     };
     rt.block_on(async move {
-        let Ok(IpcResponse::Query { data }) = send_once(
+        let Ok(IpcResponse::Query { data }) = send_once_timeout(
             socket_path,
             &IpcRequest::Query {
                 query: Query::State,
             },
+            FORWARD_CONNECT_TIMEOUT,
+            FORWARD_RESPONSE_TIMEOUT,
         )
         .await
         else {
@@ -421,10 +530,31 @@ fn main_instance_viewing_path(socket_path: &Path, canon: &Path) -> bool {
     })
 }
 
+/// Forward a command to a live instance with a short overall budget. Returns
+/// `false` immediately when the socket does not exist so cold starts stay fast.
 fn try_forward_to_running(socket_path: &Path, command: Command) -> bool {
     if !socket_path.exists() {
         return false;
     }
+    forward_command_bounded(socket_path, command)
+}
+
+/// Lock/acquisition loser path: the owner may still be publishing its socket,
+/// so retry within the launch budget even if the path is not visible yet.
+fn forward_to_owner(socket_path: &Path, initial_cmd: &Option<Command>) -> bool {
+    let forward_cmd = initial_cmd.clone().unwrap_or(Command::FocusWindow);
+    if !forward_command_bounded(socket_path, forward_cmd) {
+        return false;
+    }
+    if initial_cmd.is_some() {
+        // `app.rs` raises the window on the wake sequence; keep the legacy
+        // "command + FocusWindow" semantics from the previous fix.
+        let _ = forward_command_bounded(socket_path, Command::FocusWindow);
+    }
+    true
+}
+
+fn forward_command_bounded(socket_path: &Path, command: Command) -> bool {
     let Ok(rt) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -436,11 +566,113 @@ fn try_forward_to_running(socket_path: &Path, command: Command) -> bool {
         ClientKind::Cli,
         command,
     );
-    rt.block_on(async move {
-        send_once(socket_path, &IpcRequest::Dispatch { envelope: env })
-            .await
-            .is_ok()
-    })
+    rt.block_on(forward_envelope(socket_path, env))
+}
+
+async fn forward_envelope(socket_path: &Path, envelope: Envelope) -> bool {
+    let deadline = Instant::now() + FORWARD_TOTAL_TIMEOUT;
+    let mut last_error: Option<String> = None;
+    const ATTEMPTS: usize = 3;
+
+    for attempt in 0..ATTEMPTS {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let response_timeout = remaining.min(FORWARD_RESPONSE_TIMEOUT);
+        match send_once_timeout(
+            socket_path,
+            &IpcRequest::Dispatch {
+                envelope: envelope.clone(),
+            },
+            FORWARD_CONNECT_TIMEOUT,
+            response_timeout,
+        )
+        .await
+        {
+            Ok(_) => return true,
+            Err(err) => last_error = Some(err),
+        }
+        if attempt + 1 < ATTEMPTS {
+            let pause = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(100));
+            if pause.is_zero() {
+                break;
+            }
+            tokio::time::sleep(pause).await;
+        }
+    }
+
+    tracing::warn!(
+        target: "photon::startup",
+        socket = %socket_path.display(),
+        error = last_error.as_deref().unwrap_or("unknown forwarding error"),
+        "could not reach the running instance within the launch timeout"
+    );
+    false
+}
+
+fn launch_lock_path(socket_path: &Path) -> PathBuf {
+    let name = socket_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("ipc");
+    socket_path.with_file_name(format!("{name}.launch.lock"))
+}
+
+/// Per-socket exclusive launch claim (`flock(LOCK_EX | LOCK_NB)`).
+///
+/// A dedicated lock per Browser/Editor socket avoids serialising the two
+/// roles against each other while still making simultaneous launches of the
+/// same role deterministic. The kernel releases the lock automatically when
+/// the process dies, so a crashed owner cannot leave a stuck claim.
+fn acquire_launch_lock(socket_path: &Path, timeout: Duration) -> std::io::Result<LaunchLock> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::io::AsRawFd;
+
+        let lock_path = launch_lock_path(socket_path);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        let _ = std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600));
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc == 0 {
+                return Ok(LaunchLock { _file: file });
+            }
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EWOULDBLOCK)
+                && err.raw_os_error() != Some(libc::EAGAIN)
+            {
+                return Err(err);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("timed out waiting for launch lock {}", lock_path.display()),
+                ));
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(50)));
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (socket_path, timeout);
+        Ok(LaunchLock {})
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -590,5 +822,33 @@ mod tests {
             compute_launch_route(true, false, false, false, false, None),
             LaunchRoute::DirectStart
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_lock_is_exclusive_and_released_on_drop() {
+        let root = std::env::temp_dir().join(format!(
+            "photon-launch-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("control.sock");
+
+        let first = acquire_launch_lock(&socket, Duration::from_millis(50)).unwrap();
+        let err = acquire_launch_lock(&socket, Duration::from_millis(60))
+            .err()
+            .expect("second claim must not acquire while the first is held");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+
+        drop(first);
+        let reacquired = acquire_launch_lock(&socket, Duration::from_millis(200));
+        assert!(reacquired.is_ok());
+
+        drop(reacquired);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

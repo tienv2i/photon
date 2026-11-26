@@ -48,6 +48,7 @@ fluent-templates = "0.15"
 iced = { version = "0.14", features = ["wgpu", "tiny-skia", "tokio", "image", "svg", "advanced"] }
 image = { version = "0.25", features = ["avif-native"] }
 jxl-oxide = "0.12"
+libc = "0.2"
 psd = "0.3"
 rawler = "0.7"
 rayon = "1.10"

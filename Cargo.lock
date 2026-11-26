@@ -3657,6 +3657,7 @@ dependencies = [
  "clap",
  "iced",
  "image",
+ "libc",
  "photon-browser",
  "photon-canvas",
  "photon-core",

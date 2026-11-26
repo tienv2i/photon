@@ -206,6 +206,7 @@ label-background = Background
 action-swap-colors = Swap Colors
 action-reset-colors = Reset Colors
 label-canvas-bg = Canvas Background
+label-canvas-anchor = Anchor
 label-viewport-bg = Viewport Background
 label-transparent = Transparent
 label-sampled-color = Sampled Color

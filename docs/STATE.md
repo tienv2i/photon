@@ -18,7 +18,7 @@ All workspace checks below were executed after the final Rust edits:
 | Check | Command | Result |
 |---|---|---|
 | Formatting | `just fmt-check` (`cargo fmt --all -- --check`) | Passed |
-| Workspace tests | `just test` (`cargo test --workspace`) | **225 passed, 0 failed** (`photon-browser`: 7, `photon-canvas`: 13, `photon-cli`: 1, `photon-core`: 33 unit + 8 `automation_e2e`, `photon-desktop`: 20, `photon-dialogs`: 12, `photon-editor`: 5, `photon-i18n`: 3, `photon-image`: 35, `photon-ipc`: 8, `photon-panels`: 13, `photon-plugins`: 1 unit + 12 `plugin_bridge_tests`, `photon-protocol`: 13, `photon-storage`: 13, `photon-ui`: 21, `photon-viewer`: 7) |
+| Workspace tests | `just test` (`cargo test --workspace`) | **266 passed, 0 failed** (`photon-browser`: 8, `photon-canvas`: 13, `photon-cli`: 1, `photon-core`: 37 unit + 8 `automation_e2e`, `photon-desktop`: 22, `photon-dialogs`: 12, `photon-editor`: 14, `photon-i18n`: 3, `photon-image`: 46, `photon-ipc`: 8, `photon-panels`: 13, `photon-plugins`: 1 unit + 12 `plugin_bridge_tests`, `photon-protocol`: 17, `photon-storage`: 13, `photon-ui`: 29, `photon-viewer`: 9) |
 
 ## Implemented Feature Milestones
 
@@ -56,8 +56,14 @@ All workspace checks below were executed after the final Rust edits:
     - `boot()` no longer walks a whole folder: image probing is limited to a ±8 window around the active viewer page, Browser thumbnails are scheduled from the observed scroll viewport (about 120 entries initially, 24 in flight, 512-texture retention cap), and Viewer windows preload only their page neighbourhood. A 20k-image Browser folder now reaches first frame in ~1.3 s with ~385 MB RSS (previously ~6.1 s and ~5.1 GB), and a single-image Viewer in a 20k-image folder in ~0.2 s / ~119 MB (previously ~2.6 s / ~2.6 GB).
     - Browser/Editor launches claim a per-socket `flock` lock and pre-bind the IPC socket before `Core`/GUI init; simultaneous launches forward to the winner instead of opening duplicate windows, stale sockets are reclaimed, and launch-time IPC forwarding is bounded (500 ms connect / 2 s response) instead of hanging behind a busy core.
     - `photon %U` is now the Browser app-menu entry (no image MIME types), while `io.github.tienv2i.Photon.Viewer.desktop` (`--viewer-window`, `.Viewer` WMClass) is the default image handler installed by `scripts/install.py --set-default`. Legacy configs (`schema_version` absent) with the old `remembered` + `windowMaximized=true` default migrate once to `Maximized`.
+14. **Phase 1: UI/Font Scaling, Context Menus, 2-Line Sliders & Browser/Viewer Polish**:
+    - Bottom-anchored context menus and L3+ cascading submenus (`photon-ui/src/menu.rs`), reusable 2-line slider+stepper controls (`photon-ui/src/panel.rs`), live `UI Scale` / `Font Scale` / `Display Font` with GNOME fractional scaling support (`photon-ui/src/typography.rs`, `photon-desktop`), Viewer auto-hiding edge navigation (`photon-viewer`), Browser **Edit** menu, and normalized plugin/action labels (`photon-plugins`, `photon-browser`, `photon-viewer`).
+15. **Phase 2: Photoshop-Aligned Shortcuts, Tab Context Menu, Duplicate Image & Smart Paste**:
+    - Photoshop-aligned Editor shortcuts and menus, Document Tab context menu (Close, Close Others, Close Right, Duplicate), **Image → Duplicate Image**, **New from Clipboard** in the New Document dialog, and **Smart Paste** placement/scaling options.
+16. **Phase 3: Non-Destructive Vector & Text Layers, Path Tools, Transform Each & Vector Blend**:
+    - Non-destructive `LayerKind::Vector` (`V` badge) and `LayerKind::Text` (`T` badge) layers in `photon-protocol` and `photon-image`, **Path Select** (`A`), **Pen** (`P`), **Shape** (`U`), and **Text** (`T`) tools, **Vector** menu (**Transform Each…** with `Repeat Step` & `Apply to Duplicate`, **Vector Blend…**, **Convert Shape to Path**, **Rasterize Layer**), and GPU/SVG/fontdb + procedural fallback rasterization.
 
 ## Verification Scope Notes
 
-- Automated `just test` validates domain logic, protocol schemas, IPC, replay, image processing (`selection`, `drawing`, `healing`, `ora`, codecs, `denoise_rgba`, affine transforms), plugin bridge (`PhotonNdjsonV1` & `JsonlStdioV1`), i18n parity (756 keys), and UI/canvas/transform math.
+- Automated `just test` validates domain logic, protocol schemas, IPC, replay, image processing (`selection`, `drawing`, `healing`, `ora`, codecs, `denoise_rgba`, affine transforms, vector/text rasterization), plugin bridge (`PhotonNdjsonV1` & `JsonlStdioV1`), i18n parity (1057 keys), and UI/canvas/transform math.
 - Live GPU/window rendering (`wgpu` / `iced::daemon`) is verified interactively using `photon` + `photonctl debug ui-tree` + `photonctl debug screenshot` per [WORKFLOW.md](WORKFLOW.md).

@@ -206,6 +206,7 @@ label-background = Màu nền
 action-swap-colors = Đổi màu chính & nền
 action-reset-colors = Đặt lại Đen & Trắng
 label-canvas-bg = Nền khung vẽ
+label-canvas-anchor = Điểm neo
 label-viewport-bg = Màu nền vùng làm việc
 label-transparent = Trong suốt
 label-sampled-color = Màu đã hút

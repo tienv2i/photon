@@ -13,7 +13,9 @@ mod command;
 mod editor_types;
 mod layout;
 mod state;
+mod text_types;
 mod translate;
+mod vector_types;
 
 pub use ai::*;
 pub use batch::*;
@@ -21,7 +23,9 @@ pub use command::*;
 pub use editor_types::*;
 pub use layout::*;
 pub use state::*;
+pub use text_types::*;
 pub use translate::*;
+pub use vector_types::*;
 
 /// Wire protocol version. Independent from application semantic version.
 pub const PROTOCOL_VERSION: u32 = 1;

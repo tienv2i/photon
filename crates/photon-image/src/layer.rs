@@ -3,12 +3,20 @@
 use std::sync::Arc;
 
 use image::{Rgba, RgbaImage};
-use photon_protocol::{BlendMode, LayerEffect, LayerSummary, UiText};
+use photon_protocol::{
+    BlendMode, LayerEffect, LayerKind, LayerSummary, TextLayerData, UiText, VectorLayerData,
+    VectorPathNode, VectorShape,
+};
 
 use crate::ImageError;
 use crate::selection::SelectionMask;
+use crate::text::rasterize_text_layer;
+use crate::vector::{convert_shape_to_path, render_vector_layer};
 
-/// One raster layer in a document stack.
+/// One raster, vector, or text layer in a document stack.
+///
+/// For vector and text layers, `pixels` holds the cached rasterization at canvas resolution
+/// so all blend modes, masks, effects, thumbnails, and export pipelines work seamlessly.
 #[derive(Debug, Clone)]
 pub struct Layer {
     pub id: u64,
@@ -34,6 +42,10 @@ pub struct Layer {
     pub mask_offset_x: i32,
     pub mask_offset_y: i32,
     pub effect: Option<LayerEffect>,
+    /// Non-destructive vector shapes when this is a [`LayerKind::Vector`] layer.
+    pub vector_data: Option<VectorLayerData>,
+    /// Non-destructive editable text specification when this is a [`LayerKind::Text`] layer.
+    pub text_data: Option<TextLayerData>,
 }
 
 impl Layer {
@@ -56,7 +68,93 @@ impl Layer {
             mask_offset_x: 0,
             mask_offset_y: 0,
             effect: None,
+            vector_data: None,
+            text_data: None,
         }
+    }
+
+    /// Construct a [`LayerKind::Vector`] layer and populate its cached `pixels` buffer.
+    pub fn new_vector(
+        id: u64,
+        name: impl Into<String>,
+        canvas_width: u32,
+        canvas_height: u32,
+        vector_data: VectorLayerData,
+    ) -> Self {
+        let rendered = Arc::new(render_vector_layer(
+            &vector_data,
+            canvas_width,
+            canvas_height,
+        ));
+        let mut layer = Self::new(id, name, rendered);
+        layer.vector_data = Some(vector_data);
+        layer
+    }
+
+    /// Construct a [`LayerKind::Text`] layer and populate its cached `pixels` buffer.
+    pub fn new_text(
+        id: u64,
+        name: impl Into<String>,
+        canvas_width: u32,
+        canvas_height: u32,
+        text_data: TextLayerData,
+    ) -> Self {
+        let rendered = Arc::new(rasterize_text_layer(
+            &text_data,
+            canvas_width,
+            canvas_height,
+        ));
+        let mut layer = Self::new(id, name, rendered);
+        layer.text_data = Some(text_data);
+        layer
+    }
+
+    pub fn kind(&self) -> LayerKind {
+        if self.vector_data.is_some() {
+            LayerKind::Vector
+        } else if self.text_data.is_some() {
+            LayerKind::Text
+        } else {
+            LayerKind::Raster
+        }
+    }
+
+    pub fn is_raster(&self) -> bool {
+        self.kind() == LayerKind::Raster
+    }
+
+    pub fn is_vector(&self) -> bool {
+        self.vector_data.is_some()
+    }
+
+    pub fn is_text(&self) -> bool {
+        self.text_data.is_some()
+    }
+
+    /// Re-render cached `pixels` from `vector_data` or `text_data` at `(canvas_width, canvas_height)`.
+    pub fn refresh_cached_pixels(&mut self, canvas_width: u32, canvas_height: u32) {
+        if let Some(ref vdata) = self.vector_data {
+            let next = Arc::new(render_vector_layer(vdata, canvas_width, canvas_height));
+            self.original = Some(Arc::clone(&next));
+            self.pixels = next;
+        } else if let Some(ref tdata) = self.text_data {
+            let next = Arc::new(rasterize_text_layer(tdata, canvas_width, canvas_height));
+            self.original = Some(Arc::clone(&next));
+            self.pixels = next;
+        }
+    }
+
+    /// Convert a [`LayerKind::Vector`] or [`LayerKind::Text`] layer into a permanent
+    /// [`LayerKind::Raster`] layer while keeping its rendered `pixels`.
+    /// Returns `true` if the layer was previously vector or text.
+    pub fn rasterize(&mut self, canvas_width: u32, canvas_height: u32) -> bool {
+        if self.vector_data.is_none() && self.text_data.is_none() {
+            return false;
+        }
+        self.refresh_cached_pixels(canvas_width, canvas_height);
+        self.vector_data = None;
+        self.text_data = None;
+        true
     }
 
     pub fn dimensions(&self) -> (u32, u32) {
@@ -72,6 +170,7 @@ impl Layer {
         LayerSummary {
             id: self.id,
             name: self.name.clone(),
+            kind: self.kind(),
             visible: self.visible,
             locked: self.locked,
             opacity: self.opacity,
@@ -87,6 +186,11 @@ impl Layer {
             effect: self.effect.clone(),
         }
     }
+}
+
+/// Convert a vector or text [`Layer`] in-place into a [`LayerKind::Raster`] layer.
+pub fn rasterize_layer(layer: &mut Layer, canvas_width: u32, canvas_height: u32) -> bool {
+    layer.rasterize(canvas_width, canvas_height)
 }
 
 /// Ordered stack of raster layers sharing a document canvas.
@@ -176,6 +280,47 @@ pub enum LayerOperation {
         id: u64,
         effect: LayerEffect,
     },
+    AddVectorLayer {
+        name: String,
+        data: VectorLayerData,
+    },
+    UpdateVectorLayer {
+        id: u64,
+        data: VectorLayerData,
+    },
+    AddVectorShape {
+        layer_id: u64,
+        shape: VectorShape,
+    },
+    UpdateVectorShape {
+        layer_id: u64,
+        shape: VectorShape,
+    },
+    UpdateVectorPathNodes {
+        layer_id: u64,
+        shape_id: u64,
+        nodes: Vec<VectorPathNode>,
+        closed: Option<bool>,
+    },
+    DeleteVectorShape {
+        layer_id: u64,
+        shape_id: u64,
+    },
+    ConvertShapeToPath {
+        layer_id: u64,
+        shape_id: u64,
+    },
+    AddTextLayer {
+        name: String,
+        data: TextLayerData,
+    },
+    UpdateTextLayer {
+        id: u64,
+        data: TextLayerData,
+    },
+    RasterizeLayer {
+        id: u64,
+    },
 }
 
 impl LayerOperation {
@@ -189,6 +334,24 @@ impl LayerOperation {
                 };
                 UiText::with("op_layer_add", [("name", display)])
             }
+            Self::AddVectorLayer { name, .. } => {
+                let display = if name.trim().is_empty() {
+                    "Vector Layer".to_owned()
+                } else {
+                    name.trim().to_owned()
+                };
+                UiText::with("op_layer_add", [("name", display)])
+            }
+            Self::AddTextLayer { name, data } => {
+                let display = if !name.trim().is_empty() {
+                    name.trim().to_owned()
+                } else if !data.text.trim().is_empty() {
+                    data.text.lines().next().unwrap_or("Text").trim().to_owned()
+                } else {
+                    "Text Layer".to_owned()
+                };
+                UiText::with("op_layer_add", [("name", display)])
+            }
             Self::AddEffect { name, effect } => {
                 let display = if name.trim().is_empty() {
                     effect.default_name().to_owned()
@@ -197,7 +360,15 @@ impl LayerOperation {
                 };
                 UiText::with("op_layer_add", [("name", display)])
             }
-            Self::UpdateEffect { .. } => UiText::new("op_layer_props"),
+            Self::UpdateEffect { .. }
+            | Self::UpdateVectorLayer { .. }
+            | Self::AddVectorShape { .. }
+            | Self::UpdateVectorShape { .. }
+            | Self::UpdateVectorPathNodes { .. }
+            | Self::DeleteVectorShape { .. }
+            | Self::ConvertShapeToPath { .. }
+            | Self::UpdateTextLayer { .. }
+            | Self::RasterizeLayer { .. } => UiText::new("op_layer_props"),
             Self::Duplicate { .. } => UiText::new("op_layer_duplicate"),
             Self::Delete { .. } => UiText::new("op_layer_delete"),
             Self::Reorder { .. } => UiText::new("op_layer_reorder"),
@@ -261,6 +432,67 @@ impl LayerStack {
         }
         self.active_layer_id = id;
         Ok(true)
+    }
+
+    /// Add a new [`LayerKind::Vector`] layer right above the active layer and select it.
+    pub fn add_vector_layer(&mut self, name: impl Into<String>, data: VectorLayerData) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let raw_name = name.into();
+        let label = if raw_name.trim().is_empty() {
+            format!("Vector {id}")
+        } else {
+            raw_name.trim().to_owned()
+        };
+        let layer = Layer::new_vector(id, label, self.canvas_width, self.canvas_height, data);
+        let insert_at = (self.active_index() + 1).min(self.layers.len());
+        self.layers.insert(insert_at, layer);
+        self.active_layer_id = id;
+        id
+    }
+
+    /// Add a new [`LayerKind::Text`] layer right above the active layer and select it.
+    pub fn add_text_layer(&mut self, name: impl Into<String>, data: TextLayerData) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let raw_name = name.into();
+        let label = if !raw_name.trim().is_empty() {
+            raw_name.trim().to_owned()
+        } else if !data.text.trim().is_empty() {
+            data.text.lines().next().unwrap_or("Text").trim().to_owned()
+        } else {
+            format!("Text {id}")
+        };
+        let layer = Layer::new_text(id, label, self.canvas_width, self.canvas_height, data);
+        let insert_at = (self.active_index() + 1).min(self.layers.len());
+        self.layers.insert(insert_at, layer);
+        self.active_layer_id = id;
+        id
+    }
+
+    /// Re-render cached `pixels` for a vector or text layer by `id`.
+    pub fn refresh_layer_pixels(&mut self, id: u64) -> Result<bool, ImageError> {
+        let Some(idx) = self.index_of(id) else {
+            return Err(ImageError::coded("layer_not_found"));
+        };
+        if self.layers[idx].is_raster() {
+            return Ok(false);
+        }
+        let (cw, ch) = (self.canvas_width, self.canvas_height);
+        self.layers[idx].refresh_cached_pixels(cw, ch);
+        Ok(true)
+    }
+
+    /// Convert a vector or text layer into a permanent raster layer by `id`.
+    pub fn rasterize_layer(&mut self, id: u64) -> Result<bool, ImageError> {
+        let Some(idx) = self.index_of(id) else {
+            return Err(ImageError::coded("layer_not_found"));
+        };
+        if self.layers[idx].locked {
+            return Err(ImageError::coded("layer_locked"));
+        }
+        let (cw, ch) = (self.canvas_width, self.canvas_height);
+        Ok(self.layers[idx].rasterize(cw, ch))
     }
 
     pub fn apply_op(&mut self, op: &LayerOperation) -> Result<bool, ImageError> {
@@ -449,6 +681,8 @@ impl LayerStack {
                 let target = &mut self.layers[idx - 1];
                 target.pixels = Arc::new(merged);
                 target.original = Some(Arc::clone(&target.pixels));
+                target.vector_data = None;
+                target.text_data = None;
                 target.mask = None;
                 target.mask_enabled = true;
                 target.editing_mask = false;
@@ -468,6 +702,7 @@ impl LayerStack {
             LayerOperation::Flatten => {
                 if self.layers.len() == 1
                     && self.background.is_none()
+                    && self.layers[0].is_raster()
                     && self.layers[0].visible
                     && (self.layers[0].opacity - 1.0).abs() < 1e-4
                     && self.layers[0].blend_mode == BlendMode::Normal
@@ -646,6 +881,147 @@ impl LayerStack {
                 self.layers[idx].effect = Some(effect.clone());
                 Ok(true)
             }
+            LayerOperation::AddVectorLayer { name, data } => {
+                self.add_vector_layer(name, data.clone());
+                Ok(true)
+            }
+            LayerOperation::UpdateVectorLayer { id, data } => {
+                let Some(idx) = self.index_of(*id) else {
+                    return Err(ImageError::coded("layer_not_found"));
+                };
+                if self.layers[idx].locked {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                if self.layers[idx].vector_data.as_ref() == Some(data) {
+                    return Ok(false);
+                }
+                self.layers[idx].vector_data = Some(data.clone());
+                self.layers[idx].text_data = None;
+                let (cw, ch) = (self.canvas_width, self.canvas_height);
+                self.layers[idx].refresh_cached_pixels(cw, ch);
+                Ok(true)
+            }
+            LayerOperation::AddVectorShape { layer_id, shape } => {
+                let Some(idx) = self.index_of(*layer_id) else {
+                    return Err(ImageError::coded("layer_not_found"));
+                };
+                if self.layers[idx].locked {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                let vdata = self.layers[idx]
+                    .vector_data
+                    .get_or_insert_with(VectorLayerData::new);
+                vdata.push_shape(shape.clone());
+                let (cw, ch) = (self.canvas_width, self.canvas_height);
+                self.layers[idx].refresh_cached_pixels(cw, ch);
+                self.active_layer_id = *layer_id;
+                Ok(true)
+            }
+            LayerOperation::UpdateVectorShape { layer_id, shape } => {
+                let Some(idx) = self.index_of(*layer_id) else {
+                    return Err(ImageError::coded("layer_not_found"));
+                };
+                if self.layers[idx].locked {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                let Some(vdata) = &mut self.layers[idx].vector_data else {
+                    return Err(ImageError::coded("not_a_vector_layer"));
+                };
+                let Some(existing) = vdata.shape_mut(shape.id) else {
+                    return Err(ImageError::coded("vector_shape_not_found"));
+                };
+                if existing == shape {
+                    return Ok(false);
+                }
+                *existing = shape.clone();
+                let (cw, ch) = (self.canvas_width, self.canvas_height);
+                self.layers[idx].refresh_cached_pixels(cw, ch);
+                Ok(true)
+            }
+            LayerOperation::UpdateVectorPathNodes {
+                layer_id,
+                shape_id,
+                nodes,
+                closed,
+            } => {
+                let Some(idx) = self.index_of(*layer_id) else {
+                    return Err(ImageError::coded("layer_not_found"));
+                };
+                if self.layers[idx].locked {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                let Some(vdata) = &mut self.layers[idx].vector_data else {
+                    return Err(ImageError::coded("not_a_vector_layer"));
+                };
+                let Some(shape) = vdata.shape_mut(*shape_id) else {
+                    return Err(ImageError::coded("vector_shape_not_found"));
+                };
+                let next_closed = closed.unwrap_or_else(|| shape.geometry.is_closed());
+                let next_geom = photon_protocol::VectorGeometry::Path {
+                    nodes: nodes.clone(),
+                    closed: next_closed,
+                };
+                if shape.geometry == next_geom {
+                    return Ok(false);
+                }
+                shape.geometry = next_geom;
+                let (cw, ch) = (self.canvas_width, self.canvas_height);
+                self.layers[idx].refresh_cached_pixels(cw, ch);
+                Ok(true)
+            }
+            LayerOperation::DeleteVectorShape { layer_id, shape_id } => {
+                let Some(idx) = self.index_of(*layer_id) else {
+                    return Err(ImageError::coded("layer_not_found"));
+                };
+                if self.layers[idx].locked {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                let Some(vdata) = &mut self.layers[idx].vector_data else {
+                    return Err(ImageError::coded("not_a_vector_layer"));
+                };
+                if vdata.remove_shape(*shape_id).is_none() {
+                    return Ok(false);
+                }
+                let (cw, ch) = (self.canvas_width, self.canvas_height);
+                self.layers[idx].refresh_cached_pixels(cw, ch);
+                Ok(true)
+            }
+            LayerOperation::ConvertShapeToPath { layer_id, shape_id } => {
+                let Some(idx) = self.index_of(*layer_id) else {
+                    return Err(ImageError::coded("layer_not_found"));
+                };
+                if self.layers[idx].locked {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                let Some(vdata) = &mut self.layers[idx].vector_data else {
+                    return Err(ImageError::coded("not_a_vector_layer"));
+                };
+                let Some(shape) = vdata.shape_mut(*shape_id) else {
+                    return Err(ImageError::coded("vector_shape_not_found"));
+                };
+                Ok(convert_shape_to_path(shape))
+            }
+            LayerOperation::AddTextLayer { name, data } => {
+                self.add_text_layer(name, data.clone());
+                Ok(true)
+            }
+            LayerOperation::UpdateTextLayer { id, data } => {
+                let Some(idx) = self.index_of(*id) else {
+                    return Err(ImageError::coded("layer_not_found"));
+                };
+                if self.layers[idx].locked {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                if self.layers[idx].text_data.as_ref() == Some(data) {
+                    return Ok(false);
+                }
+                self.layers[idx].text_data = Some(data.clone());
+                self.layers[idx].vector_data = None;
+                let (cw, ch) = (self.canvas_width, self.canvas_height);
+                self.layers[idx].refresh_cached_pixels(cw, ch);
+                Ok(true)
+            }
+            LayerOperation::RasterizeLayer { id } => self.rasterize_layer(*id),
         }
     }
 }
@@ -993,4 +1369,134 @@ pub fn render_layer_thumbnails(stack: &LayerStack, max_edge: u32) -> Vec<LayerTh
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use photon_protocol::{TextAlign, VectorStroke};
+
+    use super::*;
+
+    #[test]
+    fn vector_and_text_layers_report_kind_and_rasterize_cleanly() {
+        let base = Arc::new(RgbaImage::from_pixel(64, 64, Rgba([20, 20, 20, 255])));
+        let mut stack = LayerStack::from_single(base);
+        assert_eq!(stack.summaries()[0].kind, LayerKind::Raster);
+
+        let rect = VectorShape::new_rect(
+            1,
+            "Red Square",
+            8.0,
+            8.0,
+            24.0,
+            24.0,
+            0.0,
+            Some([250, 30, 30]),
+            VectorStroke::none(),
+        );
+        stack
+            .apply_op(&LayerOperation::AddVectorLayer {
+                name: "Shapes".to_owned(),
+                data: VectorLayerData::from_shapes(vec![rect]),
+            })
+            .expect("add vector layer");
+        let vector_id = stack.active_layer_id;
+        assert_eq!(stack.active_layer().kind(), LayerKind::Vector);
+        assert_eq!(stack.summaries()[1].kind, LayerKind::Vector);
+
+        stack
+            .apply_op(&LayerOperation::AddTextLayer {
+                name: String::new(),
+                data: TextLayerData {
+                    text: "TITLE".to_owned(),
+                    font_size: 20.0,
+                    color: [40, 220, 250],
+                    align: TextAlign::Left,
+                    x: 4.0,
+                    y: 36.0,
+                    ..TextLayerData::default()
+                },
+            })
+            .expect("add text layer");
+        let text_id = stack.active_layer_id;
+        assert_eq!(stack.active_layer().kind(), LayerKind::Text);
+        assert_eq!(stack.active_layer().name, "TITLE");
+        assert_eq!(stack.summaries()[2].kind, LayerKind::Text);
+
+        // Compositing and thumbnail generation work seamlessly across Raster + Vector + Text.
+        let composited = composite_stack(&stack);
+        assert_eq!(composited.get_pixel(16, 16).0, [250, 30, 30, 255]);
+        let thumbs = render_layer_thumbnails(&stack, 32);
+        assert_eq!(thumbs.len(), 3);
+
+        // Rasterize both vector and text layers -> kind becomes Raster while pixels stay intact.
+        assert!(
+            stack
+                .apply_op(&LayerOperation::RasterizeLayer { id: vector_id })
+                .expect("rasterize vector")
+        );
+        assert!(
+            stack
+                .apply_op(&LayerOperation::RasterizeLayer { id: text_id })
+                .expect("rasterize text")
+        );
+        for summary in stack.summaries() {
+            assert_eq!(summary.kind, LayerKind::Raster);
+        }
+        assert_eq!(
+            composite_stack(&stack).get_pixel(16, 16).0,
+            [250, 30, 30, 255]
+        );
+    }
+
+    #[test]
+    fn vector_layer_operations_add_update_convert_and_delete_shapes() {
+        let base = Arc::new(RgbaImage::from_pixel(64, 64, Rgba([0, 0, 0, 255])));
+        let mut stack = LayerStack::from_single(base);
+        let layer_id = stack.add_vector_layer("Vectors", VectorLayerData::new());
+
+        let shape = VectorShape::new_rect(
+            1,
+            "Box",
+            10.0,
+            10.0,
+            20.0,
+            20.0,
+            0.0,
+            Some([200, 100, 50]),
+            VectorStroke::none(),
+        );
+        assert!(
+            stack
+                .apply_op(&LayerOperation::AddVectorShape {
+                    layer_id,
+                    shape: shape.clone(),
+                })
+                .expect("add shape")
+        );
+        assert!(
+            stack
+                .apply_op(&LayerOperation::ConvertShapeToPath {
+                    layer_id,
+                    shape_id: 1,
+                })
+                .expect("convert shape to path")
+        );
+        assert!(
+            stack
+                .apply_op(&LayerOperation::DeleteVectorShape {
+                    layer_id,
+                    shape_id: 1,
+                })
+                .expect("delete shape")
+        );
+        assert!(
+            stack
+                .active_layer()
+                .vector_data
+                .as_ref()
+                .expect("vector data")
+                .is_empty()
+        );
+    }
 }

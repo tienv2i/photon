@@ -7,7 +7,7 @@ use std::f64::consts::TAU;
 use image::{Rgba, RgbaImage};
 use photon_protocol::{
     BrushSettings, BrushSmoothingMode, BrushTip, DrawShapeKind, GradientColorMode, GradientKind,
-    ShapeFillMode, VectorPathNode,
+    ShapeFillMode, VectorPathNode, VectorStroke, VectorStrokeCap, VectorStrokeJoin,
 };
 
 use crate::pixels::{self, blend_source_over_pixel};
@@ -474,6 +474,248 @@ pub fn stroke_path(
         stroke_pts.push(stroke_pts[0]);
     }
     pixels::paint_stroke_with_brush(src, &stroke_pts, color, radius, opacity, false, brush)
+}
+
+/// Anti-aliased 4x4 supersampled vector polyline stroke honoring [`VectorStroke`]
+/// (`color`, `width`, `cap`: `Round`/`Butt`/`Square`, `join`: `Round`/`Miter`/`Bevel`).
+pub fn stroke_polyline_aa(
+    dst: &mut RgbaImage,
+    points: &[[f64; 2]],
+    closed: bool,
+    stroke: VectorStroke,
+    opacity: f32,
+) {
+    let (w, h) = dst.dimensions();
+    let alpha_scale = opacity.clamp(0.0, 1.0);
+    if w == 0 || h == 0 || points.is_empty() || stroke.width <= 1e-4 || alpha_scale <= 1e-4 {
+        return;
+    }
+
+    // Deduplicate consecutive near-identical vertices.
+    let mut clean: Vec<[f64; 2]> = Vec::with_capacity(points.len());
+    for &p in points {
+        if let Some(&last) = clean.last()
+            && (p[0] - last[0]).hypot(p[1] - last[1]) < 1e-5
+        {
+            continue;
+        }
+        clean.push(p);
+    }
+    if closed
+        && clean.len() >= 2
+        && (clean[0][0] - clean[clean.len() - 1][0]).hypot(clean[0][1] - clean[clean.len() - 1][1])
+            < 1e-5
+    {
+        clean.pop();
+    }
+
+    let half_w = (f64::from(stroke.width) * 0.5).max(0.25);
+    if clean.len() == 1 {
+        let c = clean[0];
+        let poly = [
+            [c[0] - half_w, c[1] - half_w],
+            [c[0] + half_w, c[1] - half_w],
+            [c[0] + half_w, c[1] + half_w],
+            [c[0] - half_w, c[1] + half_w],
+        ];
+        fill_polygon_aa(dst, &poly, stroke.color, alpha_scale);
+        return;
+    }
+
+    let n = clean.len();
+    let seg_count = if closed { n } else { n - 1 };
+
+    let mut min_x = clean[0][0];
+    let mut min_y = clean[0][1];
+    let mut max_x = clean[0][0];
+    let mut max_y = clean[0][1];
+    for &[x, y] in &clean[1..] {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    let pad = half_w * 2.5 + 2.0;
+    let left = (min_x - pad).floor().max(0.0) as u32;
+    let top = (min_y - pad).floor().max(0.0) as u32;
+    let right = ((max_x + pad).ceil().max(0.0) as u32).min(w);
+    let bottom = ((max_y + pad).ceil().max(0.0) as u32).min(h);
+    if left >= right || top >= bottom {
+        return;
+    }
+
+    // Precompute segment unit tangents and normals.
+    let mut segs = Vec::with_capacity(seg_count);
+    for i in 0..seg_count {
+        let a = clean[i];
+        let b = clean[(i + 1) % n];
+        let dx = b[0] - a[0];
+        let dy = b[1] - a[1];
+        let len = dx.hypot(dy);
+        if len > 1e-6 {
+            let ux = dx / len;
+            let uy = dy / len;
+            segs.push((a, b, len, [ux, uy], [-uy, ux], i));
+        }
+    }
+    if segs.is_empty() {
+        return;
+    }
+
+    // Precompute miter/bevel join triangles at interior vertices (or all vertices if closed).
+    // Each join wedge is represented by `(v, n_prev, n_next, is_miter)`.
+    let mut joins = Vec::new();
+    if stroke.join != VectorStrokeJoin::Round && segs.len() >= 2 {
+        let pair_count = if closed { segs.len() } else { segs.len() - 1 };
+        for k in 0..pair_count {
+            let s0 = segs[k];
+            let s1 = segs[(k + 1) % segs.len()];
+            // Only join consecutive original segments.
+            if (s0.5 + 1) % n != s1.5 {
+                continue;
+            }
+            let v = s1.0;
+            let u0 = s0.3;
+            let u1 = s1.3;
+            let cross = u0[0] * u1[1] - u0[1] * u1[0];
+            if cross.abs() <= 1e-5 {
+                continue;
+            }
+            // Outer side normal sign: if turning right (cross > 0), outer normal is -n; else +n.
+            let sign = if cross > 0.0 { -1.0 } else { 1.0 };
+            let n0 = [s0.4[0] * sign, s0.4[1] * sign];
+            let n1 = [s1.4[0] * sign, s1.4[1] * sign];
+            let p0 = [v[0] + n0[0] * half_w, v[1] + n0[1] * half_w];
+            let p1 = [v[0] + n1[0] * half_w, v[1] + n1[1] * half_w];
+            joins.push((v, p0, p1, n0, n1, u0, u1));
+        }
+    }
+
+    const SUB: usize = 4;
+    const SUB_OFFSETS: [f64; SUB] = [0.125, 0.375, 0.625, 0.875];
+    let half_w_sq = half_w * half_w;
+
+    let point_in_triangle = |p: [f64; 2], a: [f64; 2], b: [f64; 2], c: [f64; 2]| -> bool {
+        let c1 = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+        let c2 = (c[0] - b[0]) * (p[1] - b[1]) - (c[1] - b[1]) * (p[0] - b[0]);
+        let c3 = (a[0] - c[0]) * (p[1] - c[1]) - (a[1] - c[1]) * (p[0] - c[0]);
+        (c1 >= -1e-7 && c2 >= -1e-7 && c3 >= -1e-7) || (c1 <= 1e-7 && c2 <= 1e-7 && c3 <= 1e-7)
+    };
+
+    let sample_inside = |sx: f64, sy: f64| -> bool {
+        let first_idx = segs[0].5;
+        let last_idx = segs[segs.len() - 1].5;
+        for &(a, _b, len, u, n_vec, seg_idx) in &segs {
+            let rel_x = sx - a[0];
+            let rel_y = sy - a[1];
+            let along = rel_x * u[0] + rel_y * u[1];
+            let perp = (rel_x * n_vec[0] + rel_y * n_vec[1]).abs();
+            if perp > half_w {
+                continue;
+            }
+            let start_ext =
+                if !closed && seg_idx == first_idx && stroke.cap == VectorStrokeCap::Square {
+                    -half_w
+                } else {
+                    0.0
+                };
+            let end_ext = if !closed && seg_idx == last_idx && stroke.cap == VectorStrokeCap::Square
+            {
+                len + half_w
+            } else {
+                len
+            };
+            if along >= start_ext && along <= end_ext {
+                return true;
+            }
+            // Round caps at open endpoints.
+            if !closed && stroke.cap == VectorStrokeCap::Round {
+                if seg_idx == first_idx && along < 0.0 && (along * along + perp * perp) <= half_w_sq
+                {
+                    return true;
+                }
+                if seg_idx == last_idx {
+                    let da = along - len;
+                    if da > 0.0 && (da * da + perp * perp) <= half_w_sq {
+                        return true;
+                    }
+                }
+            }
+            // Round joins at interior/closed vertices.
+            if stroke.join == VectorStrokeJoin::Round {
+                let can_round_start = closed || seg_idx != first_idx;
+                let can_round_end = closed || seg_idx != last_idx;
+                if can_round_start && along < 0.0 && (along * along + perp * perp) <= half_w_sq {
+                    return true;
+                }
+                if can_round_end {
+                    let da = along - len;
+                    if da > 0.0 && (da * da + perp * perp) <= half_w_sq {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Check bevel / miter join wedges.
+        let p = [sx, sy];
+        for &(v, p0, p1, n0, n1, u0, u1) in &joins {
+            if point_in_triangle(p, v, p0, p1) {
+                return true;
+            }
+            if stroke.join == VectorStrokeJoin::Miter {
+                // Intersect outer offset lines p0 + t*u0 and p1 - s*u1.
+                let denom = u0[0] * u1[1] - u0[1] * u1[0];
+                if denom.abs() > 1e-5 {
+                    let dx = p1[0] - p0[0];
+                    let dy = p1[1] - p0[1];
+                    let t = (dx * u1[1] - dy * u1[0]) / denom;
+                    let miter_pt = [p0[0] + t * u0[0], p0[1] + t * u0[1]];
+                    let miter_dist = (miter_pt[0] - v[0]).hypot(miter_pt[1] - v[1]);
+                    // Standard SVG miter-limit of 4 * half_w; falls back to bevel when exceeded.
+                    if miter_dist <= half_w * 4.0 && point_in_triangle(p, p0, miter_pt, p1) {
+                        return true;
+                    }
+                    let _ = (n0, n1);
+                }
+            }
+        }
+        false
+    };
+
+    for py in top..bottom {
+        for px in left..right {
+            let bmin_x = px as f64 - half_w - 2.0;
+            let bmax_x = px as f64 + 1.0 + half_w + 2.0;
+            let bmin_y = py as f64 - half_w - 2.0;
+            let bmax_y = py as f64 + 1.0 + half_w + 2.0;
+            let near_any = segs.iter().any(|&(a, b, _, _, _, _)| {
+                let smin_x = a[0].min(b[0]);
+                let smax_x = a[0].max(b[0]);
+                let smin_y = a[1].min(b[1]);
+                let smax_y = a[1].max(b[1]);
+                smax_x >= bmin_x && smin_x <= bmax_x && smax_y >= bmin_y && smin_y <= bmax_y
+            });
+            if !near_any {
+                continue;
+            }
+            let mut hits = 0u8;
+            for &sy_off in &SUB_OFFSETS {
+                let sy = py as f64 + sy_off;
+                for &sx_off in &SUB_OFFSETS {
+                    let sx = px as f64 + sx_off;
+                    if sample_inside(sx, sy) {
+                        hits += 1;
+                    }
+                }
+            }
+            if hits > 0 {
+                let cov = f32::from(hits) / 16.0;
+                let pixel = dst.get_pixel_mut(px, py);
+                blend_source_over_pixel(pixel, stroke.color, (cov * alpha_scale).clamp(0.0, 1.0));
+            }
+        }
+    }
 }
 
 /// Draw a vector/geometric shape (stroke, fill, or both) onto `src`.

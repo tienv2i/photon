@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::ColorAdjustments;
+use crate::{ColorAdjustments, LayerKind};
 
 pub(crate) fn default_true() -> bool {
     true
@@ -558,6 +558,8 @@ impl LayerTransformSpec {
 pub struct LayerSummary {
     pub id: u64,
     pub name: String,
+    #[serde(default)]
+    pub kind: LayerKind,
     pub visible: bool,
     pub locked: bool,
     pub opacity: f32,

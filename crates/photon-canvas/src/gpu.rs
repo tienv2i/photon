@@ -137,6 +137,8 @@ type SimpleFrameKey = (String, u64, usize, u32, u32);
 
 struct CachedGpuTexture {
     revision: u64,
+    width: u32,
+    height: u32,
     image_view: wgpu::TextureView,
     bound_base: Option<SimpleFrameKey>,
     bound_compare: Option<SimpleFrameKey>,
@@ -1478,10 +1480,18 @@ impl Primitive for ImageQuadPrimitive {
             .map(|t| &t.view);
 
         if let Some(frame) = &self.frame {
-            let needs_upload = pipeline
-                .textures
-                .get(&frame.key)
-                .is_none_or(|tex| tex.revision != frame.revision);
+            let (target_w, target_h) = if frame.width > max_dim || frame.height > max_dim {
+                let scale = max_dim as f32 / frame.width.max(frame.height).max(1) as f32;
+                (
+                    ((frame.width as f32 * scale).round() as u32).max(1),
+                    ((frame.height as f32 * scale).round() as u32).max(1),
+                )
+            } else {
+                (frame.width.max(1), frame.height.max(1))
+            };
+            let needs_upload = pipeline.textures.get(&frame.key).is_none_or(|tex| {
+                tex.revision != frame.revision || tex.width != target_w || tex.height != target_h
+            });
 
             if needs_upload {
                 let (w, h, bytes) =
@@ -1511,6 +1521,8 @@ impl Primitive for ImageQuadPrimitive {
                     frame.key.clone(),
                     CachedGpuTexture {
                         revision: frame.revision,
+                        width: w,
+                        height: h,
                         image_view,
                         bound_base: base_override_key_rev.clone(),
                         bound_compare: secondary_key_rev.clone(),

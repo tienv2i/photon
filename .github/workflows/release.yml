@@ -1,0 +1,200 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "0.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-deb-appimage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build & packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config clang lld \
+            libopenjp2-7-dev libheif-dev libdav1d-dev libaom-dev \
+            libgtk-3-dev librsvg2-bin desktop-file-utils appstream \
+            patchelf squashfs-tools libfuse2t64 curl
+      - name: Build release binaries
+        run: cargo build --release -p photon-desktop -p photon-cli
+      - name: Build Debian/Ubuntu (.deb)
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${TAG:-0.0.1-beta}"
+          DEB_VER="$(echo "$TAG" | sed 's/-/~/g')"
+          PKG_DIR="$PWD/dist/deb-root"
+          mkdir -p "$PKG_DIR/DEBIAN"
+          python3 scripts/install.py install --skip-build --prefix "$PKG_DIR/usr"
+          sed -i "s|$PKG_DIR/usr|/usr|g" "$PKG_DIR/usr/share/applications/"*.desktop
+          cat > "$PKG_DIR/DEBIAN/control" <<EOF
+          Package: photon
+          Version: ${DEB_VER}
+          Section: graphics
+          Priority: optional
+          Architecture: amd64
+          Maintainer: tienv2i <tienv2i@users.noreply.github.com>
+          Depends: libc6, libgtk-3-0t64 | libgtk-3-0, libopenjp2-7, libheif1, libvulkan1 | libgl1
+          Description: Fast photo browser, viewer, and non-destructive layered editor
+           Photon is an automation-first, headless-capable image browser, viewer,
+           and non-destructive layered editor built in Rust.
+          EOF
+          mkdir -p dist/out
+          dpkg-deb --build --root-owner-group "$PKG_DIR" "dist/out/photon-${TAG}-amd64.deb"
+      - name: Build AppImage
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${TAG:-0.0.1-beta}"
+          APPDIR="$PWD/dist/AppDir"
+          python3 scripts/install.py install --skip-build --prefix "$APPDIR/usr"
+          sed -i "s|$APPDIR/usr|/usr|g" "$APPDIR/usr/share/applications/"*.desktop
+          cp "$APPDIR/usr/share/applications/io.github.tienv2i.Photon.desktop" "$APPDIR/io.github.tienv2i.Photon.desktop"
+          cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/io.github.tienv2i.Photon.png" "$APPDIR/io.github.tienv2i.Photon.png"
+          cat > "$APPDIR/AppRun" <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          export PATH="$HERE/usr/bin:$PATH"
+          export XDG_DATA_DIRS="$HERE/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+          exec "$HERE/usr/bin/photon" "$@"
+          EOF
+          chmod +x "$APPDIR/AppRun"
+          curl -fL -o appimagetool.AppImage "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x appimagetool.AppImage
+          ARCH=x86_64 ./appimagetool.AppImage --appimage-extract-and-run "$APPDIR" "dist/out/photon-${TAG}-x86_64.AppImage"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb-appimage
+          path: dist/out/*
+
+  build-rpm:
+    runs-on: ubuntu-24.04
+    container: fedora:41
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Fedora build & RPM dependencies
+        run: |
+          dnf install -y \
+            gcc clang lld pkgconf-pkg-config rust cargo rpm-build \
+            openjpeg2-devel libheif-devel gtk3-devel librsvg2-tools \
+            desktop-file-utils appstream python3
+      - name: Build release binaries
+        run: cargo build --release -p photon-desktop -p photon-cli
+      - name: Build Fedora RPM
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${TAG:-0.0.1-beta}"
+          RPM_VER="${TAG%%-*}"
+          RPM_REL="1"
+          if echo "$TAG" | grep -q "-"; then
+            RPM_REL="0.${TAG#*-}"
+            RPM_REL="${RPM_REL//-/.}"
+          fi
+          STAGE="$PWD/dist/rpm-stage"
+          python3 scripts/install.py install --skip-build --prefix "$STAGE/usr"
+          sed -i "s|$STAGE/usr|/usr|g" "$STAGE/usr/share/applications/"*.desktop
+          mkdir -p "$HOME/rpmbuild"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          cat > "$HOME/rpmbuild/SPECS/photon.spec" <<EOF
+          Name:           photon
+          Version:        ${RPM_VER}
+          Release:        ${RPM_REL}%{?dist}
+          Summary:        Fast photo browser, viewer, and non-destructive layered editor
+          License:        MIT
+          URL:            https://github.com/tienv2i/photon
+          Requires:       gtk3, openjpeg2-libs, libheif, hicolor-icon-theme
+
+          %description
+          Photon is an automation-first, headless-capable image browser, viewer,
+          and non-destructive layered editor built in Rust.
+
+          %install
+          mkdir -p %{buildroot}
+          cp -a "${STAGE}/usr" %{buildroot}/
+
+          %files
+          /usr/bin/photon
+          /usr/bin/photonctl
+          /usr/share/applications/*.desktop
+          /usr/share/metainfo/*.xml
+          /usr/share/icons/hicolor/*
+          EOF
+          rpmbuild -bb "$HOME/rpmbuild/SPECS/photon.spec"
+          mkdir -p dist/out
+          cp "$HOME/rpmbuild/RPMS/x86_64/"*.rpm dist/out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-rpm
+          path: dist/out/*.rpm
+
+  build-arch:
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Arch build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel rust clang lld pkgconf openjpeg2 libheif gtk3 \
+            librsvg desktop-file-utils appstream python
+      - name: Build Arch package (.pkg.tar.zst)
+        run: |
+          useradd -m builder
+          mkdir -p /tmp/arch-work
+          cp -a "$PWD" /tmp/arch-work/src
+          chown -R builder:builder /tmp/arch-work
+          su - builder -c "cd /tmp/arch-work/src/packaging/linux/arch && _srcdir=/tmp/arch-work/src makepkg -s --noconfirm"
+          mkdir -p dist/out
+          cp /tmp/arch-work/src/packaging/linux/arch/*.pkg.tar.zst dist/out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arch
+          path: dist/out/*.pkg.tar.zst
+
+  build-flatpak:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Flatpak & build bundle
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub \
+            org.freedesktop.Platform//24.08 \
+            org.freedesktop.Sdk//24.08 \
+            org.freedesktop.Sdk.Extension.rust-stable//24.08
+          flatpak-builder --user --force-clean --repo=flatpak-repo flatpak-build packaging/linux/io.github.tienv2i.Photon.yml
+          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${TAG:-0.0.1-beta}"
+          mkdir -p dist/out
+          flatpak build-bundle flatpak-repo "dist/out/photon-${TAG}-x86_64.flatpak" io.github.tienv2i.Photon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-flatpak
+          path: dist/out/*.flatpak
+
+  publish-release:
+    needs: [build-deb-appimage, build-rpm, build-arch, build-flatpak]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'rc') }}
+          generate_release_notes: true
+          files: release-assets/*

@@ -26,7 +26,7 @@ impl Default for OverlayMode {
     fn default() -> Self {
         Self::DimmedFrosted {
             dim_alpha: 0.56,
-            dismiss_on_backdrop: true,
+            dismiss_on_backdrop: false,
         }
     }
 }

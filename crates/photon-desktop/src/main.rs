@@ -12,8 +12,8 @@ use clap::{Parser, Subcommand};
 use photon_core::{Core, CoreRuntime};
 use photon_ipc::{
     IpcRequest, IpcResponse, ViewerInstanceInfo, acquire_viewer_path_lock, bind_socket,
-    find_live_viewer_for_path, register_viewer_instance, send_once_timeout, serve, serve_bound,
-    viewer_socket_path,
+    find_any_live_viewer, find_live_viewer_for_path, register_viewer_instance, send_once_timeout,
+    serve, serve_bound, viewer_socket_path,
 };
 use photon_protocol::{ClientKind, Command, Envelope, Language, Query};
 use photon_storage::logging::{initialize, log_shutdown, log_startup};
@@ -164,6 +164,18 @@ fn main() {
             && !cli.viewer_window
             && !cli.new_window
         {
+            let viewer_single = !cli.safe_mode
+                && Config::load_or_create(&paths.config_dir.join("config.json"))
+                    .0
+                    .viewer_single_instance;
+            if viewer_single && let Some(live) = find_any_live_viewer(&paths) {
+                let _ = try_forward_to_running(
+                    &live.socket_path,
+                    Command::OpenFiles { paths: raw_files },
+                );
+                let _ = try_forward_to_running(&live.socket_path, Command::FocusWindow);
+                return;
+            }
             let mut to_open = Vec::new();
             for raw in raw_files {
                 let canon = canonicalize_path_str(&raw);
@@ -208,11 +220,11 @@ fn main() {
             });
         }
     } else if route == LaunchRoute::ForwardOrStartBrowser {
-        let forward_cmd = initial_cmd.clone().unwrap_or(Command::FocusWindow);
+        let forward_cmd = initial_cmd.clone().unwrap_or(Command::SetWorkspace {
+            workspace: photon_protocol::Workspace::Browser,
+        });
         if try_forward_to_running(&paths.socket_path, forward_cmd) {
-            if initial_cmd.is_some() {
-                let _ = try_forward_to_running(&paths.socket_path, Command::FocusWindow);
-            }
+            let _ = try_forward_to_running(&paths.socket_path, Command::FocusWindow);
             return;
         }
     }

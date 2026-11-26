@@ -1,8 +1,24 @@
 {
   "apiVersion": 1,
   "id": "photon.dewatermark",
-  "name": "Gemini Watermark Remover",
+  "name": "Remove Gemini Watermark",
   "version": "2.0.0",
+  "description": "Remove Gemini corner logo via reverse alpha blending (Quick Auto + Full options)",
+  "order": 30,
+  "category": "retouch",
+  "hooks": [
+    "browser.quick_action",
+    "viewer.quick_action",
+    "browser.context_menu",
+    "viewer.context_menu",
+    "editor.plugins_menu",
+    "editor.tool_panel",
+    "settings.panel"
+  ],
+  "labels": {
+    "en-US": "Remove Gemini Watermark",
+    "vi-VN": "Xóa thủy vân Gemini"
+  },
   "entry": {
     "command": "bin/photon-plugin-dewatermark",
     "args": [],
@@ -18,7 +34,31 @@
       "action": "editor.dewatermark_gemini",
       "workspace": "editor",
       "label": "Remove Gemini",
-      "output": "image"
+      "output": "image",
+      "params": [
+        {
+          "key": "size",
+          "label": "Logo Size",
+          "type": "select",
+          "default": "auto",
+          "options": ["auto", "48", "96"]
+        },
+        {
+          "key": "force",
+          "label": "Force Clean",
+          "type": "bool",
+          "default": false
+        },
+        {
+          "key": "logoValue",
+          "label": "Logo Alpha Value",
+          "type": "float",
+          "min": 180.0,
+          "max": 255.0,
+          "step": 1.0,
+          "default": 255.0
+        }
+      ]
     },
     {
       "action": "editor.inpaint_region",
@@ -30,12 +70,10 @@
   "quickActions": [
     {
       "id": "dewatermark-gemini-auto",
-      "label": "Auto Detect",
+      "label": "Remove Gemini Watermark",
       "action": "editor.dewatermark_gemini",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
+      "workspaces": ["browser", "viewer"],
+      "slot": "quick",
       "params": {
         "size": "auto",
         "logoValue": 255.0,
@@ -46,10 +84,7 @@
       "id": "dewatermark-gemini-force",
       "label": "Force Clean",
       "action": "editor.dewatermark_gemini",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
+      "workspaces": ["browser", "viewer"],
       "params": {
         "size": "auto",
         "logoValue": 255.0,

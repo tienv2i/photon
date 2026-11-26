@@ -57,6 +57,10 @@ pub struct Config {
     #[serde(default)]
     pub disabled_plugins: Vec<String>,
     #[serde(default)]
+    pub disabled_quick_action_plugins: Vec<String>,
+    #[serde(default)]
+    pub viewer_single_instance: bool,
+    #[serde(default)]
     pub ai: AiSettings,
 }
 
@@ -76,6 +80,8 @@ impl Default for Config {
             favorites_initialized: false,
             translate: TranslateSettings::default(),
             disabled_plugins: Vec::new(),
+            disabled_quick_action_plugins: Vec::new(),
+            viewer_single_instance: false,
             ai: AiSettings::default(),
         }
     }

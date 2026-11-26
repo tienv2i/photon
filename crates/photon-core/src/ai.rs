@@ -98,6 +98,22 @@ pub enum PendingAiJob {
         cancel: Arc<AtomicBool>,
         libre_post_translate: Option<(String, photon_protocol::TranslateSettings)>,
     },
+    QuickActionBatch {
+        task_id: String,
+        plugin: LoadedPlugin,
+        action: String,
+        label: String,
+        model_id: String,
+        model_path: PathBuf,
+        device: AiDevice,
+        models_dir: PathBuf,
+        ipc_dir: PathBuf,
+        seq_num: u64,
+        paths: Vec<PathBuf>,
+        backup_method: photon_protocol::BackupMethod,
+        params: Value,
+        cancel: Arc<AtomicBool>,
+    },
     BuiltinTranslate {
         task_id: String,
         image_path: PathBuf,
@@ -114,6 +130,7 @@ impl PendingAiJob {
         match self {
             Self::DownloadModel { task_id, .. }
             | Self::PluginInference { task_id, .. }
+            | Self::QuickActionBatch { task_id, .. }
             | Self::BuiltinTranslate { task_id, .. } => task_id,
         }
     }
@@ -122,6 +139,7 @@ impl PendingAiJob {
         match self {
             Self::DownloadModel { .. } => "download",
             Self::BuiltinTranslate { .. } => "translate",
+            Self::QuickActionBatch { .. } => "inference",
             Self::PluginInference { action, .. } => {
                 if action.starts_with("viewer.translate")
                     || action.starts_with("viewer.ocr")
@@ -148,6 +166,111 @@ impl PendingAiJob {
                 ..
             } => {
                 download_model(&spec, &models_dir, cancel, on_event);
+            }
+            Self::QuickActionBatch {
+                plugin,
+                action,
+                label,
+                model_id,
+                model_path,
+                device,
+                models_dir,
+                ipc_dir,
+                seq_num,
+                paths,
+                backup_method,
+                params,
+                cancel,
+                ..
+            } => {
+                let total = paths.len().max(1);
+                let mut last_saved: Option<String> = None;
+                let mut device_used_final = device.as_str().to_owned();
+                for (idx, src_path) in paths.iter().enumerate() {
+                    if cancel.load(Ordering::Relaxed) {
+                        on_event(AiWorkerEvent::Failed {
+                            message: "Cancelled".to_owned(),
+                        });
+                        return;
+                    }
+                    let pct = (((idx * 100) / total).clamp(1, 99)) as u8;
+                    on_event(AiWorkerEvent::Progress {
+                        percent: pct,
+                        stage: format!("{label} ({}/{total})…", idx + 1),
+                    });
+                    let ext = src_path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .filter(|e| !e.is_empty())
+                        .unwrap_or("png");
+                    let item_out = if action.starts_with("utils.") {
+                        ipc_dir.join(format!("qa-out-{seq_num}-{idx}.{ext}"))
+                    } else {
+                        ipc_dir.join(format!("qa-out-{seq_num}-{idx}.png"))
+                    };
+                    let _ = fs::remove_file(&item_out);
+                    let mut item_err: Option<String> = None;
+                    let mut item_done = false;
+                    run_jsonl_inference_streaming(
+                        &plugin,
+                        &action,
+                        &model_id,
+                        &model_path,
+                        device,
+                        &models_dir,
+                        src_path,
+                        &item_out,
+                        params.clone(),
+                        cancel.clone(),
+                        |ev| match ev {
+                            AiWorkerEvent::InferenceDone { device_used, .. } => {
+                                device_used_final = device_used;
+                                item_done = true;
+                            }
+                            AiWorkerEvent::Failed { message } => {
+                                item_err = Some(message);
+                            }
+                            AiWorkerEvent::Progress { .. }
+                            | AiWorkerEvent::DownloadDone { .. }
+                            | AiWorkerEvent::Cancelled => {}
+                        },
+                    );
+                    if let Some(message) = item_err {
+                        let _ = fs::remove_file(&item_out);
+                        on_event(AiWorkerEvent::Failed { message });
+                        return;
+                    }
+                    if item_done {
+                        match commit_browser_image_output_with_backup(
+                            &plugin.manifest.id,
+                            &action,
+                            src_path,
+                            &item_out,
+                            backup_method,
+                        ) {
+                            Ok(dest) => {
+                                last_saved = Some(dest.to_string_lossy().into_owned());
+                            }
+                            Err(err) => {
+                                let _ = fs::remove_file(&item_out);
+                                on_event(AiWorkerEvent::Failed {
+                                    message: err.to_string(),
+                                });
+                                return;
+                            }
+                        }
+                    }
+                    let _ = fs::remove_file(&item_out);
+                }
+                on_event(AiWorkerEvent::InferenceDone {
+                    model_id,
+                    output_path: PathBuf::new(),
+                    device_used: device_used_final,
+                    clipboard_text: None,
+                    translation: None,
+                    caption_text: None,
+                    saved_path: last_saved,
+                });
             }
             Self::PluginInference {
                 plugin,
@@ -365,8 +488,20 @@ impl Core {
                 caption_text,
                 saved_path,
             } => {
-                if let Some(tr) = translation {
-                    self.ai_quick_action_target = None;
+                if let Some(mut tr) = translation {
+                    let orig_target = self
+                        .ai_quick_action_target
+                        .take()
+                        .map(|(_, _, p)| p.to_string_lossy().into_owned())
+                        .or_else(|| {
+                            self.ai_task
+                                .as_ref()
+                                .filter(|t| t.kind == "translate" && !t.target.is_empty())
+                                .map(|t| t.target.clone())
+                        });
+                    if let Some(target_path) = orig_target {
+                        tr.path = target_path;
+                    }
                     self.latest_translation = Some(tr.clone());
                     if let Some(task) = self.ai_task.as_mut() {
                         task.running = false;
@@ -469,6 +604,21 @@ impl Core {
                             );
                         }
                     }
+                } else if output_path.as_os_str().is_empty() {
+                    let stage = format!("Done ({device_used})");
+                    if let Some(task) = self.ai_task.as_mut() {
+                        task.running = false;
+                        task.percent = 100;
+                        task.stage = stage.clone();
+                        task.error = None;
+                        task.saved_path = saved_path;
+                    }
+                    self.refresh_after_file_op();
+                    finished_msg = stage;
+                    self.status = UiText::with(
+                        "plugin_executed",
+                        [("name", self.ai_plugin_label.as_deref().unwrap_or("Plugin"))],
+                    );
                 } else {
                     match image::open(&output_path).map(|img| img.into_rgba8()) {
                         Ok(rgba) => {
@@ -1289,18 +1439,24 @@ impl Core {
         paths: Vec<String>,
     ) -> Result<(Option<UiText>, Option<Value>), ProtocolError> {
         self.ensure_ai_idle()?;
-        let Some(first_path) = paths.into_iter().find(|p| !p.trim().is_empty()) else {
+        let valid_paths: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|p| !p.trim().is_empty())
+            .map(PathBuf::from)
+            .collect();
+        let Some(first_src) = valid_paths.first().cloned() else {
             return Err(ProtocolError::new(
                 "invalid_input",
                 "no image path provided for quick action",
             ));
         };
-        let src_path = PathBuf::from(&first_path);
-        if !src_path.is_file() {
-            return Err(ProtocolError::new(
-                "not_found",
-                format!("image not found: {}", src_path.display()),
-            ));
+        for p in &valid_paths {
+            if !p.is_file() {
+                return Err(ProtocolError::new(
+                    "not_found",
+                    format!("image not found: {}", p.display()),
+                ));
+            }
         }
 
         let _ = self.refresh_plugins_registry();
@@ -1369,7 +1525,7 @@ impl Core {
 
         self.ai_generation += 1;
         let seq_num = self.ai_generation;
-        let ext = src_path
+        let ext = first_src
             .extension()
             .and_then(|e| e.to_str())
             .filter(|e| !e.is_empty())
@@ -1386,12 +1542,6 @@ impl Core {
         self.ai_cancel = Some(Arc::clone(&cancel));
         self.ai_active_task_id = Some(task_id.clone());
         self.ai_temp_input = None;
-        self.ai_temp_output = Some(tmp_out.clone());
-        self.ai_quick_action_target = Some((
-            plugin.manifest.id.clone(),
-            qa.action.clone(),
-            src_path.clone(),
-        ));
         self.ai_plugin_label = Some(qa.label.clone());
         self.ai_task = Some(AiTaskState {
             kind: "inference".to_owned(),
@@ -1417,20 +1567,47 @@ impl Core {
             );
         }
 
-        self.pending_ai = Some(PendingAiJob::PluginInference {
-            task_id: task_id.clone(),
-            plugin,
-            action: qa.action,
-            model_id,
-            model_path,
-            device: self.config.ai.device,
-            models_dir,
-            input_path: src_path,
-            output_path: tmp_out,
-            params,
-            cancel,
-            libre_post_translate: None,
-        });
+        if valid_paths.len() > 1 {
+            self.ai_temp_output = None;
+            self.ai_quick_action_target = None;
+            self.pending_ai = Some(PendingAiJob::QuickActionBatch {
+                task_id: task_id.clone(),
+                plugin,
+                action: qa.action,
+                label: qa.label,
+                model_id,
+                model_path,
+                device: self.config.ai.device,
+                models_dir,
+                ipc_dir,
+                seq_num,
+                paths: valid_paths,
+                backup_method: self.config.backup_method,
+                params,
+                cancel,
+            });
+        } else {
+            self.ai_temp_output = Some(tmp_out.clone());
+            self.ai_quick_action_target = Some((
+                plugin.manifest.id.clone(),
+                qa.action.clone(),
+                first_src.clone(),
+            ));
+            self.pending_ai = Some(PendingAiJob::PluginInference {
+                task_id: task_id.clone(),
+                plugin,
+                action: qa.action,
+                model_id,
+                model_path,
+                device: self.config.ai.device,
+                models_dir,
+                input_path: first_src,
+                output_path: tmp_out,
+                params,
+                cancel,
+                libre_post_translate: None,
+            });
+        }
         Ok((None, Some(json!({ "jobId": task_id }))))
     }
 
@@ -2167,22 +2344,14 @@ mod tests {
             "ai_task.target must preserve original source path"
         );
 
-        let job = core.take_pending_ai().expect("pending job");
-        let mut got_translation = false;
-        let mut events = Vec::new();
-        job.run(|ev| {
-            if let AiWorkerEvent::InferenceDone {
-                translation: Some(_),
-                ..
-            } = ev
-            {
-                got_translation = true;
-            }
-            events.push(format!("{ev:?}"));
-        });
         assert!(
-            got_translation,
-            "expected InferenceDone with translation, got events: {events:?}"
+            core.run_pending_ai_blocking(),
+            "expected pending AI job to complete"
+        );
+        assert_eq!(
+            core.latest_translation.as_ref().map(|t| t.path.as_str()),
+            Some(tga_str.as_str()),
+            "completed translation must restore original source path"
         );
 
         let received = fs::read_to_string(&recorded_path_file).expect("read recorded path");

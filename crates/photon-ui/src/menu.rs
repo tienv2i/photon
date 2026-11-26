@@ -438,7 +438,10 @@ pub fn with_top_right_menu_at<'a, M: Clone + 'a>(
     on_dismiss: M,
 ) -> Element<'a, M> {
     if !open {
-        return base.into();
+        return stack![base.into()]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
     }
     let dismiss_below_bar = mouse_area(
         container(iced::widget::space::horizontal())
@@ -484,7 +487,10 @@ pub fn with_anchored_menu<'a, M: Clone + 'a>(
     on_dismiss: M,
 ) -> Element<'a, M> {
     if !open {
-        return base.into();
+        return stack![base.into()]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
     }
     // Leave the top menubar band (`0..top_offset`) uncovered so clicks and hover events
     // reach menubar triggers directly without being swallowed by the dismiss backdrop.
@@ -532,7 +538,10 @@ pub fn with_bottom_right_menu_at<'a, M: Clone + 'a>(
     on_dismiss: M,
 ) -> Element<'a, M> {
     if !open {
-        return base.into();
+        return stack![base.into()]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
     }
     let dismiss_layer = mouse_area(
         container(iced::widget::space::horizontal())
@@ -947,7 +956,10 @@ pub fn with_context_menu_and_cascading_submenus<'a, M: Clone + 'a>(
     on_dismiss: M,
 ) -> Element<'a, M> {
     if !open {
-        return base.into();
+        return stack![base.into()]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
     }
     let max_h = (viewport_size.height - VIEWPORT_MARGIN * 2.0).max(60.0);
     let primary = place_context_menu(
@@ -1015,7 +1027,10 @@ pub fn with_responsive_context_menu<'a, M: Clone + 'a>(
     on_dismiss: M,
 ) -> Element<'a, M> {
     if !open {
-        return base.into();
+        return stack![base.into()]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
     }
     let dismiss_layer = mouse_area(
         container(iced::widget::space::horizontal())

@@ -9,7 +9,7 @@ use iced::{Alignment, Border, Element, Fill, Length};
 use photon_i18n::tr;
 use photon_protocol::{
     BatchCropUnit, BatchImageFormat, BatchOperation, BatchOutput, BatchSource, CanvasAnchor,
-    Command, ResizeFilter, ResizeMode, UiStateSnapshot,
+    Command, ResizeFilter, ResizeMode, TransformEachSpec, UiStateSnapshot,
 };
 use photon_ui::button::{self, ButtonVariant};
 use photon_ui::dialog::{ManagedDialogSpec, OverlayMode, dialog_style_for_theme};
@@ -75,6 +75,7 @@ pub enum BatchDialogKind {
     Resize,
     Crop,
     Convert,
+    Transform,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +108,9 @@ pub enum BatchDialogMsg {
     ResizeApplyRatioPreset(f32),
     ResizeModeChanged(ResizeMode),
     ResizeFilterChanged(ResizeFilter),
+    ResizePadRgbChanged([u8; 3]),
+    ResizePadHexChanged(String),
+    ResizePadAlphaChanged(u8),
     CropXChanged(String),
     CropYChanged(String),
     CropWChanged(String),
@@ -116,6 +120,7 @@ pub enum BatchDialogMsg {
     CropRatioChanged(Option<f64>),
     ConvertFormatChanged(BatchImageFormat),
     ConvertQualityChanged(u8),
+    TransformSetSpec(TransformEachSpec),
     Confirm,
 }
 
@@ -138,6 +143,9 @@ pub struct BatchDialogState {
     pub resize_lock_ratio: bool,
     pub resize_mode: ResizeMode,
     pub resize_filter: ResizeFilter,
+    pub resize_pad_rgb: [u8; 3],
+    pub resize_pad_hex: String,
+    pub resize_pad_alpha: u8,
     pub resize_ref_px: (u32, u32),
     pub crop_x_str: String,
     pub crop_y_str: String,
@@ -148,6 +156,7 @@ pub struct BatchDialogState {
     pub crop_ratio: Option<f64>,
     pub convert_format: BatchImageFormat,
     pub convert_quality: u8,
+    pub transform_spec: TransformEachSpec,
     pub error: Option<String>,
 }
 
@@ -165,6 +174,7 @@ impl BatchDialogState {
             BatchDialogKind::Resize => "_resized",
             BatchDialogKind::Crop => "_cropped",
             BatchDialogKind::Convert => "",
+            BatchDialogKind::Transform => "_transformed",
         };
         Self {
             kind,
@@ -188,6 +198,9 @@ impl BatchDialogState {
             resize_lock_ratio: true,
             resize_mode: ResizeMode::Stretch,
             resize_filter: ResizeFilter::Lanczos3,
+            resize_pad_rgb: [0, 0, 0],
+            resize_pad_hex: "#000000".to_owned(),
+            resize_pad_alpha: 255,
             resize_ref_px: (ref_w, ref_h),
             crop_x_str: "0".to_owned(),
             crop_y_str: "0".to_owned(),
@@ -198,6 +211,7 @@ impl BatchDialogState {
             crop_ratio: None,
             convert_format: BatchImageFormat::Webp,
             convert_quality: 90,
+            transform_spec: TransformEachSpec::default(),
             error: None,
         }
     }
@@ -361,6 +375,24 @@ impl BatchDialogState {
             }
             BatchDialogMsg::ResizeModeChanged(mode) => self.resize_mode = mode,
             BatchDialogMsg::ResizeFilterChanged(filter) => self.resize_filter = filter,
+            BatchDialogMsg::ResizePadRgbChanged(rgb) => {
+                self.resize_pad_rgb = rgb;
+                self.resize_pad_hex = format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2]);
+            }
+            BatchDialogMsg::ResizePadHexChanged(hex) => {
+                self.resize_pad_hex = hex.clone();
+                let clean = hex.trim().trim_start_matches('#');
+                if clean.len() == 6
+                    && let (Ok(r), Ok(g), Ok(b)) = (
+                        u8::from_str_radix(&clean[0..2], 16),
+                        u8::from_str_radix(&clean[2..4], 16),
+                        u8::from_str_radix(&clean[4..6], 16),
+                    )
+                {
+                    self.resize_pad_rgb = [r, g, b];
+                }
+            }
+            BatchDialogMsg::ResizePadAlphaChanged(a) => self.resize_pad_alpha = a,
             BatchDialogMsg::CropXChanged(v) => self.crop_x_str = v,
             BatchDialogMsg::CropYChanged(v) => self.crop_y_str = v,
             BatchDialogMsg::CropWChanged(v) => self.crop_w_str = v,
@@ -370,6 +402,7 @@ impl BatchDialogState {
             BatchDialogMsg::CropRatioChanged(ratio) => self.crop_ratio = ratio,
             BatchDialogMsg::ConvertFormatChanged(fmt) => self.convert_format = fmt,
             BatchDialogMsg::ConvertQualityChanged(q) => self.convert_quality = q.clamp(1, 100),
+            BatchDialogMsg::TransformSetSpec(spec) => self.transform_spec = spec,
             BatchDialogMsg::Confirm => {}
         }
     }
@@ -492,8 +525,12 @@ impl BatchDialogState {
                     height,
                     mode: self.resize_mode,
                     filter: self.resize_filter,
-                    fill: None,
-                    fill_alpha: 255,
+                    fill: (self.resize_mode == ResizeMode::Pad).then_some(self.resize_pad_rgb),
+                    fill_alpha: if self.resize_mode == ResizeMode::Pad {
+                        self.resize_pad_alpha
+                    } else {
+                        255
+                    },
                 }
             }
             BatchDialogKind::Crop => {
@@ -525,6 +562,9 @@ impl BatchDialogState {
                     quality: supports_quality.then_some(self.convert_quality),
                 }
             }
+            BatchDialogKind::Transform => BatchOperation::Transform {
+                spec: self.transform_spec,
+            },
         };
 
         Ok(Command::BatchRun {
@@ -571,6 +611,23 @@ pub fn build_batch_convert_dialog<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a
 ) -> ManagedDialogSpec<'a, Id, BatchDialogAction<Id>> {
     build_batch_dialog_for_kind(
         BatchDialogKind::Convert,
+        snapshot,
+        batch,
+        id,
+        defaults,
+        theme,
+    )
+}
+
+pub fn build_batch_transform_dialog<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
+    snapshot: &'a UiStateSnapshot,
+    batch: &'a BatchDialogState,
+    id: Id,
+    defaults: DialogWindowState,
+    theme: &iced::Theme,
+) -> ManagedDialogSpec<'a, Id, BatchDialogAction<Id>> {
+    build_batch_dialog_for_kind(
+        BatchDialogKind::Transform,
         snapshot,
         batch,
         id,
@@ -670,6 +727,7 @@ fn build_batch_dialog_for_kind<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
         BatchDialogKind::Resize => build_batch_resize_section(lang, batch),
         BatchDialogKind::Crop => build_batch_crop_section(lang, batch),
         BatchDialogKind::Convert => build_batch_convert_section(lang, batch),
+        BatchDialogKind::Transform => build_batch_transform_section(lang, batch),
     };
 
     let mut output_col = column![
@@ -805,6 +863,7 @@ fn build_batch_dialog_for_kind<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
         BatchDialogKind::Resize => tr(lang, "batch-resize-title"),
         BatchDialogKind::Crop => tr(lang, "batch-crop-title"),
         BatchDialogKind::Convert => tr(lang, "batch-convert-title"),
+        BatchDialogKind::Transform => tr(lang, "batch-transform-title"),
     };
 
     let close_btn = with_tooltip_pos(
@@ -956,26 +1015,122 @@ fn build_batch_resize_section<'a, Id: Clone + 'a>(
     .style(pick_list_style)
     .menu_style(pick_list_menu_style);
 
-    container(
-        column![
-            grid,
-            rule::horizontal(1).style(hairline_rule_style),
-            row![
-                column![field_label_text(tr(lang, "label-resize-mode")), mode_picker]
-                    .spacing(FIELD_LABEL_GAP)
-                    .width(Fill),
-                column![field_label_text(tr(lang, "label-filter")), filter_picker]
-                    .spacing(FIELD_LABEL_GAP)
-                    .width(Fill),
-            ]
-            .spacing(CONTROL_GAP),
+    let mut resize_col = column![
+        grid,
+        rule::horizontal(1).style(hairline_rule_style),
+        row![
+            column![field_label_text(tr(lang, "label-resize-mode")), mode_picker]
+                .spacing(FIELD_LABEL_GAP)
+                .width(Fill),
+            column![field_label_text(tr(lang, "label-filter")), filter_picker]
+                .spacing(FIELD_LABEL_GAP)
+                .width(Fill),
         ]
-        .spacing(ROW_SPACING),
-    )
-    .padding(SECTION_PADDING)
-    .width(Fill)
-    .style(card_style)
-    .into()
+        .spacing(CONTROL_GAP),
+    ]
+    .spacing(ROW_SPACING);
+
+    if batch.resize_mode == ResizeMode::Pad {
+        let swatch_btn = |rgb: [u8; 3], alpha: u8| {
+            let color = iced::Color::from_rgba8(rgb[0], rgb[1], rgb[2], alpha as f32 / 255.0);
+            let is_active = batch.resize_pad_rgb == rgb && batch.resize_pad_alpha == alpha;
+            iced_button(
+                container(iced::widget::space::horizontal())
+                    .width(22)
+                    .height(22),
+            )
+            .padding(0)
+            .style(move |theme, _| {
+                let t = PaletteTokens::for_theme(theme);
+                iced_button::Style {
+                    background: Some(color.into()),
+                    border: Border {
+                        color: if is_active { t.accent } else { t.border },
+                        width: if is_active { 2.0 } else { 1.0 },
+                        radius: RADIUS_SM.into(),
+                    },
+                    ..Default::default()
+                }
+            })
+            .on_press(BatchDialogAction::Msg(if alpha == 0 {
+                BatchDialogMsg::ResizePadAlphaChanged(0)
+            } else {
+                BatchDialogMsg::ResizePadRgbChanged(rgb)
+            }))
+        };
+        let preview_color = iced::Color::from_rgba8(
+            batch.resize_pad_rgb[0],
+            batch.resize_pad_rgb[1],
+            batch.resize_pad_rgb[2],
+            batch.resize_pad_alpha as f32 / 255.0,
+        );
+        let pad_row = row![
+            column![
+                field_label_text(tr(lang, "label-pad-color")),
+                row![
+                    container(iced::widget::space::horizontal())
+                        .width(24)
+                        .height(24)
+                        .style(move |theme| {
+                            let t = PaletteTokens::for_theme(theme);
+                            container::Style {
+                                background: Some(preview_color.into()),
+                                border: Border {
+                                    color: t.border,
+                                    width: 1.0,
+                                    radius: RADIUS_SM.into(),
+                                },
+                                ..Default::default()
+                            }
+                        }),
+                    swatch_btn([0, 0, 0], 255),
+                    swatch_btn([255, 255, 255], 255),
+                    swatch_btn([128, 128, 128], 255),
+                    swatch_btn([0, 0, 0], 0),
+                    text_input("#000000", &batch.resize_pad_hex)
+                        .on_input(
+                            |v| BatchDialogAction::Msg(BatchDialogMsg::ResizePadHexChanged(v))
+                        )
+                        .padding(INPUT_PADDING)
+                        .size(TEXT_SIZE_CONTROL)
+                        .width(Length::Fixed(86.0))
+                        .style(input_style),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ]
+            .spacing(FIELD_LABEL_GAP)
+            .width(Fill),
+            column![
+                row![
+                    field_label_text(tr(lang, "label-opacity")),
+                    iced::widget::space::horizontal(),
+                    text(format!(
+                        "{}%",
+                        (batch.resize_pad_alpha as f32 / 255.0 * 100.0).round() as u32
+                    ))
+                    .size(TEXT_SIZE_CAPTION),
+                ]
+                .width(Fill),
+                slider(0..=255, batch.resize_pad_alpha, |a| {
+                    BatchDialogAction::Msg(BatchDialogMsg::ResizePadAlphaChanged(a))
+                })
+                .width(Fill)
+                .style(slider_style),
+            ]
+            .spacing(FIELD_LABEL_GAP)
+            .width(Length::Fixed(150.0)),
+        ]
+        .spacing(CONTROL_GAP)
+        .align_y(Alignment::End);
+        resize_col = resize_col.push(pad_row);
+    }
+
+    container(resize_col)
+        .padding(SECTION_PADDING)
+        .width(Fill)
+        .style(card_style)
+        .into()
 }
 
 fn build_batch_crop_section<'a, Id: Clone + 'a>(
@@ -1251,6 +1406,169 @@ fn build_batch_convert_section<'a, Id: Clone + 'a>(
         .into()
 }
 
+fn build_batch_transform_section<'a, Id: Clone + 'a>(
+    lang: photon_protocol::Language,
+    batch: &'a BatchDialogState,
+) -> Element<'a, BatchDialogAction<Id>> {
+    let spec = batch.transform_spec;
+    let active_anchor_idx = CanvasAnchor::ALL
+        .iter()
+        .position(|a| *a == spec.anchor)
+        .unwrap_or(4);
+
+    let slider_row =
+        |label: String,
+         val: f32,
+         range: std::ops::RangeInclusive<f32>,
+         step: f32,
+         display: String,
+         on_change: Box<dyn Fn(f32) -> BatchDialogAction<Id> + 'a>| {
+            column![
+                row![
+                    field_label_text(label),
+                    iced::widget::space::horizontal(),
+                    text(display).size(TEXT_SIZE_CAPTION),
+                ]
+                .width(Fill)
+                .align_y(Alignment::Center),
+                slider(range, val, on_change)
+                    .step(step)
+                    .width(Fill)
+                    .style(slider_style),
+            ]
+            .spacing(2)
+            .width(Fill)
+        };
+
+    let col = column![
+        slider_row(
+            tr(lang, "label-transform-width"),
+            (spec.scale_x * 100.0).clamp(10.0, 300.0),
+            10.0..=300.0,
+            1.0,
+            format!("{:.0}%", spec.scale_x * 100.0),
+            Box::new(move |v| {
+                let mut next = spec;
+                next.scale_x = v / 100.0;
+                BatchDialogAction::Msg(BatchDialogMsg::TransformSetSpec(next))
+            }),
+        ),
+        slider_row(
+            tr(lang, "label-transform-height"),
+            (spec.scale_y * 100.0).clamp(10.0, 300.0),
+            10.0..=300.0,
+            1.0,
+            format!("{:.0}%", spec.scale_y * 100.0),
+            Box::new(move |v| {
+                let mut next = spec;
+                next.scale_y = v / 100.0;
+                BatchDialogAction::Msg(BatchDialogMsg::TransformSetSpec(next))
+            }),
+        ),
+        slider_row(
+            tr(lang, "label-transform-x"),
+            spec.translate_x.clamp(-500.0, 500.0),
+            -500.0..=500.0,
+            1.0,
+            format!("{:.0} px", spec.translate_x),
+            Box::new(move |v| {
+                let mut next = spec;
+                next.translate_x = v;
+                BatchDialogAction::Msg(BatchDialogMsg::TransformSetSpec(next))
+            }),
+        ),
+        slider_row(
+            tr(lang, "label-transform-y"),
+            spec.translate_y.clamp(-500.0, 500.0),
+            -500.0..=500.0,
+            1.0,
+            format!("{:.0} px", spec.translate_y),
+            Box::new(move |v| {
+                let mut next = spec;
+                next.translate_y = v;
+                BatchDialogAction::Msg(BatchDialogMsg::TransformSetSpec(next))
+            }),
+        ),
+        slider_row(
+            tr(lang, "label-transform-angle"),
+            spec.rotation_deg.clamp(-180.0, 180.0),
+            -180.0..=180.0,
+            1.0,
+            format!("{:.0}°", spec.rotation_deg),
+            Box::new(move |v| {
+                let mut next = spec;
+                next.rotation_deg = v;
+                BatchDialogAction::Msg(BatchDialogMsg::TransformSetSpec(next))
+            }),
+        ),
+        slider_row(
+            tr(lang, "label-repeat-steps"),
+            (spec.repeat_steps.clamp(1, 32)) as f32,
+            1.0..=32.0,
+            1.0,
+            format!("{}×", spec.repeat_steps.max(1)),
+            Box::new(move |v| {
+                let mut next = spec;
+                next.repeat_steps = (v.round() as u32).clamp(1, 32);
+                BatchDialogAction::Msg(BatchDialogMsg::TransformSetSpec(next))
+            }),
+        ),
+        row![
+            column![
+                checkbox(spec.reflect_x)
+                    .label(tr(lang, "label-reflect-x"))
+                    .text_size(TEXT_SIZE_CONTROL)
+                    .on_toggle(move |b| {
+                        let mut next = spec;
+                        next.reflect_x = b;
+                        BatchDialogAction::Msg(BatchDialogMsg::TransformSetSpec(next))
+                    }),
+                checkbox(spec.reflect_y)
+                    .label(tr(lang, "label-reflect-y"))
+                    .text_size(TEXT_SIZE_CONTROL)
+                    .on_toggle(move |b| {
+                        let mut next = spec;
+                        next.reflect_y = b;
+                        BatchDialogAction::Msg(BatchDialogMsg::TransformSetSpec(next))
+                    }),
+            ]
+            .spacing(6)
+            .width(Fill),
+            column![
+                text(tr(lang, "label-canvas-anchor")).size(TEXT_SIZE_CAPTION),
+                anchor_grid_3x3(active_anchor_idx, move |idx| {
+                    let mut next = spec;
+                    next.anchor = CanvasAnchor::ALL[idx];
+                    BatchDialogAction::Msg(BatchDialogMsg::TransformSetSpec(next))
+                }),
+            ]
+            .spacing(4)
+            .align_x(Alignment::End),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center),
+        row![
+            button::labeled(
+                tr(lang, "action-reset"),
+                Some(Icon::Reset),
+                ButtonVariant::Ghost,
+                Some(BatchDialogAction::Msg(BatchDialogMsg::TransformSetSpec(
+                    TransformEachSpec::default(),
+                ))),
+            ),
+            iced::widget::space::horizontal(),
+        ]
+        .width(Fill),
+    ]
+    .spacing(ROW_SPACING);
+
+    container(col)
+        .padding(SECTION_PADDING)
+        .width(Fill)
+        .style(card_style)
+        .into()
+}
+
 fn labeled_small_input<'a, M: Clone + 'a>(
     label: &'static str,
     val: &'a str,
@@ -1373,6 +1691,8 @@ mod tests {
                 ai_settings: Default::default(),
                 ai_models: Vec::new(),
                 quick_actions: Vec::new(),
+                disabled_quick_action_plugins: Vec::new(),
+                viewer_single_instance: false,
                 ai_task: None,
                 editor_caption: None,
                 has_pixel_clipboard: false,

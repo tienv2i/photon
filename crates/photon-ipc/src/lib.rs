@@ -517,12 +517,40 @@ pub mod viewer_registry {
 
         fallback
     }
+
+    /// Find any live standalone viewer instance, cleaning up stale registration files.
+    pub fn find_any_live_viewer(paths: &AppPaths) -> Option<ViewerInstanceInfo> {
+        let dir = paths.viewers_dir();
+        let rd = fs::read_dir(&dir).ok()?;
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("v-") || !name.ends_with(".json") {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(info) = serde_json::from_str::<ViewerInstanceInfo>(&text) else {
+                continue;
+            };
+            if !is_socket_alive(&info.socket_path) {
+                let _ = fs::remove_file(&path);
+                let _ = fs::remove_file(&info.socket_path);
+                continue;
+            }
+            return Some(info);
+        }
+        None
+    }
 }
 
 pub use viewer_registry::{
     CanonicalPathLock, ViewerInstanceInfo, ViewerMatch, ViewerRegistrationGuard,
-    acquire_viewer_path_lock, find_live_viewer_for_path, register_viewer_instance,
-    update_viewer_instance, viewer_registration_path, viewer_socket_path,
+    acquire_viewer_path_lock, find_any_live_viewer, find_live_viewer_for_path,
+    register_viewer_instance, update_viewer_instance, viewer_registration_path, viewer_socket_path,
 };
 
 #[cfg(test)]

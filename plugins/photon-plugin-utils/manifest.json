@@ -3,6 +3,17 @@
   "id": "photon.utils",
   "name": "Image Utils",
   "version": "1.2.0",
+  "order": 70,
+  "category": "utility",
+  "hooks": [
+    "browser.context_menu",
+    "viewer.context_menu",
+    "settings.panel"
+  ],
+  "labels": {
+    "en-US": "Image Utils",
+    "vi-VN": "Tiện ích ảnh"
+  },
   "entry": {
     "command": "bin/photon-plugin-utils",
     "args": [],
@@ -24,7 +35,17 @@
       "action": "utils.optimize_size",
       "workspace": "browser",
       "label": "Optimize Size",
-      "output": "rgba_image"
+      "output": "rgba_image",
+      "params": [
+        {
+          "key": "jpegQuality",
+          "label": "JPEG Quality",
+          "type": "int",
+          "min": 30,
+          "max": 100,
+          "default": 86
+        }
+      ]
     }
   ],
   "quickActions": [
@@ -32,20 +53,14 @@
       "id": "utils-strip-exif",
       "label": "Strip EXIF / GPS",
       "action": "utils.strip_exif",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
+      "workspaces": ["browser", "viewer"],
       "params": {}
     },
     {
       "id": "utils-optimize-size",
       "label": "Optimize Size",
       "action": "utils.optimize_size",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
+      "workspaces": ["browser", "viewer"],
       "params": {
         "jpegQuality": 86
       }

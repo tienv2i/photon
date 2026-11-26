@@ -268,6 +268,8 @@ pub enum Command {
         gamma: f32,
         #[serde(default)]
         target: ApplyTarget,
+        #[serde(default = "default_true")]
+        selection_only: bool,
     },
     EditorCanvasSize {
         width: u32,
@@ -297,6 +299,8 @@ pub enum Command {
         value: f32,
         #[serde(default)]
         target: ApplyTarget,
+        #[serde(default = "default_true")]
+        selection_only: bool,
     },
     EditorColorBalance {
         #[serde(default)]
@@ -309,6 +313,8 @@ pub enum Command {
         preserve_luminosity: bool,
         #[serde(default)]
         target: ApplyTarget,
+        #[serde(default = "default_true")]
+        selection_only: bool,
     },
     EditorAdjustCurves {
         #[serde(default)]
@@ -321,6 +327,8 @@ pub enum Command {
         blue: Vec<[f32; 2]>,
         #[serde(default)]
         target: ApplyTarget,
+        #[serde(default = "default_true")]
+        selection_only: bool,
     },
     EditorPaintStroke {
         points: Vec<[f64; 2]>,
@@ -418,6 +426,8 @@ pub enum Command {
         detail_preserve: f32,
         #[serde(default)]
         target: ApplyTarget,
+        #[serde(default = "default_true")]
+        selection_only: bool,
     },
     EditorTransformLayer {
         #[serde(default)]
@@ -674,6 +684,13 @@ pub enum Command {
     PluginSetEnabled {
         id: String,
         enabled: bool,
+    },
+    PluginSetQuickActionEnabled {
+        id: String,
+        enabled: bool,
+    },
+    SetViewerSingleInstance {
+        single_instance: bool,
     },
     PluginInstall {
         source_dir: String,
@@ -985,6 +1002,8 @@ impl Command {
             Self::PasteImageBytes { .. } => "paste_image_bytes",
             Self::PluginRefresh => "plugin_refresh",
             Self::PluginSetEnabled { .. } => "plugin_set_enabled",
+            Self::PluginSetQuickActionEnabled { .. } => "plugin_set_quick_action_enabled",
+            Self::SetViewerSingleInstance { .. } => "set_viewer_single_instance",
             Self::PluginInstall { .. } => "plugin_install",
             Self::PluginUninstall { .. } => "plugin_uninstall",
             Self::PluginRun { .. } => "plugin_run",
@@ -1273,6 +1292,7 @@ mod tests {
                 strength: 0.5,
                 detail_preserve: 0.5,
                 target: ApplyTarget::ActiveLayer,
+                selection_only: true,
             },
             Command::EditorTransformLayer {
                 layer_id: None,

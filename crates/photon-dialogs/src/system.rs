@@ -4,6 +4,115 @@ use std::path::PathBuf;
 
 use rfd::AsyncFileDialog;
 
+/// Open the OS native "Open With..." application chooser dialog for `path`.
+pub async fn open_with_dialog(path: PathBuf) {
+    #[cfg(target_os = "linux")]
+    {
+        if try_portal_open_with(&path).await {
+            return;
+        }
+        let _ = std::process::Command::new("xdg-open")
+            .arg(&path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn pick_screen_color() -> Option<[u8; 3]> {
+    None
+}
+
+/// Pick a pixel color anywhere on screen using the XDG Desktop Portal (`PickColor`).
+#[cfg(target_os = "linux")]
+pub async fn pick_screen_color() -> Option<[u8; 3]> {
+    use iced::futures::StreamExt;
+    use std::collections::HashMap;
+
+    let conn = zbus::Connection::session().await.ok()?;
+    let unique = conn
+        .unique_name()?
+        .as_str()
+        .trim_start_matches(':')
+        .replace('.', "_");
+    let token = format!(
+        "photon_pick_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    let expected_path = format!("/org/freedesktop/portal/desktop/request/{unique}/{token}");
+    let rule = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .interface("org.freedesktop.portal.Request")
+        .ok()?
+        .member("Response")
+        .ok()?
+        .path(expected_path.as_str())
+        .ok()?
+        .build();
+    let mut stream = zbus::MessageStream::for_match_rule(rule, &conn, Some(4))
+        .await
+        .ok()?;
+
+    let mut options: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
+    options.insert("handle_token", zbus::zvariant::Value::from(token.as_str()));
+    conn.call_method(
+        Some("org.freedesktop.portal.Desktop"),
+        "/org/freedesktop/portal/desktop",
+        Some("org.freedesktop.portal.Screenshot"),
+        "PickColor",
+        &("", options),
+    )
+    .await
+    .ok()?;
+
+    let msg = stream.next().await?.ok()?;
+    let (code, results): (u32, HashMap<String, zbus::zvariant::OwnedValue>) =
+        msg.body().deserialize().ok()?;
+    if code != 0 {
+        return None;
+    }
+    let val = results.get("color")?.try_clone().ok()?;
+    let (r, g, b): (f64, f64, f64) = val.try_into().ok()?;
+    Some([
+        (r.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (g.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (b.clamp(0.0, 1.0) * 255.0).round() as u8,
+    ])
+}
+
+#[cfg(target_os = "linux")]
+async fn try_portal_open_with(path: &std::path::Path) -> bool {
+    use std::collections::HashMap;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(conn) = zbus::Connection::session().await else {
+        return false;
+    };
+    let fd = zbus::zvariant::OwnedFd::from(std::os::fd::OwnedFd::from(file));
+    let mut options: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
+    options.insert("ask", zbus::zvariant::Value::from(true));
+    conn.call_method(
+        Some("org.freedesktop.portal.Desktop"),
+        "/org/freedesktop/portal/desktop",
+        Some("org.freedesktop.portal.OpenURI"),
+        "OpenFile",
+        &("", fd, options),
+    )
+    .await
+    .is_ok()
+}
+
 /// File-extension filter passed to native Open/Save dialogs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileFilter<'a> {
@@ -90,13 +199,94 @@ pub async fn save_image_as(
     starting_dir: Option<PathBuf>,
     default_name: Option<&str>,
 ) -> Option<PathBuf> {
-    let filters = [FileFilter {
-        name: "Images",
-        extensions: &[
-            "png", "jpg", "jpeg", "webp", "ora", "avif", "tiff", "tif", "gif", "bmp", "tga", "qoi",
-            "exr", "hdr", "ico", "pnm", "ff",
-        ],
-    }];
+    let filters = [
+        FileFilter {
+            name: "All Supported Images",
+            extensions: &[
+                "png", "jpg", "jpeg", "webp", "ora", "avif", "tiff", "tif", "gif", "bmp", "tga",
+                "qoi", "exr", "hdr", "ico", "pnm", "ff",
+            ],
+        },
+        FileFilter {
+            name: "OpenRaster Layered Image (*.ora)",
+            extensions: &["ora"],
+        },
+        FileFilter {
+            name: "PNG Image (*.png)",
+            extensions: &["png"],
+        },
+        FileFilter {
+            name: "JPEG Image (*.jpg, *.jpeg)",
+            extensions: &["jpg", "jpeg"],
+        },
+        FileFilter {
+            name: "WebP Image (*.webp)",
+            extensions: &["webp"],
+        },
+        FileFilter {
+            name: "AVIF Image (*.avif)",
+            extensions: &["avif"],
+        },
+        FileFilter {
+            name: "TIFF Image (*.tiff, *.tif)",
+            extensions: &["tiff", "tif"],
+        },
+        FileFilter {
+            name: "GIF Image (*.gif)",
+            extensions: &["gif"],
+        },
+        FileFilter {
+            name: "BMP Image (*.bmp)",
+            extensions: &["bmp"],
+        },
+        FileFilter {
+            name: "QOI Image (*.qoi)",
+            extensions: &["qoi"],
+        },
+        FileFilter {
+            name: "TGA Image (*.tga)",
+            extensions: &["tga"],
+        },
+        FileFilter {
+            name: "OpenEXR Image (*.exr)",
+            extensions: &["exr"],
+        },
+        FileFilter {
+            name: "Radiance HDR (*.hdr)",
+            extensions: &["hdr"],
+        },
+        FileFilter {
+            name: "ICO Icon (*.ico)",
+            extensions: &["ico"],
+        },
+        FileFilter {
+            name: "Portable AnyMap (*.pnm)",
+            extensions: &["pnm"],
+        },
+        FileFilter {
+            name: "Farbfeld (*.ff)",
+            extensions: &["ff"],
+        },
+    ];
+    save_file(title, starting_dir, default_name, &filters).await
+}
+
+/// Convenience helper: Save-As dialog prioritizing OpenRaster (`.ora`) multi-layer format.
+pub async fn save_openraster_as(
+    title: &str,
+    starting_dir: Option<PathBuf>,
+    default_name: Option<&str>,
+) -> Option<PathBuf> {
+    let filters = [
+        FileFilter {
+            name: "OpenRaster Layered Image (*.ora)",
+            extensions: &["ora"],
+        },
+        FileFilter {
+            name: "All Files",
+            extensions: &["*"],
+        },
+    ];
     save_file(title, starting_dir, default_name, &filters).await
 }
 

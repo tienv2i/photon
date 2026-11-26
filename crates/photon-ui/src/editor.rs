@@ -93,15 +93,21 @@ pub fn tool_rail_button<'a, M: Clone + 'a>(
                 background: Some(t.bg_pressed.into()),
                 ..base
             },
-            button::Status::Disabled => button::Style {
-                background: base.background.map(|bg| bg.scale_alpha(0.45)),
-                text_color: base.text_color.scale_alpha(0.45),
-                border: Border {
-                    color: base.border.color.scale_alpha(0.45),
-                    ..base.border
-                },
-                ..base
-            },
+            button::Status::Disabled => {
+                if enabled {
+                    base
+                } else {
+                    button::Style {
+                        background: base.background.map(|bg| bg.scale_alpha(0.45)),
+                        text_color: base.text_color.scale_alpha(0.45),
+                        border: Border {
+                            color: base.border.color.scale_alpha(0.45),
+                            ..base.border
+                        },
+                        ..base
+                    }
+                }
+            }
         }
     });
 

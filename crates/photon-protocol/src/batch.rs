@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{CanvasAnchor, ResizeFilter, ResizeMode, default_opaque_alpha};
+use crate::{CanvasAnchor, ResizeFilter, ResizeMode, TransformEachSpec, default_opaque_alpha};
 
 /// Output file format for `BatchOperation::Convert`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -104,6 +104,9 @@ pub enum BatchOperation {
         #[serde(default)]
         quality: Option<u8>,
     },
+    Transform {
+        spec: TransformEachSpec,
+    },
 }
 
 impl BatchOperation {
@@ -112,6 +115,7 @@ impl BatchOperation {
             Self::Resize { .. } => "resize",
             Self::Crop { .. } => "crop",
             Self::Convert { .. } => "convert",
+            Self::Transform { .. } => "transform",
         }
     }
 }

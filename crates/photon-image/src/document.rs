@@ -365,6 +365,15 @@ impl EditorDocument {
         op: EditOp,
         target: ApplyTarget,
     ) -> Result<bool, ImageError> {
+        self.apply_with_selection(op, target, true)
+    }
+
+    pub fn apply_with_selection(
+        &mut self,
+        op: EditOp,
+        target: ApplyTarget,
+        selection_only: bool,
+    ) -> Result<bool, ImageError> {
         if self.live_stroke.is_some() {
             let _ = self.live_stroke_end(true);
         }
@@ -403,7 +412,7 @@ impl EditorDocument {
         }
 
         let before = self.stack.clone();
-        self.execute_op(&op, target)?;
+        self.execute_op(&op, target, selection_only)?;
         self.push_step(op, target, before);
         self.current = composite_stack(&self.stack);
         self.pixel_revision += 1;
@@ -789,7 +798,7 @@ impl EditorDocument {
                 }
                 Ok(())
             }
-            _ => self.execute_op(&op, target),
+            _ => self.execute_op(&op, target, true),
         };
         if let Err(err) = res {
             self.redo_stack.push((op, target));
@@ -877,6 +886,10 @@ impl EditorDocument {
         metadata: bool,
         max_edge: Option<u32>,
     ) -> Result<PathBuf, ImageError> {
+        if codec::SaveFormat::from_path(dest) == Some(codec::SaveFormat::Ora) && max_edge.is_none()
+        {
+            return crate::ora::encode_ora_stack(&self.stack, dest);
+        }
         codec::export_to(
             &self.source_path,
             &self.current,
@@ -1161,9 +1174,28 @@ impl EditorDocument {
         }
     }
 
-    fn execute_op(&mut self, op: &EditOp, target: ApplyTarget) -> Result<(), ImageError> {
+    fn execute_op(
+        &mut self,
+        op: &EditOp,
+        target: ApplyTarget,
+        selection_only: bool,
+    ) -> Result<(), ImageError> {
+        let filter_sel_snapshot = (selection_only && self.stack.selection.has_selection())
+            .then(|| self.stack.selection.clone());
         if target == ApplyTarget::NewLayer {
-            let next = render_single_op(&self.current, None, op)?;
+            let mut next = render_single_op(&self.current, None, op)?;
+            if matches!(
+                op,
+                EditOp::AdjustColor(_)
+                    | EditOp::AdjustHsv(_)
+                    | EditOp::ColorBalance(_)
+                    | EditOp::AdjustCurves(_)
+                    | EditOp::Denoise { .. }
+            ) && let Some(ref sel) = filter_sel_snapshot
+            {
+                let blank = RgbaImage::from_pixel(next.width(), next.height(), Rgba([0, 0, 0, 0]));
+                clip_rgba_by_selection(&blank, &mut next, 0, 0, sel);
+            }
             let name = match op {
                 EditOp::AdjustColor(_) => "Color & Light",
                 EditOp::AdjustHsv(_) => "HSV Adjustment",
@@ -1527,11 +1559,7 @@ impl EditorDocument {
             detail_preserve,
         } = op
         {
-            let sel_snapshot = self
-                .stack
-                .selection
-                .has_selection()
-                .then(|| self.stack.selection.clone());
+            let sel_snapshot = filter_sel_snapshot;
             if target == ApplyTarget::ActiveLayer || self.is_simple_single_layer() {
                 let active = self.stack.active_layer();
                 if active.locked {
@@ -1626,7 +1654,23 @@ impl EditorDocument {
                 return Err(ImageError::coded("layer_hidden"));
             }
             let (old_w, old_h) = active.dimensions();
-            let next = render_single_op(&active.pixels, active.original.as_deref(), op)?;
+            let mut next = render_single_op(&active.pixels, active.original.as_deref(), op)?;
+            if matches!(
+                op,
+                EditOp::AdjustColor(_)
+                    | EditOp::AdjustHsv(_)
+                    | EditOp::ColorBalance(_)
+                    | EditOp::AdjustCurves(_)
+            ) && let Some(ref sel) = filter_sel_snapshot
+            {
+                clip_rgba_by_selection(
+                    &active.pixels,
+                    &mut next,
+                    active.offset_x,
+                    active.offset_y,
+                    sel,
+                );
+            }
             let (new_w, new_h) = next.dimensions();
             let active_mut = self.stack.active_layer_mut();
             transform_layer_geometry(active_mut, op)?;
@@ -1642,7 +1686,23 @@ impl EditorDocument {
             let old_w = self.stack.canvas_width;
             let old_h = self.stack.canvas_height;
             let layer = &mut self.stack.layers[0];
-            let next = render_single_op(&layer.pixels, layer.original.as_deref(), op)?;
+            let mut next = render_single_op(&layer.pixels, layer.original.as_deref(), op)?;
+            if matches!(
+                op,
+                EditOp::AdjustColor(_)
+                    | EditOp::AdjustHsv(_)
+                    | EditOp::ColorBalance(_)
+                    | EditOp::AdjustCurves(_)
+            ) && let Some(ref sel) = filter_sel_snapshot
+            {
+                clip_rgba_by_selection(
+                    &layer.pixels,
+                    &mut next,
+                    layer.offset_x,
+                    layer.offset_y,
+                    sel,
+                );
+            }
             transform_layer_geometry(layer, op)?;
             self.stack.canvas_width = next.width();
             self.stack.canvas_height = next.height();
@@ -1703,7 +1763,16 @@ impl EditorDocument {
             | EditOp::ColorBalance(_)
             | EditOp::AdjustCurves(_) => {
                 for layer in &mut self.stack.layers {
-                    let next = render_single_op(&layer.pixels, None, op)?;
+                    let mut next = render_single_op(&layer.pixels, None, op)?;
+                    if let Some(ref sel) = filter_sel_snapshot {
+                        clip_rgba_by_selection(
+                            &layer.pixels,
+                            &mut next,
+                            layer.offset_x,
+                            layer.offset_y,
+                            sel,
+                        );
+                    }
                     layer.pixels = Arc::new(next);
                 }
             }

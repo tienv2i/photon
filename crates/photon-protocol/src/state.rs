@@ -229,6 +229,10 @@ pub struct UiStateMeta {
     #[serde(default)]
     pub quick_actions: Vec<AiQuickAction>,
     #[serde(default)]
+    pub disabled_quick_action_plugins: Vec<String>,
+    #[serde(default)]
+    pub viewer_single_instance: bool,
+    #[serde(default)]
     pub ai_task: Option<AiTaskState>,
     #[serde(default)]
     pub editor_caption: Option<String>,

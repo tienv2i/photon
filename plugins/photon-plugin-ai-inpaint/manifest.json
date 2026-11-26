@@ -3,6 +3,19 @@
   "id": "photon.ai_inpaint.onnx",
   "name": "AI Watermark Remover",
   "version": "2.0.0",
+  "order": 35,
+  "category": "retouch",
+  "hooks": [
+    "browser.context_menu",
+    "viewer.context_menu",
+    "editor.plugins_menu",
+    "editor.tool_panel",
+    "settings.panel"
+  ],
+  "labels": {
+    "en-US": "AI Watermark Remover",
+    "vi-VN": "Xóa thủy vân AI"
+  },
   "entry": {
     "command": "bin/photon-plugin-ai-inpaint",
     "args": [],
@@ -55,7 +68,26 @@
       "action": "editor.ai_inpaint",
       "workspace": "editor",
       "label": "AI Watermark Remover",
-      "output": "image"
+      "output": "image",
+      "params": [
+        {
+          "key": "confidence",
+          "label": "Confidence",
+          "type": "float",
+          "min": 0.05,
+          "max": 0.95,
+          "step": 0.05,
+          "default": 0.35
+        },
+        {
+          "key": "maskPadding",
+          "label": "Mask Padding",
+          "type": "int",
+          "min": 0,
+          "max": 64,
+          "default": 8
+        }
+      ]
     }
   ],
   "quickActions": [
@@ -63,10 +95,7 @@
       "id": "ai-dewatermark-yolo26-migan",
       "label": "Fast",
       "action": "editor.ai_inpaint",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
+      "workspaces": ["browser", "viewer"],
       "params": {
         "detectorModel": "watermark-yolo26",
         "inpainterModel": "migan-pipeline-v2",
@@ -78,10 +107,7 @@
       "id": "ai-dewatermark-yolo11-migan",
       "label": "Balanced",
       "action": "editor.ai_inpaint",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
+      "workspaces": ["browser", "viewer"],
       "params": {
         "detectorModel": "watermark-yolo11",
         "inpainterModel": "migan-pipeline-v2",
@@ -93,10 +119,7 @@
       "id": "ai-dewatermark-yolo26-lama",
       "label": "High Quality",
       "action": "editor.ai_inpaint",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
+      "workspaces": ["browser", "viewer"],
       "params": {
         "detectorModel": "watermark-yolo26",
         "inpainterModel": "lama-fp32",

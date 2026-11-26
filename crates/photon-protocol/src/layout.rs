@@ -240,6 +240,8 @@ pub enum WebtoonFitMode {
 pub enum SystemOpenWindowMode {
     #[default]
     FitImage,
+    Maximized,
+    FixedSize,
     Fullscreen,
     Remembered,
 }
@@ -329,6 +331,14 @@ fn default_editor_right_split_pct() -> u16 {
     58
 }
 
+fn default_viewer_width() -> u32 {
+    1240
+}
+
+fn default_viewer_height() -> u32 {
+    800
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, rename_all = "camelCase")]
 pub struct LayoutState {
@@ -352,6 +362,16 @@ pub struct LayoutState {
     pub editor_tool_tab: EditorToolTab,
     pub window_width: u32,
     pub window_height: u32,
+    #[serde(default = "default_viewer_width")]
+    pub viewer_window_width: u32,
+    #[serde(default = "default_viewer_height")]
+    pub viewer_window_height: u32,
+    #[serde(default)]
+    pub viewer_window_maximized: bool,
+    #[serde(default = "default_viewer_width")]
+    pub viewer_fixed_width: u32,
+    #[serde(default = "default_viewer_height")]
+    pub viewer_fixed_height: u32,
     #[serde(default)]
     pub app_launch_window_mode: AppLaunchWindowMode,
     #[serde(default = "crate::default_true")]
@@ -373,6 +393,8 @@ pub struct LayoutState {
     pub browser_sort_order: SortOrder,
     #[serde(default)]
     pub browser_thumb_size: BrowserThumbSize,
+    #[serde(default)]
+    pub browser_show_hidden: bool,
     pub viewer_view_mode: ViewerViewMode,
     pub system_open_window_mode: SystemOpenWindowMode,
     pub manga_rtl: bool,
@@ -399,6 +421,11 @@ impl Default for LayoutState {
             editor_tool_tab: EditorToolTab::default(),
             window_width: 1240,
             window_height: 800,
+            viewer_window_width: default_viewer_width(),
+            viewer_window_height: default_viewer_height(),
+            viewer_window_maximized: false,
+            viewer_fixed_width: default_viewer_width(),
+            viewer_fixed_height: default_viewer_height(),
             app_launch_window_mode: AppLaunchWindowMode::default(),
             window_maximized: true,
             ui_scale_pct: default_scale_pct(),
@@ -410,6 +437,7 @@ impl Default for LayoutState {
             browser_sort_field: BrowserSortField::Name,
             browser_sort_order: SortOrder::Asc,
             browser_thumb_size: BrowserThumbSize::M,
+            browser_show_hidden: false,
             viewer_view_mode: ViewerViewMode::Single,
             system_open_window_mode: SystemOpenWindowMode::FitImage,
             manga_rtl: false,
@@ -442,6 +470,10 @@ impl LayoutState {
             sanitize_panel_order(&self.editor_right_panel_order, &EditorRightPanel::ALL);
         self.window_width = self.window_width.clamp(680, 3840);
         self.window_height = self.window_height.clamp(500, 2160);
+        self.viewer_window_width = self.viewer_window_width.clamp(480, 3840);
+        self.viewer_window_height = self.viewer_window_height.clamp(360, 2160);
+        self.viewer_fixed_width = self.viewer_fixed_width.clamp(480, 3840);
+        self.viewer_fixed_height = self.viewer_fixed_height.clamp(360, 2160);
         self.ui_scale_pct = self.ui_scale_pct.clamp(UI_SCALE_PCT_MIN, UI_SCALE_PCT_MAX);
         self.font_scale_pct = self
             .font_scale_pct
@@ -488,6 +520,8 @@ impl LayoutState {
     pub fn settings_fields_eq(&self, other: &Self) -> bool {
         self.app_launch_window_mode == other.app_launch_window_mode
             && self.system_open_window_mode == other.system_open_window_mode
+            && self.viewer_fixed_width == other.viewer_fixed_width
+            && self.viewer_fixed_height == other.viewer_fixed_height
             && self.ui_scale_pct == other.ui_scale_pct
             && self.font_scale_pct == other.font_scale_pct
             && self.display_font == other.display_font
@@ -504,6 +538,8 @@ impl LayoutState {
     pub fn apply_settings_from(&mut self, settings: &Self) {
         self.app_launch_window_mode = settings.app_launch_window_mode;
         self.system_open_window_mode = settings.system_open_window_mode;
+        self.viewer_fixed_width = settings.viewer_fixed_width;
+        self.viewer_fixed_height = settings.viewer_fixed_height;
         self.ui_scale_pct = settings.ui_scale_pct;
         self.font_scale_pct = settings.font_scale_pct;
         self.display_font = settings.display_font;

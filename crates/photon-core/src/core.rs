@@ -510,6 +510,8 @@ impl Core {
             quick_actions: self
                 .plugin_registry
                 .quick_actions(&self.config.disabled_plugins),
+            disabled_quick_action_plugins: self.config.disabled_quick_action_plugins.clone(),
+            viewer_single_instance: self.config.viewer_single_instance,
             ai_task: self.ai_task.clone(),
             editor_caption: self.editor_caption.clone(),
             has_pixel_clipboard: self.pixel_clipboard.is_some(),
@@ -562,7 +564,7 @@ impl Core {
                 for entry in rd.flatten() {
                     let p = entry.path();
                     let name = entry.file_name().to_string_lossy().into_owned();
-                    if name.starts_with('.') {
+                    if !self.config.layout.browser_show_hidden && name.starts_with('.') {
                         continue;
                     }
                     if p.is_dir() {
@@ -973,12 +975,17 @@ impl Core {
                     self.config.layout.browser_sort_field,
                     self.config.layout.browser_sort_order,
                 );
+                let prev_show_hidden = self.config.layout.browser_show_hidden;
                 let next_layout = layout.clone().sanitized();
                 let settings_changed = !self.config.layout.settings_fields_eq(&next_layout);
                 self.config.layout = next_layout.clone();
                 self.ui_state.layout = next_layout;
                 self.ui_state_dirty = true;
-                if prev_sort
+                if prev_show_hidden != self.config.layout.browser_show_hidden
+                    && let Some(dir) = self.current_folder.clone()
+                {
+                    let _ = self.open_folder(&dir);
+                } else if prev_sort
                     != (
                         self.config.layout.browser_sort_field,
                         self.config.layout.browser_sort_order,
@@ -1163,7 +1170,8 @@ impl Core {
                 shadows,
                 gamma,
                 target,
-            } => self.apply_editor_op(
+                selection_only,
+            } => self.apply_editor_op_with_selection(
                 EditOp::AdjustColor(ColorAdjustments {
                     brightness: *brightness,
                     contrast: *contrast,
@@ -1174,6 +1182,7 @@ impl Core {
                     gamma: *gamma,
                 }),
                 *target,
+                *selection_only,
             ),
             Command::EditorCanvasSize {
                 width,
@@ -1209,13 +1218,15 @@ impl Core {
                 saturation,
                 value,
                 target,
-            } => self.apply_editor_op(
+                selection_only,
+            } => self.apply_editor_op_with_selection(
                 EditOp::AdjustHsv(HsvAdjustment {
                     hue: *hue,
                     saturation: *saturation,
                     value: *value,
                 }),
                 *target,
+                *selection_only,
             ),
             Command::EditorColorBalance {
                 shadows,
@@ -1223,7 +1234,8 @@ impl Core {
                 highlights,
                 preserve_luminosity,
                 target,
-            } => self.apply_editor_op(
+                selection_only,
+            } => self.apply_editor_op_with_selection(
                 EditOp::ColorBalance(ColorBalanceAdjustment {
                     shadows: *shadows,
                     midtones: *midtones,
@@ -1231,6 +1243,7 @@ impl Core {
                     preserve_luminosity: *preserve_luminosity,
                 }),
                 *target,
+                *selection_only,
             ),
             Command::EditorAdjustCurves {
                 rgb,
@@ -1238,7 +1251,8 @@ impl Core {
                 green,
                 blue,
                 target,
-            } => self.apply_editor_op(
+                selection_only,
+            } => self.apply_editor_op_with_selection(
                 EditOp::AdjustCurves(CurvesAdjustment {
                     rgb: rgb.clone(),
                     red: red.clone(),
@@ -1246,6 +1260,7 @@ impl Core {
                     blue: blue.clone(),
                 }),
                 *target,
+                *selection_only,
             ),
             Command::EditorPaintStroke {
                 points,
@@ -1408,12 +1423,14 @@ impl Core {
                 strength,
                 detail_preserve,
                 target,
-            } => self.apply_editor_op(
+                selection_only,
+            } => self.apply_editor_op_with_selection(
                 EditOp::Denoise {
                     strength: *strength,
                     detail_preserve: *detail_preserve,
                 },
                 *target,
+                *selection_only,
             ),
             Command::EditorTransformLayer {
                 layer_id,
@@ -1995,6 +2012,14 @@ impl Core {
             } => self.paste_image_bytes(Path::new(folder), filename_hint, png_bytes),
             Command::PluginRefresh | Command::AiRefreshPlugins => self.plugin_refresh(),
             Command::PluginSetEnabled { id, enabled } => self.plugin_set_enabled(id, *enabled),
+            Command::PluginSetQuickActionEnabled { id, enabled } => {
+                self.plugin_set_quick_action_enabled(id, *enabled)
+            }
+            Command::SetViewerSingleInstance { single_instance } => {
+                self.config.viewer_single_instance = *single_instance;
+                self.persist_config();
+                Ok((None, None))
+            }
             Command::PluginInstall { source_dir } => self.plugin_install(Path::new(source_dir)),
             Command::PluginUninstall { id } => self.plugin_uninstall(id),
             Command::PluginRun { id, params, target } => self.plugin_run(id, params, *target),
@@ -2336,7 +2361,7 @@ impl Core {
         for item in rd.flatten() {
             let p = item.path();
             let name = item.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
+            if !self.config.layout.browser_show_hidden && name.starts_with('.') {
                 continue;
             }
             let meta = fs::metadata(&p).ok();
@@ -2864,9 +2889,18 @@ impl Core {
         op: EditOp,
         target: ApplyTarget,
     ) -> Result<(Option<UiText>, Option<serde_json::Value>), ProtocolError> {
+        self.apply_editor_op_with_selection(op, target, true)
+    }
+
+    fn apply_editor_op_with_selection(
+        &mut self,
+        op: EditOp,
+        target: ApplyTarget,
+        selection_only: bool,
+    ) -> Result<(Option<UiText>, Option<serde_json::Value>), ProtocolError> {
         let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
         let fallback_label = op.ui_label();
-        match doc.apply_with_target(op, target) {
+        match doc.apply_with_selection(op, target, selection_only) {
             Ok(true) => {
                 let label = doc.history_labels().pop().unwrap_or(fallback_label);
                 Ok((Some(label), None))
@@ -3384,6 +3418,29 @@ impl Core {
             "plugin_disabled"
         };
         Ok((Some(UiText::with(code, [("name", name)])), None))
+    }
+
+    fn plugin_set_quick_action_enabled(
+        &mut self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<(Option<UiText>, Option<serde_json::Value>), ProtocolError> {
+        if enabled {
+            self.config
+                .disabled_quick_action_plugins
+                .retain(|x| x != id);
+        } else if !self
+            .config
+            .disabled_quick_action_plugins
+            .iter()
+            .any(|x| x == id)
+        {
+            self.config
+                .disabled_quick_action_plugins
+                .push(id.to_owned());
+        }
+        self.persist_config();
+        Ok((None, None))
     }
 
     fn plugin_install(
@@ -4442,6 +4499,7 @@ mod tests {
                     shadows: 0.15,
                     gamma: 1.2,
                     target: ApplyTarget::WholeImage,
+                    selection_only: true,
                 },
             ))
             .ok
@@ -4455,6 +4513,7 @@ mod tests {
                     saturation: 0.1,
                     value: 0.0,
                     target: ApplyTarget::WholeImage,
+                    selection_only: true,
                 },
             ))
             .ok
@@ -4469,6 +4528,7 @@ mod tests {
                     highlights: [0.0, 0.0, 0.05],
                     preserve_luminosity: true,
                     target: ApplyTarget::WholeImage,
+                    selection_only: true,
                 },
             ))
             .ok
@@ -4483,6 +4543,7 @@ mod tests {
                     green: vec![],
                     blue: vec![],
                     target: ApplyTarget::WholeImage,
+                    selection_only: true,
                 },
             ))
             .ok

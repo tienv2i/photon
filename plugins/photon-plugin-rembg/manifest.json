@@ -3,12 +3,24 @@
   "id": "photon.rmbg.onnx",
   "name": "Remove BG",
   "version": "1.2.0",
+  "order": 10,
+  "category": "retouch",
+  "hooks": [
+    "browser.quick_action",
+    "viewer.quick_action",
+    "browser.context_menu",
+    "viewer.context_menu",
+    "editor.plugins_menu",
+    "editor.tool_panel",
+    "settings.panel"
+  ],
+  "labels": {
+    "en-US": "Remove BG",
+    "vi-VN": "Tách nền"
+  },
   "entry": {
     "command": "bin/photon-plugin-rembg",
-    "args": [
-      "--device",
-      "${device}"
-    ],
+    "args": ["--device", "${device}"],
     "protocol": "jsonl-stdio"
   },
   "permissions": {
@@ -111,10 +123,8 @@
       "id": "rembg-general",
       "label": "General",
       "action": "editor.remove_background",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
+      "workspaces": ["browser", "viewer"],
+      "slot": "quick",
       "params": {
         "modelId": "rmbg-1.4",
         "feather": 0
@@ -124,10 +134,7 @@
       "id": "rembg-anime",
       "label": "Anime",
       "action": "editor.remove_background",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
+      "workspaces": ["browser", "viewer"],
       "params": {
         "modelId": "isnet-anime",
         "feather": 0

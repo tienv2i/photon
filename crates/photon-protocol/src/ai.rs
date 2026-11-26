@@ -86,6 +86,8 @@ pub struct PluginQuickAction {
     #[serde(default)]
     pub workspaces: Vec<String>,
     #[serde(default)]
+    pub slot: String,
+    #[serde(default)]
     pub params: serde_json::Value,
 }
 
@@ -98,6 +100,8 @@ pub struct AiQuickAction {
     pub label: String,
     pub action: String,
     pub workspaces: Vec<String>,
+    #[serde(default)]
+    pub slot: String,
     pub params: serde_json::Value,
     pub available: bool,
 }

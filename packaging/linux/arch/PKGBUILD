@@ -1,0 +1,23 @@
+pkgname=photon
+pkgver=0.0.1beta
+pkgrel=1
+pkgdesc="Fast, automation-first photo browser, viewer, and non-destructive layered editor"
+arch=('x86_64')
+url="https://github.com/tienv2i/photon"
+license=('MIT')
+depends=('gtk3' 'libopenjp2' 'libheif' 'hicolor-icon-theme')
+makedepends=('rust' 'cargo' 'clang' 'lld' 'pkgconf' 'librsvg' 'desktop-file-utils' 'appstream' 'python')
+options=('!lto')
+
+build() {
+  local src_root="${_srcdir:-$startdir/../../..}"
+  cd "$src_root"
+  cargo build --release -p photon-desktop -p photon-cli
+}
+
+package() {
+  local src_root="${_srcdir:-$startdir/../../..}"
+  cd "$src_root"
+  python3 scripts/install.py install --skip-build --prefix "$pkgdir/usr"
+  sed -i "s|$pkgdir/usr|/usr|g" "$pkgdir/usr/share/applications/"*.desktop
+}

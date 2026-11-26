@@ -1,0 +1,44 @@
+app-id: io.github.tienv2i.Photon
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: photon
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --filesystem=home
+  - --filesystem=xdg-pictures
+  - --talk-name=org.freedesktop.portal.Desktop
+modules:
+  - name: openjpeg
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_CODEC=OFF
+    sources:
+      - type: archive
+        url: https://github.com/uclouvain/openjpeg/archive/refs/tags/v2.5.3.tar.gz
+        sha256: 368fe0468228e767433c9ebdea82ad9d801a3ad1e4234421f352c8b06e7aa707
+  - name: photon
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      build-args:
+        - --share=network
+      env:
+        CARGO_HOME: /run/build/photon/.cargo
+        CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: cc
+        RUSTFLAGS: ""
+    build-commands:
+      - cargo build --release -p photon-desktop -p photon-cli
+      - install -Dm755 target/release/photon /app/bin/photon
+      - install -Dm755 target/release/photonctl /app/bin/photonctl
+      - python3 scripts/install.py install --skip-build --prefix /app
+    sources:
+      - type: dir
+        path: ../..

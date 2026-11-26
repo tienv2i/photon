@@ -294,23 +294,28 @@ pub fn kv_row<'a, M: 'a>(key: impl Into<String>, value: impl Into<String>) -> El
     row![
         text(key.into())
             .size(12)
-            .width(Length::Fill)
+            .width(Length::Shrink)
             .style(|theme| {
                 let t = PaletteTokens::for_theme(theme);
                 text::Style {
                     color: Some(t.text_muted),
                 }
             }),
-        text(value.into()).size(12).style(|theme| {
-            let t = PaletteTokens::for_theme(theme);
-            text::Style {
-                color: Some(t.text_primary),
-            }
-        }),
+        text(value.into())
+            .size(12)
+            .width(Length::Fill)
+            .align_x(Alignment::End)
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+            .style(|theme| {
+                let t = PaletteTokens::for_theme(theme);
+                text::Style {
+                    color: Some(t.text_primary),
+                }
+            }),
     ]
     .width(Length::Fill)
     .spacing(8)
-    .align_y(Alignment::Center)
+    .align_y(Alignment::Start)
     .into()
 }
 

@@ -141,6 +141,10 @@ fn path_traversal_and_symlink_escape_rejected() {
         params: Vec::new(),
         permissions: Vec::new(),
         timeout_ms: None,
+        order: 100,
+        category: String::new(),
+        hooks: Vec::new(),
+        labels: Default::default(),
     };
     assert!(matches!(
         validate_manifest(&manifest, &plugin_dir),

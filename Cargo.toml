@@ -20,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.1-beta"
 edition = "2024"
 license = "MIT"
 rust-version = "1.88"
@@ -67,6 +67,10 @@ unic-langid = "0.9"
 usvg = "0.45"
 xmlwriter = "0.1"
 zip = { version = "2.6", default-features = false, features = ["deflate"] }
+
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
 [profile.release]
 strip = "symbols"

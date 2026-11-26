@@ -3,6 +3,17 @@
   "id": "photon.ocr.ai",
   "name": "AI OCR",
   "version": "1.3.0",
+  "order": 55,
+  "category": "ocr",
+  "hooks": [
+    "viewer.ocr_engine",
+    "viewer.context_menu",
+    "settings.panel"
+  ],
+  "labels": {
+    "en-US": "AI OCR",
+    "vi-VN": "OCR AI"
+  },
   "entry": {
     "command": "bin/photon-plugin-ai-ocr",
     "args": [],

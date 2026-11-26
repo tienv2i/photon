@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Photon
-Name[vi]=Photon
-GenericName=Image Viewer
-GenericName[vi]=Trình xem ảnh
+Name=Photon Manager
+Name[vi]=Photon Manager
+GenericName=Photo Manager
+GenericName[vi]=Trình quản lý ảnh
 Comment=Fast photo browser, viewer, and manga/manhwa reader
 Comment[vi]=Duyệt, xem ảnh và đọc manga/manhwa nhanh gọn
 Exec=@BINDIR@/photon %U
@@ -12,6 +12,5 @@ Icon=io.github.tienv2i.Photon
 Terminal=false
 Categories=Graphics;Viewer;Photography;
 Keywords=photo;image;picture;viewer;manga;manhwa;browse;pdf;
-MimeType=@MIMETYPES@
 StartupWMClass=io.github.tienv2i.Photon
 StartupNotify=true

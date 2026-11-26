@@ -155,9 +155,16 @@ impl Default for GradientPreview {
 #[derive(Debug, Clone, Default)]
 pub struct CanvasInteractionState {
     pub dragging: bool,
+    pub moving_layer: bool,
+    pub move_start_px: Option<[f32; 2]>,
+    pub move_current_px: Option<[f32; 2]>,
     pub space_pan_active: bool,
     pub cropping: bool,
     pub painting: bool,
+    pub resizing_brush: bool,
+    pub brush_resize_start_x: f32,
+    pub brush_resize_start_radius: f32,
+    pub brush_resize_anchor_doc_pos: Option<[f32; 2]>,
     pub sampling: bool,
     pub dragging_split: bool,
     pub selecting: bool,
@@ -276,6 +283,11 @@ pub enum CanvasEvent {
     TransformUpdated(LayerTransformSpec),
     TransformCommit,
     TransformCancel,
+    MoveLayerCommit {
+        dx: f32,
+        dy: f32,
+    },
+    BrushRadiusChanged(f32),
     VectorSelectShape {
         shape_id: u64,
         node_index: Option<usize>,
@@ -440,6 +452,23 @@ impl ImageCanvasProgram {
         }
     }
 
+    fn is_quick_color_pick_active(&self, state: &CanvasInteractionState) -> bool {
+        (state.modifiers.alt() || state.modifiers.control())
+            && !state.resizing_brush
+            && !state.painting
+            && !state.moving_layer
+            && !state.dragging
+            && !self.tool.is_selection()
+            && !matches!(
+                self.tool,
+                CanvasTool::Hand
+                    | CanvasTool::Zoom
+                    | CanvasTool::HealingBrush
+                    | CanvasTool::Transform
+                    | CanvasTool::PathSelect
+            )
+    }
+
     fn effective_transform_preview(
         &self,
         state: &CanvasInteractionState,
@@ -449,6 +478,12 @@ impl ImageCanvasProgram {
             && let Some(live) = state.transform_live_spec
         {
             tp.spec = live;
+        } else if state.moving_layer
+            && self.tool == CanvasTool::Pointer
+            && let (Some(a), Some(b)) = (state.move_start_px, state.move_current_px)
+        {
+            tp.spec.translate_x += b[0] - a[0];
+            tp.spec.translate_y += b[1] - a[1];
         }
         Some(tp)
     }
@@ -936,6 +971,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 let had_transient = state.space_pan_active
                     || state.dragging
                     || state.painting
+                    || state.resizing_brush
                     || state.selecting
                     || state.cropping
                     || state.transform_dragging
@@ -946,6 +982,8 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 state.space_pan_active = false;
                 state.dragging = false;
                 state.painting = false;
+                state.resizing_brush = false;
+                state.brush_resize_anchor_doc_pos = None;
                 state.selecting = false;
                 state.cropping = false;
                 state.transform_dragging = false;
@@ -965,7 +1003,10 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 }
             }
             Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) => {
-                state.modifiers = *mods;
+                if state.modifiers != *mods {
+                    state.modifiers = *mods;
+                    return Some(Action::request_redraw());
+                }
             }
             Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) => {
                 use iced::keyboard::Key;
@@ -1181,6 +1222,21 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 }
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
+                if state.modifiers.shift()
+                    && matches!(self.tool, CanvasTool::Brush | CanvasTool::Eraser)
+                {
+                    let step = match delta {
+                        mouse::ScrollDelta::Lines { y, .. } => *y * 2.0,
+                        mouse::ScrollDelta::Pixels { y, .. } => (*y / 12.0).clamp(-4.0, 4.0),
+                    };
+                    if step.abs() > 0.01 {
+                        let next_r = (self.brush_radius_px + step).round().clamp(1.0, 200.0);
+                        return Some(
+                            Action::publish(CanvasEvent::BrushRadiusChanged(next_r)).and_capture(),
+                        );
+                    }
+                    return None;
+                }
                 if state.modifiers.shift() {
                     let dx = match delta {
                         mouse::ScrollDelta::Lines { x, y } => {
@@ -1318,8 +1374,8 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     return None;
                 }
 
-                // (3) Global Alt+Click on non-selection/non-transform/non-healing tools -> SampleColor
-                if state.modifiers.alt()
+                // (3) Global Alt+Click / Ctrl+Click on non-selection/non-transform/non-healing tools -> SampleColor
+                if (state.modifiers.alt() || state.modifiers.control())
                     && !self.tool.is_selection()
                     && !matches!(
                         self.tool,
@@ -1356,6 +1412,18 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     | CanvasTool::Eraser
                     | CanvasTool::Liquify
                     | CanvasTool::HealingBrush => {
+                        if state.modifiers.shift()
+                            && matches!(self.tool, CanvasTool::Brush | CanvasTool::Eraser)
+                            && let Some(pos) = cursor.position()
+                        {
+                            state.resizing_brush = true;
+                            state.brush_resize_start_x = pos.x;
+                            state.brush_resize_start_radius = self.brush_radius_px.max(1.0);
+                            state.brush_resize_anchor_doc_pos = self
+                                .screen_to_image_px(pos, bounds)
+                                .map(|[dx, dy]| [dx as f32, dy as f32]);
+                            return Some(Action::capture());
+                        }
                         if let Some(pos) = cursor.position()
                             && let Some(pt) = self.screen_to_image_px(pos, bounds)
                         {
@@ -1783,7 +1851,19 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             return Some(Action::capture());
                         }
                     }
-                    CanvasTool::Pointer | CanvasTool::Hand => {
+                    CanvasTool::Pointer => {
+                        if let Some(pos) = cursor.position()
+                            && let Some([px, py]) = self.screen_to_image_px_unclamped(pos, bounds)
+                        {
+                            let pt = [px as f32, py as f32];
+                            state.moving_layer = true;
+                            state.move_start_px = Some(pt);
+                            state.move_current_px = Some(pt);
+                            return Some(Action::capture());
+                        }
+                        return None;
+                    }
+                    CanvasTool::Hand => {
                         state.dragging = true;
                         state.last_cursor = cursor.position();
                         return Some(Action::capture());
@@ -1796,6 +1876,22 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 return None;
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                if state.moving_layer {
+                    state.moving_layer = false;
+                    let start = state.move_start_px.take();
+                    let cur = state.move_current_px.take();
+                    if let (Some(a), Some(b)) = (start, cur) {
+                        let dx = (b[0] - a[0]).round();
+                        let dy = (b[1] - a[1]).round();
+                        if dx.abs() >= 1.0 || dy.abs() >= 1.0 {
+                            return Some(
+                                Action::publish(CanvasEvent::MoveLayerCommit { dx, dy })
+                                    .and_capture(),
+                            );
+                        }
+                    }
+                    return Some(Action::capture());
+                }
                 if state.dragging_split {
                     state.dragging_split = false;
                     return Some(Action::capture());
@@ -1840,6 +1936,11 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                         return Some(Action::publish(ev).and_capture());
                     }
                     return Some(Action::request_redraw());
+                }
+                if state.resizing_brush {
+                    state.resizing_brush = false;
+                    state.brush_resize_anchor_doc_pos = None;
+                    return Some(Action::capture());
                 }
                 if state.painting {
                     state.painting = false;
@@ -2125,6 +2226,33 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     return Some(Action::request_redraw());
                 }
             }
+            Event::Mouse(mouse::Event::CursorMoved { position }) if state.moving_layer => {
+                if let Some([px, py]) = self.screen_to_image_px_unclamped(*position, bounds) {
+                    let mut pt = [px as f32, py as f32];
+                    if state.modifiers.shift()
+                        && let Some(start) = state.move_start_px
+                    {
+                        let dx = (pt[0] - start[0]).abs();
+                        let dy = (pt[1] - start[1]).abs();
+                        if dx >= dy {
+                            pt[1] = start[1];
+                        } else {
+                            pt[0] = start[0];
+                        }
+                    }
+                    state.move_current_px = Some(pt);
+                    return Some(Action::request_redraw());
+                }
+            }
+            Event::Mouse(mouse::Event::CursorMoved { position }) if state.resizing_brush => {
+                let dx = position.x - state.brush_resize_start_x;
+                let next_r = (state.brush_resize_start_radius + dx * 0.25)
+                    .round()
+                    .clamp(1.0, 200.0);
+                return Some(
+                    Action::publish(CanvasEvent::BrushRadiusChanged(next_r)).and_capture(),
+                );
+            }
             Event::Mouse(mouse::Event::CursorMoved { position }) if state.dragging => {
                 if let Some(prev) = state.last_cursor {
                     let dx = position.x - prev.x;
@@ -2159,7 +2287,9 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
         cursor: mouse::Cursor,
         bounds: Rectangle,
     ) -> Self::Primitive {
+        let quick_pick = self.is_quick_color_pick_active(state) || state.sampling;
         let show_brush_ring = self.brush_radius_px > 0.0
+            && !quick_pick
             && matches!(
                 self.tool,
                 CanvasTool::Brush
@@ -2168,8 +2298,12 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     | CanvasTool::HealingBrush
                     | CanvasTool::QuickSelect
             )
-            && cursor.is_over(bounds);
-        let cursor_doc_pos = if show_brush_ring
+            && (state.resizing_brush || cursor.is_over(bounds));
+        let cursor_doc_pos = if state.resizing_brush
+            && let Some(anchor) = state.brush_resize_anchor_doc_pos
+        {
+            anchor
+        } else if show_brush_ring
             && let Some(pos) = cursor.position()
             && let Some([dx, dy]) = self.screen_to_image_px(pos, bounds)
         {
@@ -2208,7 +2342,13 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
             (0.0, [0.0; 4])
         };
         let (overlay_lines, overlay_tris) = self.build_vector_overlay(state, cursor, bounds);
-        let transform_preview = self.effective_transform_preview(state);
+        let transform_preview = if self.tool == CanvasTool::Transform
+            || (self.tool == CanvasTool::Pointer && state.moving_layer)
+        {
+            self.effective_transform_preview(state)
+        } else {
+            None
+        };
         let gradient_preview = self.effective_gradient_preview(state);
 
         ImageQuadPrimitive {
@@ -2260,12 +2400,16 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 .is_some_and(|p| self.is_over_split_handle(p, bounds)))
         {
             mouse::Interaction::ResizingHorizontally
-        } else if state.dragging {
+        } else if state.dragging || state.moving_layer {
             mouse::Interaction::Grabbing
-        } else if state.space_pan_active && cursor.is_over(bounds) {
-            mouse::Interaction::Grab
         } else if !cursor.is_over(bounds) {
             mouse::Interaction::default()
+        } else if state.resizing_brush {
+            mouse::Interaction::ResizingHorizontally
+        } else if state.sampling || self.is_quick_color_pick_active(state) {
+            mouse::Interaction::Crosshair
+        } else if state.space_pan_active || self.tool == CanvasTool::Pointer {
+            mouse::Interaction::Grab
         } else if self.tool == CanvasTool::Transform {
             if state.transform_dragging {
                 return match state.transform_drag_mode {
@@ -2526,6 +2670,33 @@ impl ImageCanvasProgram {
         let mut lines = Vec::new();
         let mut tris = Vec::new();
 
+        // Quick color-pick / Eyedropper pipette reticle anchored at the cursor hotspot
+        if (self.is_quick_color_pick_active(state) || state.sampling)
+            && cursor.is_over(bounds)
+            && let Some(pos) = cursor.position()
+            && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
+            && let Some(tip) = self.doc_px_to_ndc([px as f32, py as f32], bounds)
+        {
+            let d = |sx: f32, sy: f32| -> [f32; 2] {
+                let [dx, dy_neg] = self.screen_delta_to_ndc(sx, sy, bounds);
+                [tip[0] + dx, tip[1] - dy_neg]
+            };
+            let dark = [0.05, 0.06, 0.09, 0.94];
+            let bright = [1.0, 0.96, 0.45, 0.98];
+            let segs = [
+                (d(2.0, -2.0), d(11.0, -11.0)),
+                (d(11.0, -11.0), d(15.0, -15.0)),
+                (d(7.5, -12.5), d(12.5, -7.5)),
+                (d(13.0, -17.0), d(17.0, -13.0)),
+            ];
+            for (a, b) in segs {
+                self.push_overlay_line_ndc(&mut lines, &mut tris, a, b, dark, 2.8, bounds);
+            }
+            for (a, b) in segs {
+                self.push_overlay_line_ndc(&mut lines, &mut tris, a, b, bright, 1.4, bounds);
+            }
+        }
+
         // Healing Brush source `+` crosshair
         if self.tool == CanvasTool::HealingBrush
             && let Some(src) = self.healing_source_px.or(state.healing_source_px)
@@ -2573,6 +2744,26 @@ impl ImageCanvasProgram {
                 bounds,
             );
             self.push_overlay_circle(&mut lines, c_ndc, rx, ry_neg.abs(), bright, 16);
+        }
+
+        if self.tool == CanvasTool::Pointer
+            && state.moving_layer
+            && let Some(eff_tp) = self.effective_transform_preview(state)
+        {
+            let corners = transform_obb_corners(&eff_tp);
+            let dark = [0.05, 0.06, 0.09, 0.85];
+            let frame_col = [0.35, 0.88, 1.0, 0.9];
+            for i in 0..4 {
+                if let (Some(na), Some(nb)) = (
+                    self.doc_px_to_ndc(corners[i], bounds),
+                    self.doc_px_to_ndc(corners[(i + 1) % 4], bounds),
+                ) {
+                    self.push_overlay_line_ndc(&mut lines, &mut tris, na, nb, dark, 2.0, bounds);
+                    self.push_overlay_line_ndc(
+                        &mut lines, &mut tris, na, nb, frame_col, 1.0, bounds,
+                    );
+                }
+            }
         }
 
         // Interactive Free Transform OBB, 8 resize handles, external rotation handle, and pivot crosshair
@@ -3339,7 +3530,8 @@ mod tests {
             ));
         }
 
-        // Pointer (without crop) pans on Left-drag in Editor; Brush/Transform do NOT pan on Left-drag
+        // Move tool (CanvasTool::Pointer) moves the active layer on Left-drag rather than panning
+        // the viewport; Brush/Transform do NOT pan on Left-drag.
         let pointer_prog = ImageCanvasProgram {
             frame: Some(dummy_frame(1000, 800)),
             tool: CanvasTool::Pointer,
@@ -3354,7 +3546,8 @@ mod tests {
             bounds,
             cursor_a,
         );
-        assert!(ptr_state.dragging);
+        assert!(ptr_state.moving_layer);
+        assert!(!ptr_state.dragging);
 
         for tool in [
             CanvasTool::Brush,

@@ -157,6 +157,7 @@ impl PluginRegistry {
                     label: qa.label.clone(),
                     action: qa.action.clone(),
                     workspaces: qa.workspaces.clone(),
+                    slot: qa.slot.clone(),
                     params: qa.params.clone(),
                     available,
                 });
@@ -175,6 +176,44 @@ impl PluginRegistry {
             !disabled_plugins.iter().any(|id| id == &p.manifest.id)
                 && p.entry_path.is_file()
                 && p.supports_action(action)
+        })
+    }
+
+    /// Find all enabled plugins participating in `hook`, sorted by `order`, `name`, and `id`.
+    pub fn find_by_hook(&self, hook: &str, disabled_plugins: &[String]) -> Vec<&LoadedPlugin> {
+        let mut matched: Vec<&LoadedPlugin> = self
+            .plugins
+            .values()
+            .filter(|p| {
+                !disabled_plugins.iter().any(|id| id == &p.manifest.id)
+                    && p.entry_path.is_file()
+                    && p.manifest.hooks.iter().any(|h| h == hook)
+            })
+            .collect();
+        matched.sort_by(|a, b| {
+            a.manifest
+                .order
+                .cmp(&b.manifest.order)
+                .then_with(|| {
+                    a.manifest
+                        .name
+                        .to_ascii_lowercase()
+                        .cmp(&b.manifest.name.to_ascii_lowercase())
+                })
+                .then_with(|| a.manifest.id.cmp(&b.manifest.id))
+        });
+        matched
+    }
+
+    /// Find an enabled plugin that declares `model_id` in its `models` catalog.
+    pub fn find_by_model(
+        &self,
+        model_id: &str,
+        disabled_plugins: &[String],
+    ) -> Option<&LoadedPlugin> {
+        self.plugins.values().find(|p| {
+            !disabled_plugins.iter().any(|id| id == &p.manifest.id)
+                && p.models().iter().any(|m| m.id == model_id)
         })
     }
 

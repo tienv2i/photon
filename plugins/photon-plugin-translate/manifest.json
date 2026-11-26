@@ -3,6 +3,17 @@
   "id": "photon.translate",
   "name": "Read & Translate",
   "version": "1.2.0",
+  "order": 60,
+  "category": "translate",
+  "hooks": [
+    "viewer.translate_provider",
+    "viewer.context_menu",
+    "settings.panel"
+  ],
+  "labels": {
+    "en-US": "Read & Translate",
+    "vi-VN": "Đọc & Dịch"
+  },
   "entry": {
     "command": "bin/photon-plugin-translate",
     "args": [],
@@ -18,7 +29,21 @@
       "action": "viewer.translate",
       "workspace": "viewer",
       "label": "Read & Translate",
-      "output": "translation"
+      "output": "translation",
+      "params": [
+        {
+          "key": "sourceLang",
+          "label": "Source",
+          "type": "string",
+          "default": "eng"
+        },
+        {
+          "key": "targetLang",
+          "label": "Target",
+          "type": "string",
+          "default": "vi"
+        }
+      ]
     }
   ],
   "quickActions": []

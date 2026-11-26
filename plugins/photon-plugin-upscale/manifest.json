@@ -3,12 +3,22 @@
   "id": "photon.upscale.onnx",
   "name": "Upscale",
   "version": "1.2.0",
+  "order": 20,
+  "category": "upscale",
+  "hooks": [
+    "browser.context_menu",
+    "viewer.context_menu",
+    "editor.plugins_menu",
+    "editor.tool_panel",
+    "settings.panel"
+  ],
+  "labels": {
+    "en-US": "Upscale",
+    "vi-VN": "Nâng độ phân giải"
+  },
   "entry": {
     "command": "bin/photon-plugin-upscale",
-    "args": [
-      "--device",
-      "${device}"
-    ],
+    "args": ["--device", "${device}"],
     "protocol": "jsonl-stdio"
   },
   "permissions": {
@@ -75,10 +85,7 @@
       "id": "upscale-2x",
       "label": "2x Fast",
       "action": "editor.upscale",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
+      "workspaces": ["browser", "viewer"],
       "params": {
         "modelId": "swin2sr-x2",
         "tileSize": 192
@@ -88,10 +95,7 @@
       "id": "upscale-4x-general",
       "label": "4x General",
       "action": "editor.upscale",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
+      "workspaces": ["browser", "viewer"],
       "params": {
         "modelId": "realesr-general-x4v3",
         "tileSize": 192
@@ -101,10 +105,7 @@
       "id": "upscale-4x-anime",
       "label": "4x Anime",
       "action": "editor.upscale",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
+      "workspaces": ["browser", "viewer"],
       "params": {
         "modelId": "realesrgan-x4plus-anime",
         "tileSize": 192

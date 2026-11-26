@@ -15,7 +15,6 @@ pub struct ViewerUiPresentation {
     pub info_open: bool,
     pub adjustments_open: bool,
     pub filmstrip_open: bool,
-    pub is_fullscreen: bool,
     pub color_popover_open: bool,
     pub translate_open: bool,
 }
@@ -75,9 +74,9 @@ pub fn build_ui_tree(
     for (tab_key, label_key) in [
         ("general", "settings-tab-general"),
         ("viewer", "settings-tab-viewer"),
-        ("quick_access", "settings-tab-quick-access"),
+        ("browser", "settings-tab-browser"),
+        ("editor", "settings-tab-editor"),
         ("plugins", "settings-tab-plugins"),
-        ("translate", "settings-tab-translate"),
     ] {
         widgets.push(SemanticWidgetNode {
             id: format!("settings.tab.{tab_key}"),
@@ -758,31 +757,6 @@ pub fn build_ui_tree(
                     has_ctx_path && !is_webtoon,
                     None,
                 ),
-                (
-                    "mode_single",
-                    "action-viewer-single",
-                    true,
-                    Some((vmode == ViewerViewMode::Single).to_string()),
-                ),
-                (
-                    "mode_double",
-                    "action-viewer-double",
-                    true,
-                    Some((vmode == ViewerViewMode::Double).to_string()),
-                ),
-                (
-                    "mode_manhwa",
-                    "action-viewer-manhwa",
-                    true,
-                    Some((vmode == ViewerViewMode::Webtoon).to_string()),
-                ),
-                (
-                    "fullscreen",
-                    "action-fullscreen",
-                    true,
-                    Some(viewer_ui.is_fullscreen.to_string()),
-                ),
-                ("info", "action-info", true, Some(info_open.to_string())),
             ] {
                 widgets.push(SemanticWidgetNode {
                     id: format!("viewer.context_menu.{suffix}"),

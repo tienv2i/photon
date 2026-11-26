@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use photon_protocol::{
     PluginCapability, PluginInfo, PluginManifest, PluginModelSpec, PluginParamKind,
-    PluginParamSpec, PluginParamValue, PluginQuickAction,
+    PluginParamSpec, PluginParamValue, PluginQuickAction, plugin_hooks,
 };
 use serde::Deserialize;
 
@@ -55,6 +55,18 @@ struct RawJsonlManifest {
     quick_actions: Vec<PluginQuickAction>,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    #[serde(default = "default_manifest_order")]
+    order: u16,
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    hooks: Vec<String>,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+}
+
+fn default_manifest_order() -> u16 {
+    100
 }
 
 #[derive(Debug, Deserialize)]
@@ -591,6 +603,21 @@ fn load_jsonl_manifest(
         raw.description
     };
 
+    let mut hooks = raw.hooks;
+    if hooks.is_empty() {
+        let mut derived = BTreeSet::new();
+        if caps.contains(&PluginCapability::BrowserAction) {
+            derived.insert(plugin_hooks::BROWSER_CONTEXT_MENU.to_owned());
+        }
+        if caps.contains(&PluginCapability::ViewerAction) {
+            derived.insert(plugin_hooks::VIEWER_CONTEXT_MENU.to_owned());
+        }
+        if caps.contains(&PluginCapability::EditorFilter) {
+            derived.insert(plugin_hooks::EDITOR_PLUGINS_MENU.to_owned());
+        }
+        hooks = derived.into_iter().collect();
+    }
+
     let manifest = PluginManifest {
         id: raw.id,
         name: raw.name,
@@ -603,6 +630,10 @@ fn load_jsonl_manifest(
         params: param_specs,
         permissions,
         timeout_ms: raw.timeout_ms,
+        order: raw.order,
+        category: raw.category,
+        hooks,
+        labels: raw.labels,
     };
 
     let meta = JsonlStdioMeta {

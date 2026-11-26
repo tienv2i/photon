@@ -3,6 +3,19 @@
   "id": "photon.caption.onnx",
   "name": "AI Caption",
   "version": "2.0.0",
+  "order": 40,
+  "category": "caption",
+  "hooks": [
+    "browser.context_menu",
+    "viewer.context_menu",
+    "editor.plugins_menu",
+    "editor.tool_panel",
+    "settings.panel"
+  ],
+  "labels": {
+    "en-US": "AI Caption",
+    "vi-VN": "Gắn thẻ ảnh AI"
+  },
   "entry": {
     "command": "bin/photon-plugin-caption",
     "args": [],
@@ -60,10 +73,7 @@
       "id": "caption-wd-vit-save",
       "label": "WD-ViT",
       "action": "caption.generate_save",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
+      "workspaces": ["browser", "viewer"],
       "params": {
         "modelId": "wd-vit-tagger-v3",
         "generalThreshold": 0.35,
@@ -75,10 +85,7 @@
       "id": "caption-wd-swinv2-save",
       "label": "SwinV2",
       "action": "caption.generate_save",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
+      "workspaces": ["browser", "viewer"],
       "params": {
         "modelId": "wd-swinv2-tagger-v3",
         "generalThreshold": 0.35,

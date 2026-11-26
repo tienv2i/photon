@@ -469,6 +469,7 @@ fn fill_gradient_shape_healing_denoise_and_transform_e2e() {
                 strength: 0.6,
                 detail_preserve: 0.5,
                 target: ApplyTarget::ActiveLayer,
+                selection_only: true,
             },
         ))
         .ok

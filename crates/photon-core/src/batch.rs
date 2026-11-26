@@ -210,6 +210,18 @@ fn process_one(src: &Path, dst: &Path, operation: &BatchOperation) -> Result<(),
             )
         }
         BatchOperation::Convert { quality, .. } => (image, *quality),
+        BatchOperation::Transform { spec } => {
+            let mut stack =
+                photon_image::layer::LayerStack::from_single(std::sync::Arc::new(image));
+            let layer_id = stack.active_layer().id;
+            let _ = stack.apply_op(&photon_image::layer::LayerOperation::TransformEach {
+                layer_ids: vec![layer_id],
+                shape_ids: Vec::new(),
+                spec: *spec,
+            });
+            let composited = photon_image::layer::composite_stack(&stack);
+            (composited.as_ref().clone(), None)
+        }
     };
 
     let fmt = SaveFormat::from_path(dst)
@@ -483,6 +495,7 @@ fn validate_operation(operation: &BatchOperation) -> Result<(), ProtocolError> {
             }
             Ok(())
         }
+        BatchOperation::Transform { .. } => Ok(()),
     }
 }
 

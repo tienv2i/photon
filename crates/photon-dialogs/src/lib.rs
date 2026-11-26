@@ -13,6 +13,6 @@ pub use manager::{
 };
 pub use overlay::{CutoutStrips, OverlayMode, apply_overlay, compute_cutout_strips};
 pub use system::{
-    FileFilter, IMAGE_EXTENSIONS, open_file, open_files, open_images, pick_folder, save_file,
-    save_image_as,
+    FileFilter, IMAGE_EXTENSIONS, open_file, open_files, open_images, open_with_dialog,
+    pick_folder, pick_screen_color, save_file, save_image_as, save_openraster_as,
 };

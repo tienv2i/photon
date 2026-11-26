@@ -730,6 +730,23 @@ pub struct PluginParamSpec {
     pub description: Option<String>,
 }
 
+/// Standard extension hook points that plugins can declare in `manifest.json` / `plugin.json`.
+pub mod plugin_hooks {
+    pub const BROWSER_CONTEXT_MENU: &str = "browser.context_menu";
+    pub const VIEWER_CONTEXT_MENU: &str = "viewer.context_menu";
+    pub const BROWSER_QUICK_ACTION: &str = "browser.quick_action";
+    pub const VIEWER_QUICK_ACTION: &str = "viewer.quick_action";
+    pub const EDITOR_PLUGINS_MENU: &str = "editor.plugins_menu";
+    pub const EDITOR_TOOL_PANEL: &str = "editor.tool_panel";
+    pub const VIEWER_OCR_ENGINE: &str = "viewer.ocr_engine";
+    pub const VIEWER_TRANSLATE_PROVIDER: &str = "viewer.translate_provider";
+    pub const SETTINGS_PANEL: &str = "settings.panel";
+}
+
+fn default_plugin_order() -> u16 {
+    100
+}
+
 /// Parsed `plugin.json` manifest for a process-isolated NDJSON plugin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -752,6 +769,14 @@ pub struct PluginManifest {
     pub permissions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    #[serde(default = "default_plugin_order")]
+    pub order: u16,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub hooks: Vec<String>,
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
 }
 
 /// Published summary of an installed plugin in `UiStateMeta`.
@@ -784,6 +809,14 @@ pub struct PluginInfo {
     pub quick_actions: Vec<crate::PluginQuickAction>,
     #[serde(default)]
     pub models: Vec<crate::PluginModelSpec>,
+    #[serde(default = "default_plugin_order")]
+    pub order: u16,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub hooks: Vec<String>,
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
 }
 
 impl PluginInfo {
@@ -809,7 +842,28 @@ impl PluginInfo {
             viewer_actions: Vec::new(),
             quick_actions: Vec::new(),
             models: Vec::new(),
+            order: manifest.order,
+            category: manifest.category.clone(),
+            hooks: manifest.hooks.clone(),
+            labels: manifest.labels.clone(),
         }
+    }
+
+    /// Whether this plugin declares participation in `hook`.
+    pub fn has_hook(&self, hook: &str) -> bool {
+        self.hooks.iter().any(|h| h == hook)
+    }
+
+    /// Resolve the best display name for `lang`, falling back to `self.name`.
+    pub fn display_name(&self, lang: crate::Language) -> &str {
+        let locale = match lang {
+            crate::Language::Vietnamese => "vi-VN",
+            _ => "en-US",
+        };
+        if let Some(lbl) = self.labels.get(locale).filter(|s| !s.trim().is_empty()) {
+            return lbl.as_str();
+        }
+        &self.name
     }
 }
 

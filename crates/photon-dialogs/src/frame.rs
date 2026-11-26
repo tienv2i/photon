@@ -106,7 +106,6 @@ where
     let overlay_mode = spec.overlay;
     let scrim_color = spec.style.scrim_color;
     let border_strong = spec.style.border_strong;
-    let on_close = spec.on_close.clone();
     let on_noop = spec.on_noop.clone();
 
     let frame_card = build_dialog_frame(
@@ -121,12 +120,21 @@ where
 
     // Only the dialog card itself is wrapped in `opaque(...)`; the full-viewport positioning
     // wrapper leaves empty space pass-through for `Floating` and `Cutout` modes.
+    // Always anchor the top edge at `rect.y` so auto-shrinking/expanding dialogs never drift
+    // back toward the center when their content height changes.
     let safe_margin = margin.max(0.0);
     let positioned = if !user_moved && !user_resized {
         container(opaque(frame_card))
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .padding(safe_margin)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Top)
+            .padding(Padding {
+                top: rect.y.max(safe_margin),
+                left: safe_margin,
+                right: safe_margin,
+                bottom: safe_margin,
+            })
     } else {
         container(opaque(frame_card))
             .width(Length::Fill)
@@ -146,7 +154,7 @@ where
         overlay_mode,
         scrim_color,
         Some(border_strong),
-        Some(on_close),
+        None,
         on_noop,
         positioned.into(),
     )

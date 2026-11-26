@@ -30,8 +30,8 @@ ICON_ROLES = {
 }
 ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
 
-# Exact MIME types matching image codecs & documents/archives supported by Photon.
-IMAGE_MIME_TYPES = ";".join(
+# Exact MIME types matching image codecs supported by Photon Editor & Viewer.
+EDITOR_MIME_TYPES = ";".join(
     [
         "image/jpeg",
         "image/png",
@@ -75,12 +75,22 @@ IMAGE_MIME_TYPES = ";".join(
         "image/x-olympus-orf",
         "image/x-panasonic-rw2",
         "image/x-dcraw",
-        "application/pdf",
-        "application/zip",
-        "application/vnd.comicbook+zip",
-        "application/x-cbz",
     ]
 ) + ";"
+
+# Viewer additionally supports PDF and comic book / ZIP archives.
+IMAGE_MIME_TYPES = (
+    EDITOR_MIME_TYPES
+    + ";".join(
+        [
+            "application/pdf",
+            "application/zip",
+            "application/vnd.comicbook+zip",
+            "application/x-cbz",
+        ]
+    )
+    + ";"
+)
 
 
 def run(cmd: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -186,11 +196,15 @@ def install_targets(prefix: pathlib.Path) -> dict[str, pathlib.Path]:
     return targets
 
 
-def render_desktop(template_path: pathlib.Path, bindir: pathlib.Path) -> str:
+def render_desktop(
+    template_path: pathlib.Path,
+    bindir: pathlib.Path,
+    mimetypes: str = IMAGE_MIME_TYPES,
+) -> str:
     text = template_path.read_text(encoding="utf-8")
     return (
         text.replace("@BINDIR@", str(bindir))
-        .replace("@MIMETYPES@", IMAGE_MIME_TYPES)
+        .replace("@MIMETYPES@", mimetypes)
     )
 
 
@@ -252,15 +266,15 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
     standalone_viewer_desktop = stage / f"{APP_ID}.Viewer.desktop"
     editor_desktop = stage / f"{APP_ID}.Editor.desktop"
     browser_desktop.write_text(
-        render_desktop(PACKAGING / f"{APP_ID}.desktop.in", bindir),
+        render_desktop(PACKAGING / f"{APP_ID}.desktop.in", bindir, ""),
         encoding="utf-8",
     )
     standalone_viewer_desktop.write_text(
-        render_desktop(PACKAGING / f"{APP_ID}.Viewer.desktop.in", bindir),
+        render_desktop(PACKAGING / f"{APP_ID}.Viewer.desktop.in", bindir, IMAGE_MIME_TYPES),
         encoding="utf-8",
     )
     editor_desktop.write_text(
-        render_desktop(PACKAGING / f"{APP_ID}.Editor.desktop.in", bindir),
+        render_desktop(PACKAGING / f"{APP_ID}.Editor.desktop.in", bindir, EDITOR_MIME_TYPES),
         encoding="utf-8",
     )
 

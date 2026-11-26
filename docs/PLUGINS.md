@@ -85,45 +85,115 @@ Supports `manifest.json` with `"apiVersion": 1` and `"entry": { "command": "..."
 - Sends `{"id":"req-1","op":"run","action":...,"modelId":...,"modelPath":...,"device":...,"input":...,"output":...,"params":{...}}` followed by `{"op":"shutdown"}`.
 - Reads multi-line JSONL events (`progress`, `done`, `error`) from `stdout`. Text/caption/OCR/translation metadata (`meta.captionText`, `meta.clipboardText`, `meta.savedPath`, `meta.translation`) is surfaced in the response `message`.
 
-## Bundled Standalone Plugins (`plugins/`)
+## Declarative Hooks, Ordering & Localization API
 
-All 9 ported standalone crates under `plugins/` carry `license = "MIT"` and build with `--release`:
+To keep plugins decoupled from hardcoded IDs in `photon-browser`, `photon-viewer`, `photon-editor`, and `photon-desktop`, `manifest.json` / `PluginManifest` / `PluginInfo` support:
 
-| Crate | Plugin ID | Version | Capabilities (`action` / `workspace`) | Permissions |
+- `order` (`u16`, default `100`): Deterministic sort priority in menus and hook lists.
+- `category` (`String`, optional): Grouping tag (e.g. `"retouch"`, `"upscale"`, `"ocr"`, `"translate"`, `"utility"`).
+- `hooks` (`Vec<String>`): Extension hook points declared by the plugin. Standard constants in `photon_protocol::plugin_hooks`:
+  - `browser.context_menu`
+  - `viewer.context_menu`
+  - `editor.plugins_menu`
+  - `editor.tool_panel`
+  - `viewer.ocr_engine`
+  - `viewer.translate_provider`
+  - `settings.panel`
+  *(If `hooks` is omitted in legacy manifests, `browser.context_menu`, `viewer.context_menu`, and `editor.plugins_menu` are auto-derived from `capabilities`.)*
+- `labels` (`BTreeMap<String, String>`): Locale-keyed display names (`"en-US"`, `"vi-VN"`), resolved via `PluginInfo::display_name(lang)`.
+- **Registry Hook & Model Lookup (`photon-plugins`)**:
+  - `PluginRegistry::find_by_hook(hook, disabled_plugins)` returns enabled plugins for a hook sorted by `(order, name, id)`.
+  - `PluginRegistry::find_by_model(model_id, disabled_plugins)` resolves the owning plugin for a model ID dynamically.
+
+## Reference Plugin Specifications (Legacy Bundled Plugins)
+
+The 9 standalone crates previously under `plugins/photon-plugin-*` have been removed from the workspace; their mechanisms, `manifest.json` contracts, actions, parameters, and model catalogs are preserved here as the reference spec for external `jsonl-stdio` plugins (`apiVersion: 1`).
+
+### Summary Matrix
+
+| Plugin ID | Name | Version | Capabilities (`action` / `workspace` / `output`) | Permissions |
 |---|---|---|---|---|
-| `photon-plugin-ai-inpaint` | `photon.ai_inpaint.onnx` | `2.0.0` | `editor.ai_inpaint` (`editor`) | — |
-| `photon-plugin-ai-ocr` | `photon.ocr.ai` | `1.3.0` | `viewer.ai_ocr` (`viewer`) | `network` |
-| `photon-plugin-caption` | `photon.caption.onnx` | `2.0.0` | `caption.generate_save` (`viewer`), `editor.caption` (`editor`) | — |
-| `photon-plugin-dewatermark` | `photon.dewatermark` | `2.0.0` | `editor.dewatermark_gemini`, `editor.inpaint_region` (`editor`) | — |
-| `photon-plugin-ocr` | `photon.ocr.tesseract` | `1.3.0` | `viewer.ocr_copy` (`viewer`) | — |
-| `photon-plugin-rembg` | `photon.rmbg.onnx` | `1.2.0` | `editor.remove_background` (`editor`) | `gpu` |
-| `photon-plugin-translate` | `photon.translate` | `1.2.0` | `viewer.translate` (`viewer`) | `network` |
-| `photon-plugin-upscale` | `photon.upscale.onnx` | `1.2.0` | `editor.upscale` (`editor`) | `gpu` |
-| `photon-plugin-utils` | `photon.utils` | `1.2.0` | `utils.strip_exif`, `utils.optimize_size` (`browser`) | — |
+| `photon.rmbg.onnx` | Remove BG | `1.2.0` | `editor.remove_background` (`editor`, `rgba_image`) | `gpu` |
+| `photon.upscale.onnx` | Upscale | `1.2.0` | `editor.upscale` (`editor`, `rgba_image`) | `gpu` |
+| `photon.dewatermark` | Remove Gemini Watermark | `2.0.0` | `editor.dewatermark_gemini`, `editor.inpaint_region` (`editor`, `image`) | — |
+| `photon.ai_inpaint.onnx` | AI Watermark Remover | `2.0.0` | `editor.ai_inpaint` (`editor`, `image`) | — |
+| `photon.caption.onnx` | AI Caption | `2.0.0` | `caption.generate_save` (`viewer`, `text`), `editor.caption` (`editor`, `text`) | — |
+| `photon.ocr.tesseract` | OCR Copy | `1.3.0` | `viewer.ocr_copy` (`viewer`, `text`) | — |
+| `photon.ocr.ai` | AI OCR | `1.3.0` | `viewer.ai_ocr` (`viewer`, `translation`) | `network` |
+| `photon.translate` | Read & Translate | `1.2.0` | `viewer.translate` (`viewer`, `translation`) | `network` |
+| `photon.utils` | Image Utils | `1.2.0` | `utils.strip_exif`, `utils.optimize_size` (`browser`, `rgba_image`) | — |
 
-## Building & Installing Plugins
+### Detailed Plugin Mechanisms & Contracts
 
-```sh
-# Build all 9 standalone plugin crates in release mode
-just build-plugins
+#### 1. `photon.rmbg.onnx` — Remove BG (`v1.2.0`, `gpu: true`)
+- **Entry**: `bin/photon-plugin-rembg`, `args: ["--device", "${device}"]`, `protocol: "jsonl-stdio"`.
+- **Mechanism**: Runs ONNX foreground segmentation (`ort`) to produce an alpha matte; applies optional `feather` (`int`, `0..=20`, default `0`) and outputs an `rgba_image`.
+- **Models**:
+  - `u2netp` (`u2netp.onnx`, tier `fast`, ~4.7 MB, `danielgatis/rembg` v0.0.0)
+  - `silueta` (`silueta.onnx`, tier `fast`, ~44.2 MB, `danielgatis/rembg` v0.0.0)
+  - `rmbg-1.4` (`rmbg-1.4.onnx`, tier `balanced`, ~44.5 MB, `briaai/RMBG-1.4` quantized ONNX)
+  - `isnet-general-use` (`isnet-general-use.onnx`, tier `high`, ~176 MB)
+  - `isnet-anime` (`isnet-anime.onnx`, tier `anime`, ~176 MB)
+  - `birefnet-general-lite` (`birefnet-general-lite.onnx`, tier `high`, ~214 MB)
+  - `u2net_human_seg` (`u2net_human_seg.onnx`, tier `portrait`, ~176 MB)
+  - `birefnet-portrait` (`birefnet-portrait.onnx`, tier `portrait`, ~973 MB)
+- **Quick Actions (`browser`, `viewer`)**: `rembg-general` (`modelId: "rmbg-1.4"`, `feather: 0`), `rembg-anime` (`modelId: "isnet-anime"`, `feather: 0`).
 
-# Build and install all 9 plugins into ~/.local/share/photon/plugins (production profile)
-just install-plugins
+#### 2. `photon.upscale.onnx` — Upscale (`v1.2.0`, `gpu: true`)
+- **Entry**: `bin/photon-plugin-upscale`, `args: ["--device", "${device}"]`, `protocol: "jsonl-stdio"`.
+- **Mechanism**: Tiled ONNX super-resolution (`tileSize`: `int`, `64..=512`, default `192`) with overlap blending, outputting `rgba_image`.
+- **Models**:
+  - `swin2sr-x2` (`swin2sr-x2.onnx`, tier `upscale-2x`, ~21.5 MB, `Xenova/swin2SR-classical-sr-x2-64`)
+  - `realesr-general-x4v3` (`realesr-general-x4v3.onnx`, tier `upscale-4x`, ~4.9 MB, `thisismert/real-esrgan-onnx`)
+  - `realesrgan-x4plus-anime` (`realesrgan-x4plus-anime.onnx`, tier `anime`, ~17.9 MB)
+  - `realesrgan-x4plus` (`realesrgan-x4plus.onnx`, tier `upscale-4x`, ~67.0 MB)
+- **Quick Actions (`browser`, `viewer`)**: `upscale-2x` (`swin2sr-x2`), `upscale-4x-general` (`realesr-general-x4v3`), `upscale-4x-anime` (`realesrgan-x4plus-anime`), all with `tileSize: 192`.
 
-# Build and install all 9 plugins into ~/.local/share/photon-dev/plugins (dev profile)
-just install-plugins dev
+#### 3. `photon.dewatermark` — Remove Gemini Watermark (`v2.0.0`)
+- **Entry**: `bin/photon-plugin-dewatermark`, `protocol: "jsonl-stdio"`.
+- **Capabilities (`editor`, output `image`)**:
+  1. `editor.dewatermark_gemini` ("Remove Gemini"): Reverse alpha-blending using bundled Gemini logo alpha maps (`assets/`), with `size` (`"auto" | "48" | "96"`), `logoValue` (`255.0`), and `force` (`bool`).
+  2. `editor.inpaint_region` ("Inpaint Region"): General watermark region removal using mask/region bounds.
+- **Quick Actions (`browser`, `viewer`)**: `dewatermark-gemini-auto` ("Auto Detect", `force: false`), `dewatermark-gemini-force` ("Force Clean", `force: true`).
 
-# Build and install a single plugin (rembg | upscale | utils | ocr | translate | ai-ocr | dewatermark | caption | ai-inpaint)
-just install-plugin rembg
-just install-plugin rembg dev
-```
+#### 4. `photon.ai_inpaint.onnx` — AI Watermark Remover (`v2.0.0`)
+- **Entry**: `bin/photon-plugin-ai-inpaint`, `protocol: "jsonl-stdio"`.
+- **Mechanism**: Two-stage ONNX pipeline (`editor.ai_inpaint`, output `image`):
+  1. **Detector** (`tier: detector`): `watermark-yolo26` (~9.8 MB, `ayan4m1/Watermark-Detection-YOLO26-ONNX`) or `watermark-yolo11` (~11.1 MB) detects watermark bounding boxes with `confidence` + `maskPadding`.
+  2. **Inpainter** (`tier: inpaint`): `migan-pipeline-v2` (~28.1 MB, `andraniksargsyan/migan`) or `lama-fp32` (~208 MB, `Carve/LaMa-ONNX`) fills masked regions.
+- **Quick Actions (`browser`, `viewer`)**: `ai-dewatermark-yolo26-migan` ("Fast", conf `0.45`), `ai-dewatermark-yolo11-migan` ("Balanced", conf `0.35`), `ai-dewatermark-yolo26-lama` ("High Quality", conf `0.35`), all with `maskPadding: 8`.
 
-`install-plugin` / `install-plugins` install each plugin's `manifest.json`, release binary, any `assets/` directory (such as `dewatermark` alpha maps), and any `libonnxruntime*.so*` / `onnxruntime*.dll` shared libraries alongside the plugin executable.
+#### 5. `photon.caption.onnx` — AI Caption (`v2.0.0`)
+- **Entry**: `bin/photon-plugin-caption`, `protocol: "jsonl-stdio"`.
+- **Mechanism**: WD v3 ONNX image tagger (`wd-vit-tagger-v3` ~378.5 MB or `wd-swinv2-tagger-v3` ~467.5 MB + `wd-v3-selected-tags.csv` vocabulary). Surfaces `meta.captionText` (`output: "text"`).
+- **Capabilities**: `caption.generate_save` (`viewer`, writes sidecar/text), `editor.caption` (`editor`).
+- **Quick Actions (`browser`, `viewer`)**: `caption-wd-vit-save` ("WD-ViT"), `caption-wd-swinv2-save` ("SwinV2") with `generalThreshold: 0.35`, `characterThreshold: 0.85`, `replaceUnderscores: true`.
 
-You can also install any plugin folder through the UI via **Settings → Plugins → Install Plugin…** (`Command::PluginInstall`), refresh discovery with **Reload Plugins** (`Command::PluginRefresh` / `Command::AiRefreshPlugins`), or download/manage on-demand `.onnx` weights and OCR `.traineddata` packs (`Command::AiDownloadModel`, `Command::AiDeleteModel`, `Command::AiSetCustomModel`).
+#### 6. `photon.ocr.tesseract` — OCR Copy (`v1.3.0`)
+- **Entry**: `bin/photon-plugin-ocr`, `protocol: "jsonl-stdio"`.
+- **Mechanism**: Invokes system `tesseract` CLI with `--tessdata-dir` pointing to downloaded `.traineddata` packs (`ocr-vie`, `ocr-jpn`, `ocr-jpn_vert`, `ocr-chi_sim`, `ocr-kor` from `tesseract-ocr/tessdata_fast`). Capability `viewer.ocr_copy` (`viewer`, `output: "text"`), returns `meta.clipboardText`.
+- **Quick Actions (`browser`, `viewer`)**: `ocr-copy-en` (`eng`), `ocr-copy-vi` (`vie`), `ocr-copy-jpn` (`jpn`), `ocr-copy-zh` (`chi_sim`), `ocr-copy-ko` (`kor`).
+
+#### 7. `photon.ocr.ai` — AI OCR (`v1.3.0`, `network: true`)
+- **Entry**: `bin/photon-plugin-ai-ocr`, `protocol: "jsonl-stdio"`.
+- **Mechanism**: Capability `viewer.ai_ocr` (`viewer`, `output: "translation"`). Runs either **Manga-OCR** (`manga-ocr-encoder.onnx` ~22.4 MB + `manga-ocr-decoder.onnx` ~118.1 MB + `manga-ocr-vocab.txt` from `l0wgear/manga-ocr-2025-onnx`) or **RapidOCR** (`ch_PP-OCRv4_det_infer.onnx` ~4.7 MB + `ch_PP-OCRv4_rec_infer.onnx` ~10.9 MB + `ppocr_keys_v1.txt` from `PaddleOCR`), returning structured `meta.translation` blocks.
+
+#### 8. `photon.translate` — Read & Translate (`v1.2.0`, `network: true`)
+- **Entry**: `bin/photon-plugin-translate`, `protocol: "jsonl-stdio"`.
+- **Mechanism**: Capability `viewer.translate` (`viewer`, `output: "translation"`). Performs OCR (`tesseract` or pre-extracted blocks) + machine translation via Google Web or LibreTranslate endpoints, returning `meta.translation` blocks (`origText`, `transText`, normalized bbox).
+
+#### 9. `photon.utils` — Image Utils (`v1.2.0`)
+- **Entry**: `bin/photon-plugin-utils`, `protocol: "jsonl-stdio"`.
+- **Capabilities (`browser`, `output: "rgba_image"`)**:
+  - `utils.strip_exif` ("Strip EXIF / GPS"): Re-encodes image without EXIF/GPS metadata.
+  - `utils.optimize_size` ("Optimize Size"): Re-encodes with `jpegQuality` (default `86`).
+- **Quick Actions (`browser`, `viewer`)**: `utils-strip-exif`, `utils-optimize-size`.
+
+## Installing & Managing External Plugins
+
+Install any external plugin folder through the UI via **Settings → Plugins → Install Plugin…** (`Command::PluginInstall`), refresh discovery with **Reload Plugins** (`Command::PluginRefresh` / `Command::AiRefreshPlugins`), or download/manage on-demand `.onnx` weights and OCR `.traineddata` packs (`Command::AiDownloadModel`, `Command::AiDeleteModel`, `Command::AiSetCustomModel`).
 
 ## Third-Party Runtime & Model Notes
 
-- Photon's core crates and the 9 plugin wrappers in `plugins/photon-plugin-*` are MIT-licensed (`LICENSE`).
-- ONNX-based plugins (`ai-inpaint`, `ai-ocr`, `caption`, `rembg`, `upscale`) use `ort` (`2.0.0-rc.15`), and OCR/Translate plugins (`ocr`, `translate`) invoke the system `tesseract` CLI when installed.
+- Photon's core crates are MIT-licensed (`LICENSE`).
 - External `.onnx` weights, `.traineddata` language packs, and optional `.heic`/`.heif` external CLI decoders (`heif-convert`, `avifdec`, `ffmpeg`, `magick`) are not bundled in the repository and remain governed by their respective upstream licenses.

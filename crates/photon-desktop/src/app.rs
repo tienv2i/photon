@@ -632,7 +632,9 @@ pub enum Message {
     KeyEvent(keyboard::Event),
     WindowOpened(window::Id),
     WindowFocused(window::Id),
-    FocusWindowAfterRestore(window::Id),
+    WakeWindow(window::Id),
+    WakeWindowRaise(window::Id),
+    WakeWindowSettle(window::Id),
     WindowMonitorSizeCheck(window::Id, Option<Size>, bool),
     WindowClosed(window::Id),
     WindowResized(window::Id, Size),
@@ -1022,6 +1024,33 @@ pub enum Message {
     Noop,
 }
 
+/// Decide whether the initial window should start fullscreen and/or maximized.
+///
+/// Standalone Viewer keeps its own FitImage/Remembered sizing and only goes
+/// fullscreen when a file was opened under the `Fullscreen` system mode.
+/// Browser/Editor default to maximized per the app launch mode regardless of
+/// whether a file was opened (so `photon edit file` from a Viewer maximizes).
+pub(crate) fn window_start_policy(
+    is_standalone_viewer: bool,
+    opened_with_files: bool,
+    app_mode: AppLaunchWindowMode,
+    sys_mode: SystemOpenWindowMode,
+    window_maximized: bool,
+) -> (bool, bool) {
+    if is_standalone_viewer {
+        (
+            opened_with_files && sys_mode == SystemOpenWindowMode::Fullscreen,
+            false,
+        )
+    } else {
+        (
+            false,
+            app_mode == AppLaunchWindowMode::Maximized
+                || (app_mode == AppLaunchWindowMode::Remembered && window_maximized),
+        )
+    }
+}
+
 pub fn boot() -> (PhotonGui, Task<Message>) {
     let core = CORE_HANDLE
         .get()
@@ -1035,13 +1064,15 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
         (snapshot.meta.layout.window_height as f32).clamp(500.0, 2160.0),
     );
     let launch_mode = snapshot.meta.layout.system_open_window_mode;
-    let start_fullscreen = opened_with_files && launch_mode == SystemOpenWindowMode::Fullscreen;
-    let start_maximized = !opened_with_files
-        && (snapshot.meta.layout.app_launch_window_mode == AppLaunchWindowMode::Maximized
-            || (snapshot.meta.layout.app_launch_window_mode == AppLaunchWindowMode::Remembered
-                && snapshot.meta.layout.window_maximized));
+    let (start_fullscreen, start_maximized) = window_start_policy(
+        is_standalone_viewer(),
+        opened_with_files,
+        snapshot.meta.layout.app_launch_window_mode,
+        launch_mode,
+        snapshot.meta.layout.window_maximized,
+    );
     let mut suppress_resize_until = None;
-    let init_size = if opened_with_files {
+    let init_size = if is_standalone_viewer() && opened_with_files {
         match launch_mode {
             SystemOpenWindowMode::FitImage => {
                 let target_img = snapshot
@@ -1064,10 +1095,19 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
             }
             SystemOpenWindowMode::Remembered => remembered_size,
         }
+    } else if is_standalone_viewer() {
+        suppress_resize_until = Some(Instant::now() + Duration::from_millis(600));
+        remembered_size
     } else {
         // Ignore initial WM map/configure/maximize resize jitter so remembered size isn't overwritten.
-        suppress_resize_until =
-            Some(Instant::now() + Duration::from_millis(if start_maximized { 1200 } else { 600 }));
+        suppress_resize_until = Some(
+            Instant::now()
+                + Duration::from_millis(if start_maximized || start_fullscreen {
+                    1200
+                } else {
+                    600
+                }),
+        );
         remembered_size
     };
 
@@ -1848,9 +1888,33 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::FocusWindowAfterRestore(win_id) => Task::batch([
+        Message::WakeWindow(win_id) => {
+            crate::window_activation::request_platform_activation(std::process::id());
+            Task::batch([
+                window::minimize(win_id, false),
+                window::request_user_attention(win_id, None),
+                Task::perform(
+                    async move {
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                    },
+                    move |_| Message::WakeWindowRaise(win_id),
+                ),
+            ])
+        }
+        Message::WakeWindowRaise(win_id) => Task::batch([
             window::gain_focus(win_id),
-            window::request_user_attention(win_id, Some(window::UserAttention::Informational)),
+            window::set_level(win_id, window::Level::AlwaysOnTop),
+            Task::perform(
+                async move {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                },
+                move |_| Message::WakeWindowSettle(win_id),
+            ),
+        ]),
+        Message::WakeWindowSettle(win_id) => Task::batch([
+            window::set_level(win_id, window::Level::Normal),
+            window::gain_focus(win_id),
+            window::request_user_attention(win_id, None),
         ]),
         Message::WindowMonitorSizeCheck(id, Some(mon), is_maximized) => {
             if state.main_window == Some(id) && !state.is_fullscreen && !is_maximized {
@@ -2590,17 +2654,13 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             }
             if focus_changed
                 && let Some(win_id) = state
-                    .last_active_window
+                    .main_window
                     .filter(|id| state.windows.contains_key(id))
-                    .or(state.main_window)
+                    .or(state
+                        .last_active_window
+                        .filter(|id| state.windows.contains_key(id)))
             {
-                let restore_and_focus = window::minimize(win_id, false).chain(Task::perform(
-                    async move {
-                        tokio::time::sleep(Duration::from_millis(30)).await;
-                    },
-                    move |_| Message::FocusWindowAfterRestore(win_id),
-                ));
-                tasks.push(restore_and_focus);
+                tasks.push(Task::done(Message::WakeWindow(win_id)));
             }
             Task::batch(tasks)
         }
@@ -15475,6 +15535,18 @@ fn forward_or_spawn_browser(browse_dir: Option<String>) -> Task<Message> {
         async move {
             let app_paths = photon_storage::AppPaths::current();
             if app_paths.socket_path.exists() {
+                if let Some(dir) = browse_dir.as_ref().filter(|dir| !dir.is_empty()) {
+                    let open_env = Envelope::new(
+                        format!("gui-{}", std::process::id()),
+                        ClientKind::Gui,
+                        Command::OpenFolder { path: dir.clone() },
+                    );
+                    let _ = photon_ipc::send_once(
+                        &app_paths.socket_path,
+                        &photon_ipc::IpcRequest::Dispatch { envelope: open_env },
+                    )
+                    .await;
+                }
                 let env = Envelope::new(
                     format!("gui-{}", std::process::id()),
                     ClientKind::Gui,
@@ -15715,6 +15787,54 @@ fn open_in_editor_or_forward(state: &PhotonGui, path: String) -> Task<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_start_policy_matrix() {
+        // Browser/Editor opened with a file (e.g. `photon edit file`) maximized.
+        assert_eq!(
+            window_start_policy(
+                false,
+                true,
+                AppLaunchWindowMode::Maximized,
+                SystemOpenWindowMode::Remembered,
+                false,
+            ),
+            (false, true)
+        );
+        // Remembered with no persisted maximized state stays windowed.
+        assert_eq!(
+            window_start_policy(
+                false,
+                true,
+                AppLaunchWindowMode::Remembered,
+                SystemOpenWindowMode::Remembered,
+                false,
+            ),
+            (false, false)
+        );
+        // Standalone Viewer with FitImage uses neither fullscreen nor maximize.
+        assert_eq!(
+            window_start_policy(
+                true,
+                true,
+                AppLaunchWindowMode::Maximized,
+                SystemOpenWindowMode::FitImage,
+                true,
+            ),
+            (false, false)
+        );
+        // Standalone Viewer only goes fullscreen for Fullscreen + opened files.
+        assert_eq!(
+            window_start_policy(
+                true,
+                true,
+                AppLaunchWindowMode::Maximized,
+                SystemOpenWindowMode::Fullscreen,
+                true,
+            ),
+            (true, false)
+        );
+    }
 
     #[test]
     fn free_pan_allows_overscroll_and_cursor_zoom_without_locking() {

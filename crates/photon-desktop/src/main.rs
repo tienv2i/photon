@@ -2,6 +2,7 @@
 
 mod app;
 mod inspector;
+mod window_activation;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

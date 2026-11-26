@@ -15,7 +15,7 @@
   "models": [
     {
       "id": "ocr-vie",
-      "name": "Tesseract OCR — Vietnamese (vie)",
+      "name": "Tesseract OCR — Vietnamese",
       "tier": "ocr",
       "file": "vie.traineddata",
       "sizeBytes": 1460000,
@@ -24,7 +24,7 @@
     },
     {
       "id": "ocr-jpn",
-      "name": "Tesseract OCR — Japanese (jpn)",
+      "name": "Tesseract OCR — Japanese",
       "tier": "ocr",
       "file": "jpn.traineddata",
       "sizeBytes": 2480000,
@@ -33,7 +33,7 @@
     },
     {
       "id": "ocr-jpn_vert",
-      "name": "Tesseract OCR — Japanese Vertical / Manga (jpn_vert)",
+      "name": "Tesseract OCR — Japanese Vertical",
       "tier": "ocr",
       "file": "jpn_vert.traineddata",
       "sizeBytes": 2860000,
@@ -42,7 +42,7 @@
     },
     {
       "id": "ocr-chi_sim",
-      "name": "Tesseract OCR — Chinese Simplified (chi_sim)",
+      "name": "Tesseract OCR — Chinese Simplified",
       "tier": "ocr",
       "file": "chi_sim.traineddata",
       "sizeBytes": 2450000,
@@ -51,7 +51,7 @@
     },
     {
       "id": "ocr-kor",
-      "name": "Tesseract OCR — Korean (kor)",
+      "name": "Tesseract OCR — Korean",
       "tier": "ocr",
       "file": "kor.traineddata",
       "sizeBytes": 1680000,
@@ -63,14 +63,14 @@
     {
       "action": "viewer.ocr_copy",
       "workspace": "viewer",
-      "label": "Copy text (OCR)",
+      "label": "Copy Text",
       "output": "text"
     }
   ],
   "quickActions": [
     {
       "id": "ocr-copy-en",
-      "label": "OCR Copy (EN)",
+      "label": "English",
       "action": "viewer.ocr_copy",
       "workspaces": [
         "browser",
@@ -82,7 +82,7 @@
     },
     {
       "id": "ocr-copy-vi",
-      "label": "OCR Copy (VI)",
+      "label": "Vietnamese",
       "action": "viewer.ocr_copy",
       "workspaces": [
         "browser",
@@ -95,7 +95,7 @@
     },
     {
       "id": "ocr-copy-jpn",
-      "label": "OCR Copy (JA)",
+      "label": "Japanese",
       "action": "viewer.ocr_copy",
       "workspaces": [
         "browser",
@@ -108,7 +108,7 @@
     },
     {
       "id": "ocr-copy-zh",
-      "label": "OCR Copy (ZH)",
+      "label": "Chinese",
       "action": "viewer.ocr_copy",
       "workspaces": [
         "browser",
@@ -121,7 +121,7 @@
     },
     {
       "id": "ocr-copy-ko",
-      "label": "OCR Copy (KO)",
+      "label": "Korean",
       "action": "viewer.ocr_copy",
       "workspaces": [
         "browser",

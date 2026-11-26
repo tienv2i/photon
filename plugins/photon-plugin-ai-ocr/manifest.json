@@ -15,7 +15,7 @@
   "models": [
     {
       "id": "manga-ocr-encoder",
-      "name": "Manga-OCR — Vision Encoder (Japanese Manga)",
+      "name": "Manga-OCR Vision Encoder",
       "tier": "ocr",
       "file": "manga-ocr-encoder.onnx",
       "sizeBytes": 22356885,
@@ -24,7 +24,7 @@
     },
     {
       "id": "manga-ocr-decoder",
-      "name": "Manga-OCR — Text Decoder (Japanese Manga)",
+      "name": "Manga-OCR Text Decoder",
       "tier": "ocr",
       "file": "manga-ocr-decoder.onnx",
       "sizeBytes": 118053454,
@@ -33,7 +33,7 @@
     },
     {
       "id": "manga-ocr-vocab",
-      "name": "Manga-OCR — Vocabulary (vocab.txt)",
+      "name": "Manga-OCR Vocabulary",
       "tier": "ocr",
       "file": "manga-ocr-vocab.txt",
       "sizeBytes": 24072,
@@ -42,7 +42,7 @@
     },
     {
       "id": "rapidocr-det",
-      "name": "RapidOCR — PP-OCRv4 Text Detector (Complex BG)",
+      "name": "RapidOCR Detector",
       "tier": "ocr",
       "file": "ch_PP-OCRv4_det_infer.onnx",
       "sizeBytes": 4745517,
@@ -51,7 +51,7 @@
     },
     {
       "id": "rapidocr-rec",
-      "name": "RapidOCR — PP-OCRv4 Recognizer (ZH/EN/Multi)",
+      "name": "RapidOCR Recognizer",
       "tier": "ocr",
       "file": "ch_PP-OCRv4_rec_infer.onnx",
       "sizeBytes": 10857958,
@@ -60,7 +60,7 @@
     },
     {
       "id": "rapidocr-keys",
-      "name": "RapidOCR — Character Dictionary (ppocr_keys_v1.txt)",
+      "name": "RapidOCR Character Dictionary",
       "tier": "ocr",
       "file": "ppocr_keys_v1.txt",
       "sizeBytes": 26500,

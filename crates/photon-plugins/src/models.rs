@@ -49,7 +49,7 @@ pub fn builtin_rembg_models() -> Vec<PluginModelSpec> {
     vec![
         PluginModelSpec {
             id: "u2netp".to_owned(),
-            name: "U²-Net Lite (Fast)".to_owned(),
+            name: "U2-Net Lite".to_owned(),
             tier: "fast".to_owned(),
             file: "u2netp.onnx".to_owned(),
             size_bytes: 4_716_000,
@@ -59,7 +59,7 @@ pub fn builtin_rembg_models() -> Vec<PluginModelSpec> {
         },
         PluginModelSpec {
             id: "silueta".to_owned(),
-            name: "Silueta (Fast)".to_owned(),
+            name: "Silueta".to_owned(),
             tier: "fast".to_owned(),
             file: "silueta.onnx".to_owned(),
             size_bytes: 44_200_000,
@@ -69,7 +69,7 @@ pub fn builtin_rembg_models() -> Vec<PluginModelSpec> {
         },
         PluginModelSpec {
             id: "rmbg-1.4".to_owned(),
-            name: "BRIA RMBG-1.4 (Balanced)".to_owned(),
+            name: "BRIA RMBG-1.4".to_owned(),
             tier: "balanced".to_owned(),
             file: "rmbg-1.4.onnx".to_owned(),
             size_bytes: 44_500_000,
@@ -79,7 +79,7 @@ pub fn builtin_rembg_models() -> Vec<PluginModelSpec> {
         },
         PluginModelSpec {
             id: "isnet-general-use".to_owned(),
-            name: "IS-Net General (High)".to_owned(),
+            name: "IS-Net General".to_owned(),
             tier: "high".to_owned(),
             file: "isnet-general-use.onnx".to_owned(),
             size_bytes: 176_000_000,
@@ -89,7 +89,7 @@ pub fn builtin_rembg_models() -> Vec<PluginModelSpec> {
         },
         PluginModelSpec {
             id: "isnet-anime".to_owned(),
-            name: "IS-Net Anime (Anime)".to_owned(),
+            name: "IS-Net Anime".to_owned(),
             tier: "anime".to_owned(),
             file: "isnet-anime.onnx".to_owned(),
             size_bytes: 176_000_000,
@@ -99,7 +99,7 @@ pub fn builtin_rembg_models() -> Vec<PluginModelSpec> {
         },
         PluginModelSpec {
             id: "birefnet-general-lite".to_owned(),
-            name: "BiRefNet Lite (High)".to_owned(),
+            name: "BiRefNet Lite".to_owned(),
             tier: "high".to_owned(),
             file: "birefnet-general-lite.onnx".to_owned(),
             size_bytes: 214_000_000,
@@ -109,7 +109,7 @@ pub fn builtin_rembg_models() -> Vec<PluginModelSpec> {
         },
         PluginModelSpec {
             id: "u2net_human_seg".to_owned(),
-            name: "U²-Net Human (Portrait)".to_owned(),
+            name: "U2-Net Portrait".to_owned(),
             tier: "portrait".to_owned(),
             file: "u2net_human_seg.onnx".to_owned(),
             size_bytes: 176_000_000,
@@ -119,7 +119,7 @@ pub fn builtin_rembg_models() -> Vec<PluginModelSpec> {
         },
         PluginModelSpec {
             id: "birefnet-portrait".to_owned(),
-            name: "BiRefNet Portrait (Portrait)".to_owned(),
+            name: "BiRefNet Portrait".to_owned(),
             tier: "portrait".to_owned(),
             file: "birefnet-portrait.onnx".to_owned(),
             size_bytes: 973_000_000,

@@ -23,7 +23,7 @@
     {
       "action": "utils.optimize_size",
       "workspace": "browser",
-      "label": "Optimize size",
+      "label": "Optimize Size",
       "output": "rgba_image"
     }
   ],
@@ -40,7 +40,7 @@
     },
     {
       "id": "utils-optimize-size",
-      "label": "Optimize size",
+      "label": "Optimize Size",
       "action": "utils.optimize_size",
       "workspaces": [
         "browser",

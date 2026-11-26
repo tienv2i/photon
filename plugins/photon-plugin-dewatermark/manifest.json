@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "photon.dewatermark",
-  "name": "Dewatermark",
+  "name": "Gemini Watermark Remover",
   "version": "2.0.0",
   "entry": {
     "command": "bin/photon-plugin-dewatermark",
@@ -30,7 +30,7 @@
   "quickActions": [
     {
       "id": "dewatermark-gemini-auto",
-      "label": "Remove Gemini (Auto)",
+      "label": "Auto Detect",
       "action": "editor.dewatermark_gemini",
       "workspaces": [
         "browser",
@@ -44,7 +44,7 @@
     },
     {
       "id": "dewatermark-gemini-force",
-      "label": "Remove Gemini (Force)",
+      "label": "Force Clean",
       "action": "editor.dewatermark_gemini",
       "workspaces": [
         "browser",

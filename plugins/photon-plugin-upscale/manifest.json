@@ -18,7 +18,7 @@
   "models": [
     {
       "id": "swin2sr-x2",
-      "name": "Swin2SR 2× (Fast)",
+      "name": "Swin2SR 2x",
       "tier": "upscale-2x",
       "file": "swin2sr-x2.onnx",
       "sizeBytes": 21471413,
@@ -27,7 +27,7 @@
     },
     {
       "id": "realesr-general-x4v3",
-      "name": "Real-ESRGAN 4× Fast (General)",
+      "name": "Real-ESRGAN 4x Fast",
       "tier": "upscale-4x",
       "file": "realesr-general-x4v3.onnx",
       "sizeBytes": 4900000,
@@ -36,7 +36,7 @@
     },
     {
       "id": "realesrgan-x4plus-anime",
-      "name": "Real-ESRGAN 4× Anime",
+      "name": "Real-ESRGAN 4x Anime",
       "tier": "anime",
       "file": "realesrgan-x4plus-anime.onnx",
       "sizeBytes": 17900000,
@@ -45,7 +45,7 @@
     },
     {
       "id": "realesrgan-x4plus",
-      "name": "Real-ESRGAN 4× Plus (High)",
+      "name": "Real-ESRGAN 4x Plus",
       "tier": "upscale-4x",
       "file": "realesrgan-x4plus.onnx",
       "sizeBytes": 67000000,
@@ -73,7 +73,7 @@
   "quickActions": [
     {
       "id": "upscale-2x",
-      "label": "Upscale 2× (Fast)",
+      "label": "2x Fast",
       "action": "editor.upscale",
       "workspaces": [
         "browser",
@@ -86,7 +86,7 @@
     },
     {
       "id": "upscale-4x-general",
-      "label": "Upscale 4× (General)",
+      "label": "4x General",
       "action": "editor.upscale",
       "workspaces": [
         "browser",
@@ -99,7 +99,7 @@
     },
     {
       "id": "upscale-4x-anime",
-      "label": "Upscale 4× (Anime)",
+      "label": "4x Anime",
       "action": "editor.upscale",
       "workspaces": [
         "browser",

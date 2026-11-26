@@ -15,7 +15,7 @@
   "models": [
     {
       "id": "wd-vit-tagger-v3",
-      "name": "WD-ViT Tagger v3 (Fast & Balanced)",
+      "name": "WD-ViT Tagger v3",
       "tier": "caption",
       "file": "wd-vit-tagger-v3.onnx",
       "sizeBytes": 378536310,
@@ -24,7 +24,7 @@
     },
     {
       "id": "wd-swinv2-tagger-v3",
-      "name": "WD-SwinV2 Tagger v3 (High Accuracy)",
+      "name": "WD-SwinV2 Tagger v3",
       "tier": "caption",
       "file": "wd-swinv2-tagger-v3.onnx",
       "sizeBytes": 467460978,
@@ -33,7 +33,7 @@
     },
     {
       "id": "wd-v3-selected-tags",
-      "name": "WD v3 Tag Vocabulary (selected_tags.csv)",
+      "name": "WD v3 Tag Vocabulary",
       "tier": "caption",
       "file": "wd-v3-selected-tags.csv",
       "sizeBytes": 308468,
@@ -45,7 +45,7 @@
     {
       "action": "caption.generate_save",
       "workspace": "viewer",
-      "label": "Save Caption (.txt)",
+      "label": "Save Caption",
       "output": "text"
     },
     {
@@ -58,7 +58,7 @@
   "quickActions": [
     {
       "id": "caption-wd-vit-save",
-      "label": "Caption (.txt · WD-ViT)",
+      "label": "WD-ViT",
       "action": "caption.generate_save",
       "workspaces": [
         "browser",
@@ -73,7 +73,7 @@
     },
     {
       "id": "caption-wd-swinv2-save",
-      "label": "Caption (.txt · SwinV2)",
+      "label": "SwinV2",
       "action": "caption.generate_save",
       "workspaces": [
         "browser",

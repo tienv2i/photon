@@ -18,7 +18,7 @@
   "models": [
     {
       "id": "u2netp",
-      "name": "U²-Net Lite (Fast)",
+      "name": "U2-Net Lite",
       "tier": "fast",
       "file": "u2netp.onnx",
       "sizeBytes": 4716000,
@@ -27,7 +27,7 @@
     },
     {
       "id": "silueta",
-      "name": "Silueta (Fast)",
+      "name": "Silueta",
       "tier": "fast",
       "file": "silueta.onnx",
       "sizeBytes": 44200000,
@@ -36,7 +36,7 @@
     },
     {
       "id": "rmbg-1.4",
-      "name": "BRIA RMBG-1.4 (Balanced)",
+      "name": "BRIA RMBG-1.4",
       "tier": "balanced",
       "file": "rmbg-1.4.onnx",
       "sizeBytes": 44500000,
@@ -45,7 +45,7 @@
     },
     {
       "id": "isnet-general-use",
-      "name": "IS-Net General (High)",
+      "name": "IS-Net General",
       "tier": "high",
       "file": "isnet-general-use.onnx",
       "sizeBytes": 176000000,
@@ -54,7 +54,7 @@
     },
     {
       "id": "isnet-anime",
-      "name": "IS-Net Anime (Anime)",
+      "name": "IS-Net Anime",
       "tier": "anime",
       "file": "isnet-anime.onnx",
       "sizeBytes": 176000000,
@@ -63,7 +63,7 @@
     },
     {
       "id": "birefnet-general-lite",
-      "name": "BiRefNet Lite (High)",
+      "name": "BiRefNet Lite",
       "tier": "high",
       "file": "birefnet-general-lite.onnx",
       "sizeBytes": 214000000,
@@ -72,7 +72,7 @@
     },
     {
       "id": "u2net_human_seg",
-      "name": "U²-Net Human (Portrait)",
+      "name": "U2-Net Portrait",
       "tier": "portrait",
       "file": "u2net_human_seg.onnx",
       "sizeBytes": 176000000,
@@ -81,7 +81,7 @@
     },
     {
       "id": "birefnet-portrait",
-      "name": "BiRefNet Portrait (Portrait)",
+      "name": "BiRefNet Portrait",
       "tier": "portrait",
       "file": "birefnet-portrait.onnx",
       "sizeBytes": 973000000,
@@ -93,7 +93,7 @@
     {
       "action": "editor.remove_background",
       "workspace": "editor",
-      "label": "Remove background",
+      "label": "Remove Background",
       "output": "rgba_image",
       "params": [
         {
@@ -109,7 +109,7 @@
   "quickActions": [
     {
       "id": "rembg-general",
-      "label": "Remove bg (General)",
+      "label": "General",
       "action": "editor.remove_background",
       "workspaces": [
         "browser",
@@ -122,7 +122,7 @@
     },
     {
       "id": "rembg-anime",
-      "label": "Remove bg (Anime)",
+      "label": "Anime",
       "action": "editor.remove_background",
       "workspaces": [
         "browser",

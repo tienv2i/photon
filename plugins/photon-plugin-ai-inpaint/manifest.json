@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "photon.ai_inpaint.onnx",
-  "name": "Watermark AI",
+  "name": "AI Watermark Remover",
   "version": "2.0.0",
   "entry": {
     "command": "bin/photon-plugin-ai-inpaint",
@@ -15,7 +15,7 @@
   "models": [
     {
       "id": "watermark-yolo26",
-      "name": "YOLO26 Watermark Detector (Fast, 9.8 MB)",
+      "name": "YOLO26 Watermark Detector",
       "tier": "detector",
       "file": "watermark-yolo26.onnx",
       "sizeBytes": 9804990,
@@ -24,7 +24,7 @@
     },
     {
       "id": "watermark-yolo11",
-      "name": "YOLO11 Watermark Detector (Balanced, 11 MB)",
+      "name": "YOLO11 Watermark Detector",
       "tier": "detector",
       "file": "watermark-yolo11.onnx",
       "sizeBytes": 11068970,
@@ -33,7 +33,7 @@
     },
     {
       "id": "migan-pipeline-v2",
-      "name": "MI-GAN v2 Inpainter (Fast CPU, 28 MB)",
+      "name": "MI-GAN v2 Inpainter",
       "tier": "inpaint",
       "file": "migan-pipeline-v2.onnx",
       "sizeBytes": 28079181,
@@ -42,7 +42,7 @@
     },
     {
       "id": "lama-fp32",
-      "name": "LaMa FFC Inpainter (High Quality, 208 MB)",
+      "name": "LaMa FFC Inpainter",
       "tier": "inpaint",
       "file": "lama-fp32.onnx",
       "sizeBytes": 208044816,
@@ -61,7 +61,7 @@
   "quickActions": [
     {
       "id": "ai-dewatermark-yolo26-migan",
-      "label": "Remove watermark (Fast)",
+      "label": "Fast",
       "action": "editor.ai_inpaint",
       "workspaces": [
         "browser",
@@ -75,23 +75,8 @@
       }
     },
     {
-      "id": "ai-dewatermark-yolo26-lama",
-      "label": "Remove watermark (HQ)",
-      "action": "editor.ai_inpaint",
-      "workspaces": [
-        "browser",
-        "viewer"
-      ],
-      "params": {
-        "detectorModel": "watermark-yolo26",
-        "inpainterModel": "lama-fp32",
-        "confidence": 0.35,
-        "maskPadding": 8
-      }
-    },
-    {
       "id": "ai-dewatermark-yolo11-migan",
-      "label": "Remove watermark (YOLO11)",
+      "label": "Balanced",
       "action": "editor.ai_inpaint",
       "workspaces": [
         "browser",
@@ -100,6 +85,21 @@
       "params": {
         "detectorModel": "watermark-yolo11",
         "inpainterModel": "migan-pipeline-v2",
+        "confidence": 0.35,
+        "maskPadding": 8
+      }
+    },
+    {
+      "id": "ai-dewatermark-yolo26-lama",
+      "label": "High Quality",
+      "action": "editor.ai_inpaint",
+      "workspaces": [
+        "browser",
+        "viewer"
+      ],
+      "params": {
+        "detectorModel": "watermark-yolo26",
+        "inpainterModel": "lama-fp32",
         "confidence": 0.35,
         "maskPadding": 8
       }

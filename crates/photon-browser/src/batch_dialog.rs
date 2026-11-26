@@ -2,8 +2,11 @@
 //! with Print Units (`px` / `cm` / `in` / `%`), DPI selection, source selection, and
 //! output/overwrite guardrails.
 
-use iced::widget::{checkbox, column, container, pick_list, row, rule, slider, text, text_input};
-use iced::{Alignment, Element, Fill, Length};
+use iced::widget::{
+    button as iced_button, checkbox, column, container, pick_list, row, rule, slider, text,
+    text_input,
+};
+use iced::{Alignment, Border, Element, Fill, Length};
 use photon_i18n::tr;
 use photon_protocol::{
     BatchCropUnit, BatchImageFormat, BatchOperation, BatchOutput, BatchSource, CanvasAnchor,
@@ -16,12 +19,48 @@ use photon_ui::editor::{
 };
 use photon_ui::icons::Icon;
 use photon_ui::theme::{
-    PaletteTokens, TEXT_SIZE_CAPTION, TEXT_SIZE_CONTROL, card_style, hairline_rule_style,
-    input_style, pick_list_menu_style, pick_list_style, slider_style,
+    PaletteTokens, RADIUS_SM, TEXT_SIZE_CAPTION, TEXT_SIZE_CONTROL, card_style,
+    hairline_rule_style, input_style, pick_list_menu_style, pick_list_style, slider_style,
 };
 use photon_ui::tooltip::{TooltipPosition, with_tooltip_pos};
 
 use photon_dialogs::{DialogEvent, DialogWindowState};
+
+const SECTION_PADDING: u16 = 12;
+const SECTION_GAP: u32 = 10;
+const ROW_SPACING: u32 = 8;
+const CONTROL_GAP: u32 = 8;
+const FIELD_LABEL_GAP: u32 = 4;
+const INPUT_PADDING: [u16; 2] = [6, 8];
+const PICKER_PADDING: [u16; 2] = [6, 10];
+const CONTROL_ROW_HEIGHT: f32 = 28.0;
+const SUFFIX_FIELD_WIDTH: f32 = 180.0;
+const FORMAT_PICKER_WIDTH: f32 = 180.0;
+const ANCHOR_COLUMN_WIDTH: f32 = 108.0;
+
+fn section_title_text<'a, M: 'a>(label: String) -> Element<'a, M> {
+    text(label)
+        .size(TEXT_SIZE_CONTROL)
+        .style(|theme| {
+            let t = PaletteTokens::for_theme(theme);
+            text::Style {
+                color: Some(t.text_muted),
+            }
+        })
+        .into()
+}
+
+fn field_label_text<'a, M: 'a>(label: impl Into<String>) -> Element<'a, M> {
+    text(label.into())
+        .size(TEXT_SIZE_CAPTION)
+        .style(|theme| {
+            let t = PaletteTokens::for_theme(theme);
+            text::Style {
+                color: Some(t.text_muted),
+            }
+        })
+        .into()
+}
 
 #[derive(Debug, Clone)]
 pub enum BatchDialogAction<Id> {
@@ -557,14 +596,7 @@ fn build_batch_dialog_for_kind<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
     let folder_img_count = snapshot.entries.iter().filter(|e| e.is_image).count();
 
     let mut source_col = column![
-        text(tr(lang, "batch-source"))
-            .size(TEXT_SIZE_CONTROL)
-            .style(|theme| {
-                let t = PaletteTokens::for_theme(theme);
-                text::Style {
-                    color: Some(t.text_muted),
-                }
-            }),
+        section_title_text(tr(lang, "batch-source")),
         row![
             button::labeled(
                 format!(
@@ -600,16 +632,17 @@ fn build_batch_dialog_for_kind<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
                 ))),
             ),
         ]
-        .spacing(6),
+        .spacing(CONTROL_GAP)
+        .align_y(Alignment::Center),
     ]
-    .spacing(6);
+    .spacing(ROW_SPACING);
 
     if batch.input_mode == BatchInputMode::CustomFolder {
         source_col = source_col.push(
             row![
                 text_input("/path/to/input", &batch.input_folder)
                     .on_input(|v| BatchDialogAction::Msg(BatchDialogMsg::InputFolderChanged(v)))
-                    .padding([6, 8])
+                    .padding(INPUT_PADDING)
                     .size(TEXT_SIZE_CONTROL)
                     .style(input_style)
                     .width(Fill),
@@ -623,13 +656,13 @@ fn build_batch_dialog_for_kind<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
                     TooltipPosition::Top,
                 ),
             ]
-            .spacing(6)
+            .spacing(CONTROL_GAP)
             .align_y(Alignment::Center),
         );
     }
 
     let source_section = container(source_col)
-        .padding(10)
+        .padding(SECTION_PADDING)
         .width(Fill)
         .style(card_style);
 
@@ -640,14 +673,7 @@ fn build_batch_dialog_for_kind<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
     };
 
     let mut output_col = column![
-        text(tr(lang, "batch-output"))
-            .size(TEXT_SIZE_CONTROL)
-            .style(|theme| {
-                let t = PaletteTokens::for_theme(theme);
-                text::Style {
-                    color: Some(t.text_muted),
-                }
-            }),
+        section_title_text(tr(lang, "batch-output")),
         row![
             button::labeled(
                 tr(lang, "batch-output-beside"),
@@ -670,16 +696,17 @@ fn build_batch_dialog_for_kind<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
                 ))),
             ),
         ]
-        .spacing(6),
+        .spacing(CONTROL_GAP)
+        .align_y(Alignment::Center),
     ]
-    .spacing(8);
+    .spacing(ROW_SPACING);
 
     if !batch.beside_originals {
         output_col = output_col.push(
             row![
                 text_input("/path/to/output", &batch.output_folder)
                     .on_input(|v| BatchDialogAction::Msg(BatchDialogMsg::OutputFolderChanged(v)))
-                    .padding([6, 8])
+                    .padding(INPUT_PADDING)
                     .size(TEXT_SIZE_CONTROL)
                     .style(input_style)
                     .width(Fill),
@@ -693,7 +720,7 @@ fn build_batch_dialog_for_kind<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
                     TooltipPosition::Top,
                 ),
             ]
-            .spacing(6)
+            .spacing(CONTROL_GAP)
             .align_y(Alignment::Center),
         );
     }
@@ -701,40 +728,36 @@ fn build_batch_dialog_for_kind<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
     output_col = output_col.push(
         row![
             column![
-                text(tr(lang, "batch-suffix"))
-                    .size(TEXT_SIZE_CAPTION)
-                    .style(|theme| {
-                        let t = PaletteTokens::for_theme(theme);
-                        text::Style {
-                            color: Some(t.text_muted),
-                        }
-                    }),
+                field_label_text(tr(lang, "batch-suffix")),
                 text_input("_edited", &batch.suffix)
                     .on_input(|v| BatchDialogAction::Msg(BatchDialogMsg::SuffixChanged(v)))
-                    .padding([6, 8])
+                    .padding(INPUT_PADDING)
                     .size(TEXT_SIZE_CONTROL)
                     .style(input_style),
             ]
-            .spacing(3)
-            .width(Length::Fixed(160.0)),
+            .spacing(FIELD_LABEL_GAP)
+            .width(Length::Fixed(SUFFIX_FIELD_WIDTH)),
             container(
                 checkbox(batch.overwrite)
                     .label(tr(lang, "batch-overwrite"))
                     .text_size(TEXT_SIZE_CONTROL)
                     .on_toggle(|v| BatchDialogAction::Msg(BatchDialogMsg::OverwriteToggled(v))),
             )
-            .padding([16, 0]),
+            .height(Length::Fixed(CONTROL_ROW_HEIGHT))
+            .align_y(Alignment::Center),
         ]
         .spacing(12)
-        .align_y(Alignment::Center),
+        .align_y(Alignment::End),
     );
 
     let output_section = container(output_col)
-        .padding(10)
+        .padding(SECTION_PADDING)
         .width(Fill)
         .style(card_style);
 
-    let mut body_col = column![source_section, op_section, output_section].spacing(10);
+    let mut body_col = column![source_section, op_section, output_section]
+        .spacing(SECTION_GAP)
+        .width(Fill);
 
     if let Some(err) = &batch.error {
         body_col = body_col.push(text(err.clone()).size(TEXT_SIZE_CONTROL).style(|theme| {
@@ -774,6 +797,8 @@ fn build_batch_dialog_for_kind<'a, Id: Copy + Eq + Ord + std::hash::Hash + 'a>(
             TooltipPosition::Top,
         ),
     ]
+    .spacing(CONTROL_GAP)
+    .width(Fill)
     .align_y(Alignment::Center);
 
     let title = match kind {
@@ -862,71 +887,71 @@ fn build_batch_resize_section<'a, Id: Clone + 'a>(
         ],
     });
 
-    #[derive(Clone, Copy, PartialEq, Eq)]
+    #[derive(Clone, PartialEq, Eq)]
     struct LabeledChoice<T: Copy + PartialEq> {
         value: T,
-        label: &'static str,
+        label: String,
     }
     impl<T: Copy + PartialEq> std::fmt::Display for LabeledChoice<T> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(self.label)
+            f.write_str(&self.label)
         }
     }
 
-    let mode_options = [
+    let mode_options = vec![
         LabeledChoice {
             value: ResizeMode::Stretch,
-            label: Box::leak(tr(lang, "mode-stretch").into_boxed_str()),
+            label: tr(lang, "mode-stretch"),
         },
         LabeledChoice {
             value: ResizeMode::Cover,
-            label: Box::leak(tr(lang, "mode-cover").into_boxed_str()),
+            label: tr(lang, "mode-cover"),
         },
         LabeledChoice {
             value: ResizeMode::Pad,
-            label: Box::leak(tr(lang, "mode-pad").into_boxed_str()),
+            label: tr(lang, "mode-pad"),
         },
     ];
     let selected_mode = mode_options
         .iter()
         .find(|o| o.value == batch.resize_mode)
-        .copied();
+        .cloned();
     let mode_picker = pick_list(mode_options, selected_mode, |o| {
         BatchDialogAction::Msg(BatchDialogMsg::ResizeModeChanged(o.value))
     })
     .text_size(TEXT_SIZE_CONTROL)
-    .padding([5, 10])
+    .padding(PICKER_PADDING)
     .width(Fill)
     .style(pick_list_style)
     .menu_style(pick_list_menu_style);
 
-    let filter_options = [
+    let filter_options = vec![
         LabeledChoice {
             value: ResizeFilter::Lanczos3,
-            label: "Lanczos3",
+            label: "Lanczos3".to_owned(),
         },
         LabeledChoice {
             value: ResizeFilter::CatmullRom,
-            label: "CatmullRom",
+            label: "CatmullRom".to_owned(),
         },
         LabeledChoice {
             value: ResizeFilter::Triangle,
-            label: "Triangle",
+            label: "Triangle".to_owned(),
         },
         LabeledChoice {
             value: ResizeFilter::Nearest,
-            label: "Nearest",
+            label: "Nearest".to_owned(),
         },
     ];
     let selected_filter = filter_options
         .iter()
         .find(|o| o.value == batch.resize_filter)
-        .copied();
+        .cloned();
     let filter_picker = pick_list(filter_options, selected_filter, |o| {
         BatchDialogAction::Msg(BatchDialogMsg::ResizeFilterChanged(o.value))
     })
     .text_size(TEXT_SIZE_CONTROL)
-    .padding([5, 10])
+    .padding(PICKER_PADDING)
     .width(Fill)
     .style(pick_list_style)
     .menu_style(pick_list_menu_style);
@@ -936,24 +961,18 @@ fn build_batch_resize_section<'a, Id: Clone + 'a>(
             grid,
             rule::horizontal(1).style(hairline_rule_style),
             row![
-                column![
-                    text(tr(lang, "label-resize-mode")).size(TEXT_SIZE_CAPTION),
-                    mode_picker
-                ]
-                .spacing(4)
-                .width(Fill),
-                column![
-                    text(tr(lang, "label-filter")).size(TEXT_SIZE_CAPTION),
-                    filter_picker
-                ]
-                .spacing(4)
-                .width(Fill),
+                column![field_label_text(tr(lang, "label-resize-mode")), mode_picker]
+                    .spacing(FIELD_LABEL_GAP)
+                    .width(Fill),
+                column![field_label_text(tr(lang, "label-filter")), filter_picker]
+                    .spacing(FIELD_LABEL_GAP)
+                    .width(Fill),
             ]
-            .spacing(10),
+            .spacing(CONTROL_GAP),
         ]
-        .spacing(8),
+        .spacing(ROW_SPACING),
     )
-    .padding(10)
+    .padding(SECTION_PADDING)
     .width(Fill)
     .style(card_style)
     .into()
@@ -985,7 +1004,8 @@ fn build_batch_crop_section<'a, Id: Clone + 'a>(
             ))),
         ),
     ]
-    .spacing(4);
+    .spacing(4)
+    .align_y(Alignment::Center);
 
     let dims_row = row![
         labeled_small_input("W", &batch.crop_w_str, |v| {
@@ -995,7 +1015,7 @@ fn build_batch_crop_section<'a, Id: Clone + 'a>(
             BatchDialogAction::Msg(BatchDialogMsg::CropHChanged(v))
         }),
     ]
-    .spacing(8);
+    .spacing(CONTROL_GAP);
 
     let xy_row = row![
         labeled_small_input("X", &batch.crop_x_str, |v| {
@@ -1005,7 +1025,7 @@ fn build_batch_crop_section<'a, Id: Clone + 'a>(
             BatchDialogAction::Msg(BatchDialogMsg::CropYChanged(v))
         }),
     ]
-    .spacing(8);
+    .spacing(CONTROL_GAP);
 
     let anchor_idx = batch.crop_anchor.map(CanvasAnchor::index).unwrap_or(4);
     let anchor_grid = anchor_grid_3x3(anchor_idx, |idx| {
@@ -1016,7 +1036,7 @@ fn build_batch_crop_section<'a, Id: Clone + 'a>(
 
     let anchor_box = column![
         row![
-            text(tr(lang, "label-anchor")).size(TEXT_SIZE_CAPTION),
+            field_label_text(tr(lang, "label-anchor")),
             iced::widget::space::horizontal(),
             button::labeled(
                 "X/Y",
@@ -1029,10 +1049,12 @@ fn build_batch_crop_section<'a, Id: Clone + 'a>(
                 ))),
             ),
         ]
+        .width(Fill)
         .align_y(Alignment::Center),
         anchor_grid,
     ]
-    .spacing(6);
+    .spacing(ROW_SPACING)
+    .width(Length::Fixed(ANCHOR_COLUMN_WIDTH));
 
     #[derive(Clone, Copy)]
     struct RatioPreset {
@@ -1085,32 +1107,31 @@ fn build_batch_crop_section<'a, Id: Clone + 'a>(
         BatchDialogAction::Msg(BatchDialogMsg::CropRatioChanged(o.ratio))
     })
     .text_size(TEXT_SIZE_CONTROL)
-    .padding([5, 10])
-    .width(Length::Fixed(160.0))
+    .padding(PICKER_PADDING)
+    .width(Fill)
     .style(pick_list_style)
     .menu_style(pick_list_menu_style);
 
     let mut left_col = column![
         row![
-            text(tr(lang, "label-unit")).size(TEXT_SIZE_CAPTION),
+            field_label_text(tr(lang, "label-unit")),
             iced::widget::space::horizontal(),
             unit_row,
         ]
+        .width(Fill)
         .align_y(Alignment::Center),
         dims_row,
     ]
-    .spacing(8)
+    .spacing(ROW_SPACING)
     .width(Fill);
 
     if batch.crop_anchor.is_none() {
         left_col = left_col.push(xy_row);
     }
     left_col = left_col.push(
-        column![
-            text(tr(lang, "label-presets")).size(TEXT_SIZE_CAPTION),
-            ratio_row
-        ]
-        .spacing(4),
+        column![field_label_text(tr(lang, "label-presets")), ratio_row]
+            .spacing(FIELD_LABEL_GAP)
+            .width(Fill),
     );
 
     container(
@@ -1118,7 +1139,7 @@ fn build_batch_crop_section<'a, Id: Clone + 'a>(
             .spacing(12)
             .align_y(Alignment::Start),
     )
-    .padding(10)
+    .padding(SECTION_PADDING)
     .width(Fill)
     .style(card_style)
     .into()
@@ -1147,46 +1168,84 @@ fn build_batch_convert_section<'a, Id: Clone + 'a>(
         |c| BatchDialogAction::Msg(BatchDialogMsg::ConvertFormatChanged(c.0)),
     )
     .text_size(TEXT_SIZE_CONTROL)
-    .padding([5, 10])
-    .width(Length::Fixed(180.0))
+    .padding(PICKER_PADDING)
+    .width(Length::Fixed(FORMAT_PICKER_WIDTH))
     .style(pick_list_style)
     .menu_style(pick_list_menu_style);
 
-    let mut col = column![
-        text(tr(lang, "label-format"))
-            .size(TEXT_SIZE_CONTROL)
-            .style(|theme| {
-                let t = PaletteTokens::for_theme(theme);
-                text::Style {
-                    color: Some(t.text_muted),
-                }
-            }),
-        format_picker,
-    ]
-    .spacing(6);
+    let mut col =
+        column![section_title_text(tr(lang, "label-format")), format_picker,].spacing(ROW_SPACING);
 
     if matches!(
         batch.convert_format,
         BatchImageFormat::Jpeg | BatchImageFormat::Webp
     ) {
+        let dec_q = batch.convert_quality.saturating_sub(1).max(1);
+        let inc_q = (batch.convert_quality + 1).min(100);
+        let step_btn = |sym: &'static str, target: u8| {
+            iced_button(text(sym).size(TEXT_SIZE_CAPTION))
+                .padding([2, 6])
+                .style(|theme, status| {
+                    let t = PaletteTokens::for_theme(theme);
+                    let bg = if matches!(status, iced_button::Status::Hovered) {
+                        t.bg_hover
+                    } else {
+                        t.bg_surface
+                    };
+                    iced_button::Style {
+                        background: Some(bg.into()),
+                        text_color: t.text_secondary,
+                        border: Border {
+                            color: t.border,
+                            width: 1.0,
+                            radius: RADIUS_SM.into(),
+                        },
+                        ..Default::default()
+                    }
+                })
+                .on_press(BatchDialogAction::Msg(
+                    BatchDialogMsg::ConvertQualityChanged(target),
+                ))
+        };
+        let value_badge =
+            container(text(format!("{}%", batch.convert_quality)).size(TEXT_SIZE_CAPTION))
+                .padding([2, 8])
+                .style(|theme| {
+                    let t = PaletteTokens::for_theme(theme);
+                    container::Style {
+                        background: Some(t.bg_app.into()),
+                        border: Border {
+                            color: t.border,
+                            width: 1.0,
+                            radius: RADIUS_SM.into(),
+                        },
+                        ..Default::default()
+                    }
+                });
         col = col.push(
             column![
                 row![
-                    text(tr(lang, "label-quality")).size(TEXT_SIZE_CONTROL),
+                    field_label_text(tr(lang, "label-quality")),
                     iced::widget::space::horizontal(),
-                    text(format!("{}%", batch.convert_quality)).size(TEXT_SIZE_CONTROL),
-                ],
+                    row![step_btn("<", dec_q), value_badge, step_btn(">", inc_q)]
+                        .spacing(2)
+                        .align_y(Alignment::Center),
+                ]
+                .width(Fill)
+                .align_y(Alignment::Center),
                 slider(1..=100, batch.convert_quality, |q| {
                     BatchDialogAction::Msg(BatchDialogMsg::ConvertQualityChanged(q))
                 })
+                .width(Fill)
                 .style(slider_style),
             ]
-            .spacing(4),
+            .spacing(FIELD_LABEL_GAP)
+            .width(Fill),
         );
     }
 
     container(col)
-        .padding(10)
+        .padding(SECTION_PADDING)
         .width(Fill)
         .style(card_style)
         .into()
@@ -1198,19 +1257,14 @@ fn labeled_small_input<'a, M: Clone + 'a>(
     on_input: impl Fn(String) -> M + 'a,
 ) -> Element<'a, M> {
     column![
-        text(label).size(TEXT_SIZE_CAPTION).style(|theme| {
-            let t = PaletteTokens::for_theme(theme);
-            text::Style {
-                color: Some(t.text_muted),
-            }
-        }),
+        field_label_text(label),
         text_input("", val)
             .on_input(on_input)
-            .padding([5, 8])
+            .padding(INPUT_PADDING)
             .size(TEXT_SIZE_CONTROL)
             .style(input_style),
     ]
-    .spacing(2)
+    .spacing(FIELD_LABEL_GAP)
     .width(Fill)
     .into()
 }

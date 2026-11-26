@@ -57,6 +57,7 @@ fn toolbar_divider<'a, M: 'a>() -> Element<'a, M> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserMenuKind {
     File,
+    Edit,
     View,
     Tools,
     Plugins,
@@ -191,6 +192,7 @@ pub fn build_browser_toolbar<'a>(
         state.active_menu,
         Some(
             BrowserMenuKind::File
+                | BrowserMenuKind::Edit
                 | BrowserMenuKind::View
                 | BrowserMenuKind::Tools
                 | BrowserMenuKind::Plugins
@@ -211,6 +213,14 @@ pub fn build_browser_toolbar<'a>(
                 on_press: BrowserMessage::ToggleMenu(BrowserMenuKind::File),
             },
             hover_switch(BrowserMenuKind::File),
+        ),
+        (
+            MenubarTrigger {
+                label: tr(lang, "menu-edit"),
+                active: state.active_menu == Some(BrowserMenuKind::Edit),
+                on_press: BrowserMessage::ToggleMenu(BrowserMenuKind::Edit),
+            },
+            hover_switch(BrowserMenuKind::Edit),
         ),
         (
             MenubarTrigger {
@@ -2027,15 +2037,163 @@ fn browser_context_image_paths(state: BrowserViewState<'_>, entry_path: &str) ->
         .collect()
 }
 
-fn plugin_display_name(meta: &photon_protocol::UiStateMeta, plugin_id: &str) -> String {
-    meta.plugins
-        .iter()
-        .find(|p| p.id == plugin_id)
-        .map(|p| p.name.clone())
-        .unwrap_or_else(|| plugin_id.to_owned())
+fn plugin_order_rank(plugin_id: &str) -> u8 {
+    match plugin_id {
+        "photon.rmbg.onnx" => 10,
+        "photon.upscale.onnx" => 20,
+        "photon.dewatermark" => 30,
+        "photon.ai_inpaint.onnx" => 35,
+        "photon.caption.onnx" => 40,
+        "photon.ocr.tesseract" => 50,
+        "photon.ocr.ai" => 55,
+        "photon.translate" => 60,
+        _ => 100,
+    }
 }
 
-/// Secondary submenu listing installed Plugins grouped by plugin for the context-clicked entry.
+/// Remove trailing parenthetical descriptions `(...)` from plugin display names.
+pub fn normalize_plugin_display_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some((head, tail)) = trimmed.rsplit_once('(')
+        && tail.trim_end().ends_with(')')
+    {
+        let clean = head.trim();
+        if !clean.is_empty() {
+            return clean.to_owned();
+        }
+    }
+    trimmed.to_owned()
+}
+
+fn strip_redundant_plugin_prefix<'a>(plugin_name: &str, raw_action: &'a str) -> &'a str {
+    let action = raw_action.trim();
+    let plugin_lower = plugin_name.trim().to_ascii_lowercase();
+    let action_lower = action.to_ascii_lowercase();
+    if !plugin_lower.is_empty()
+        && action_lower.starts_with(&plugin_lower)
+        && action.len() > plugin_lower.len()
+        && action.is_char_boundary(plugin_lower.len())
+    {
+        let after = &action[plugin_lower.len()..];
+        let rest = after.trim();
+        if let Some(stripped) = rest
+            .strip_prefix('—')
+            .or_else(|| rest.strip_prefix('–'))
+            .or_else(|| rest.strip_prefix('-'))
+            .or_else(|| rest.strip_prefix(':'))
+            .or_else(|| rest.strip_prefix('·'))
+        {
+            let clean = stripped.trim();
+            if !clean.is_empty() {
+                return clean;
+            }
+        }
+        if rest.starts_with('(') && rest.ends_with(')') {
+            let inner = rest[1..rest.len() - 1].trim();
+            if !inner.is_empty() {
+                return inner;
+            }
+        }
+        if after.starts_with(' ') && !rest.is_empty() {
+            return rest;
+        }
+    }
+    action
+}
+
+fn stage1_shares_base(stripped: &[Option<String>]) -> bool {
+    let mut first: Option<&str> = None;
+    for item in stripped {
+        let Some(base) = item.as_deref() else {
+            return false;
+        };
+        match first {
+            None => first = Some(base),
+            Some(f) if !f.eq_ignore_ascii_case(base) => return false,
+            _ => {}
+        }
+    }
+    first.is_some()
+}
+
+/// Normalize child action labels for a plugin submenu so they stay concise without repeating
+/// the parent plugin name or redundant parenthetical descriptions, while guaranteeing sibling
+/// labels never collide.
+pub fn normalize_plugin_action_labels(plugin_name: &str, raw_labels: &[&str]) -> Vec<String> {
+    let stage1: Vec<String> = raw_labels
+        .iter()
+        .map(|raw| strip_redundant_plugin_prefix(plugin_name, raw).to_owned())
+        .collect();
+
+    let stripped: Vec<Option<String>> = stage1
+        .iter()
+        .map(|s| {
+            if let Some((head, tail)) = s.rsplit_once('(')
+                && tail.trim_end().ends_with(')')
+            {
+                let clean = head.trim();
+                if !clean.is_empty() {
+                    return Some(clean.to_owned());
+                }
+            }
+            None
+        })
+        .collect();
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for (idx, orig) in stage1.iter().enumerate() {
+        let key = stripped[idx]
+            .as_deref()
+            .unwrap_or(orig.as_str())
+            .to_ascii_lowercase();
+        *counts.entry(key).or_insert(0) += 1;
+    }
+
+    stage1
+        .into_iter()
+        .enumerate()
+        .map(|(idx, orig)| {
+            if let Some(clean) = &stripped[idx] {
+                if counts
+                    .get(&clean.to_ascii_lowercase())
+                    .copied()
+                    .unwrap_or(0)
+                    == 1
+                {
+                    return clean.clone();
+                }
+                if let Some((_, tail)) = orig.rsplit_once('(') {
+                    let qual = tail.trim_end().trim_end_matches(')').trim();
+                    let qual = qual
+                        .strip_prefix(".txt ·")
+                        .or_else(|| qual.strip_prefix(".txt·"))
+                        .map(str::trim)
+                        .unwrap_or(qual);
+                    if !qual.is_empty() {
+                        if counts.len() == 1 && stage1_shares_base(&stripped) {
+                            return qual.to_owned();
+                        }
+                        return format!("{clean} {qual}");
+                    }
+                }
+            }
+            orig
+        })
+        .collect()
+}
+
+fn plugin_display_name(meta: &photon_protocol::UiStateMeta, plugin_id: &str) -> String {
+    let raw = meta
+        .plugins
+        .iter()
+        .find(|p| p.id == plugin_id)
+        .map(|p| p.name.as_str())
+        .unwrap_or(plugin_id);
+    normalize_plugin_display_name(raw)
+}
+
+/// Secondary submenu listing installed Plugins grouped by plugin in deterministic logical order
+/// for the context-clicked entry.
 pub fn build_browser_plugins_submenu<'a>(
     state: BrowserViewState<'a>,
     entry_path: &str,
@@ -2047,16 +2205,26 @@ pub fn build_browser_plugins_submenu<'a>(
     if qas.is_empty() {
         return None;
     }
-    let mut plugin_ids: Vec<String> = Vec::new();
+    let mut plugin_groups: Vec<(String, String)> = Vec::new();
     for qa in qas {
-        if !plugin_ids.contains(&qa.plugin_id) {
-            plugin_ids.push(qa.plugin_id.clone());
+        if !plugin_groups.iter().any(|(id, _)| id == &qa.plugin_id) {
+            let label = plugin_display_name(&state.snapshot.meta, &qa.plugin_id);
+            plugin_groups.push((qa.plugin_id.clone(), label));
         }
     }
-    let entries: Vec<MenuEntry<'a, BrowserMessage>> = plugin_ids
+    plugin_groups.sort_by(|(id_a, name_a), (id_b, name_b)| {
+        plugin_order_rank(id_a)
+            .cmp(&plugin_order_rank(id_b))
+            .then_with(|| {
+                name_a
+                    .to_ascii_lowercase()
+                    .cmp(&name_b.to_ascii_lowercase())
+            })
+            .then_with(|| id_a.cmp(id_b))
+    });
+    let entries: Vec<MenuEntry<'a, BrowserMessage>> = plugin_groups
         .into_iter()
-        .map(|plugin_id| {
-            let label = plugin_display_name(&state.snapshot.meta, &plugin_id);
+        .map(|(plugin_id, label)| {
             MenuEntry::Item(
                 MenuItem::new(
                     label,
@@ -2072,7 +2240,7 @@ pub fn build_browser_plugins_submenu<'a>(
     Some((est_h, menu_panel_entries(entries, 220.0)))
 }
 
-/// Tertiary submenu listing Quick Actions for a single plugin in the Browser context menu.
+/// Tertiary submenu listing concise Quick Actions for a single plugin in the Browser context menu.
 pub fn build_browser_plugin_group_submenu<'a>(
     state: BrowserViewState<'a>,
     entry_path: &str,
@@ -2082,27 +2250,33 @@ pub fn build_browser_plugin_group_submenu<'a>(
     if image_paths.is_empty() {
         return None;
     }
-    let entries: Vec<MenuEntry<'a, BrowserMessage>> =
-        workspace_quick_actions(&state.snapshot.meta, "browser")
-            .into_iter()
-            .filter(|qa| qa.plugin_id == plugin_id)
-            .map(|qa| {
-                MenuEntry::Item(
-                    MenuItem::new(
-                        qa.label.clone(),
-                        BrowserMessage::ContextMenuDispatch(Command::QuickActionRun {
-                            plugin_id: qa.plugin_id.clone(),
-                            action_id: qa.id.clone(),
-                            paths: image_paths.clone(),
-                        }),
-                    )
-                    .icon(Icon::Plug),
-                )
-            })
-            .collect();
-    if entries.is_empty() {
+    let actions: Vec<_> = workspace_quick_actions(&state.snapshot.meta, "browser")
+        .into_iter()
+        .filter(|qa| qa.plugin_id == plugin_id)
+        .collect();
+    if actions.is_empty() {
         return None;
     }
+    let plugin_name = plugin_display_name(&state.snapshot.meta, plugin_id);
+    let raw_labels: Vec<&str> = actions.iter().map(|qa| qa.label.as_str()).collect();
+    let labels = normalize_plugin_action_labels(&plugin_name, &raw_labels);
+    let entries: Vec<MenuEntry<'a, BrowserMessage>> = actions
+        .into_iter()
+        .zip(labels)
+        .map(|(qa, label)| {
+            MenuEntry::Item(
+                MenuItem::new(
+                    label,
+                    BrowserMessage::ContextMenuDispatch(Command::QuickActionRun {
+                        plugin_id: qa.plugin_id.clone(),
+                        action_id: qa.id.clone(),
+                        paths: image_paths.clone(),
+                    }),
+                )
+                .icon(Icon::Plug),
+            )
+        })
+        .collect();
     let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
     Some((est_h, menu_panel_entries(entries, 220.0)))
 }
@@ -2182,13 +2356,21 @@ pub fn build_browser_plugins_menu_entries<'a>(
     state: BrowserViewState<'a>,
 ) -> Vec<MenuEntry<'a, BrowserMessage>> {
     let lang = state.snapshot.meta.language;
-    let enabled_plugins: Vec<_> = state
+    let mut enabled_plugins: Vec<_> = state
         .snapshot
         .meta
         .plugins
         .iter()
         .filter(|p| p.enabled && p.capabilities.contains(&PluginCapability::BrowserAction))
         .collect();
+    enabled_plugins.sort_by(|a, b| {
+        let name_a = normalize_plugin_display_name(&a.name).to_ascii_lowercase();
+        let name_b = normalize_plugin_display_name(&b.name).to_ascii_lowercase();
+        plugin_order_rank(&a.id)
+            .cmp(&plugin_order_rank(&b.id))
+            .then_with(|| name_a.cmp(&name_b))
+            .then_with(|| a.id.cmp(&b.id))
+    });
 
     let mut entries = Vec::new();
     if enabled_plugins.is_empty() {
@@ -2199,7 +2381,7 @@ pub fn build_browser_plugins_menu_entries<'a>(
         for plugin in enabled_plugins {
             entries.push(MenuEntry::Item(
                 MenuItem::new(
-                    plugin.name.clone(),
+                    normalize_plugin_display_name(&plugin.name),
                     BrowserMessage::RunPlugin(plugin.id.clone()),
                 )
                 .icon(Icon::Plug),
@@ -2223,6 +2405,180 @@ pub fn build_browser_plugins_menu_entries<'a>(
         .icon(Icon::Refresh),
     ));
     entries
+}
+
+fn tr_or_fallback(lang: photon_protocol::Language, key: &str, fallback: String) -> String {
+    let translated = tr(lang, key);
+    if translated.contains("Unknown localization") || translated == key {
+        fallback
+    } else {
+        translated
+    }
+}
+
+/// Reusable browser `Edit` menu entry builder for `app.rs::build_active_menu`.
+///
+/// Mirrors Browser selection & file operations: Edit in Editor, Copy, Paste, Copy to…,
+/// Move to…, Rename, Duplicate, Delete (Trash & Permanent), Copy Path, Select All,
+/// and Clear Selection.
+pub fn build_browser_edit_menu_entries<'a>(
+    state: BrowserViewState<'a>,
+) -> Vec<MenuEntry<'a, BrowserMessage>> {
+    let lang = state.snapshot.meta.language;
+    let selection = &state.snapshot.meta.selection;
+    let has_selection = !selection.is_empty();
+    let single_path = (selection.len() == 1).then(|| selection[0].clone());
+    let first_selected_entry = selection
+        .first()
+        .and_then(|p| state.snapshot.entries.iter().find(|e| &e.path == p));
+    let edit_in_editor_msg = match first_selected_entry {
+        Some(entry) if entry.is_image => Some(BrowserMessage::Dispatch(Command::EditorOpen {
+            path: entry.path.clone(),
+        })),
+        Some(entry) if !entry.is_dir => Some(BrowserMessage::EditPath(entry.path.clone())),
+        _ => None,
+    };
+    let current_folder = state.snapshot.meta.current_folder.clone();
+    let duplicate_msg = if has_selection {
+        current_folder.as_ref().map(|dest| {
+            BrowserMessage::Dispatch(Command::CopyTo {
+                paths: selection.clone(),
+                destination: dest.clone(),
+            })
+        })
+    } else {
+        None
+    };
+    let all_visible_paths: Vec<String> = sorted_filtered_entries(state)
+        .into_iter()
+        .map(|e| e.path.clone())
+        .collect();
+    let has_visible_entries = !all_visible_paths.is_empty();
+
+    let duplicate_label = tr_or_fallback(
+        lang,
+        "action-duplicate",
+        match lang {
+            photon_protocol::Language::Vietnamese => "Nhân bản".to_owned(),
+            _ => "Duplicate".to_owned(),
+        },
+    );
+    let clear_selection_label =
+        tr_or_fallback(lang, "action-clear-selection", tr(lang, "action-deselect"));
+
+    vec![
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "menu-file-edit"),
+                edit_in_editor_msg.clone().unwrap_or(BrowserMessage::Noop),
+            )
+            .icon(Icon::Editor)
+            .enabled(edit_in_editor_msg.is_some()),
+        ),
+        MenuEntry::Separator,
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-copy"),
+                BrowserMessage::BrowserCopyFiles(selection.clone()),
+            )
+            .icon(Icon::Copy)
+            .shortcut("Ctrl+C")
+            .enabled(has_selection),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(tr(lang, "action-paste"), BrowserMessage::BrowserPasteFiles)
+                .icon(Icon::Paste)
+                .shortcut("Ctrl+V")
+                .enabled(current_folder.is_some()),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-copy-to"),
+                BrowserMessage::BrowserCopyTo(selection.clone()),
+            )
+            .icon(Icon::Copy)
+            .enabled(has_selection),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-move-to"),
+                BrowserMessage::BrowserMoveTo(selection.clone()),
+            )
+            .icon(Icon::FolderPlus)
+            .enabled(has_selection),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                duplicate_label,
+                duplicate_msg.clone().unwrap_or(BrowserMessage::Noop),
+            )
+            .icon(Icon::Duplicate)
+            .enabled(duplicate_msg.is_some()),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-rename"),
+                single_path
+                    .clone()
+                    .map(BrowserMessage::BrowserStartRename)
+                    .unwrap_or(BrowserMessage::Noop),
+            )
+            .icon(Icon::Rename)
+            .shortcut("F2")
+            .enabled(single_path.is_some()),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-copy-path"),
+                single_path
+                    .clone()
+                    .map(BrowserMessage::BrowserCopyPath)
+                    .unwrap_or(BrowserMessage::Noop),
+            )
+            .icon(Icon::Copy)
+            .enabled(single_path.is_some()),
+        ),
+        MenuEntry::Separator,
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-trash"),
+                BrowserMessage::Dispatch(Command::Trash {
+                    paths: selection.clone(),
+                }),
+            )
+            .icon(Icon::Trash)
+            .shortcut("Del")
+            .enabled(has_selection),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-delete-permanently"),
+                BrowserMessage::BrowserConfirmDeletePermanently(selection.clone()),
+            )
+            .icon(Icon::Trash)
+            .shortcut("Shift+Del")
+            .enabled(has_selection),
+        ),
+        MenuEntry::Separator,
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-select-all"),
+                BrowserMessage::Dispatch(Command::Select {
+                    paths: all_visible_paths,
+                }),
+            )
+            .shortcut("Ctrl+A")
+            .enabled(has_visible_entries),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                clear_selection_label,
+                BrowserMessage::Dispatch(Command::Select { paths: Vec::new() }),
+            )
+            .shortcut("Esc")
+            .enabled(has_selection),
+        ),
+    ]
 }
 
 /// Filter `meta.quick_actions` to available Quick Actions targeting `workspace` (e.g. `"browser"`).
@@ -2297,11 +2653,6 @@ pub fn build_browser_window_menu_entries<'a>(
                 BrowserMessage::RequestResetLayout,
             )
             .icon(Icon::Reset),
-        ),
-        MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-settings"), BrowserMessage::OpenSettings)
-                .icon(Icon::Settings)
-                .shortcut("Ctrl+,"),
         ),
     ]
 }
@@ -2632,5 +2983,36 @@ mod tests {
         let (start, end) = grid_visible_range(100_000.0, 600.0, 180.0, 4, 10.0, 7, 2);
         assert!(start <= end);
         assert_eq!(end, 7);
+    }
+
+    #[test]
+    fn browser_plugin_normalization_and_ordering_are_concise_and_deterministic() {
+        assert_eq!(
+            normalize_plugin_display_name("AI Watermark Remover (ONNX)"),
+            "AI Watermark Remover"
+        );
+        assert_eq!(
+            normalize_plugin_action_labels(
+                "Remove BG",
+                &["Remove bg (General)", "Remove bg (Anime)"]
+            ),
+            vec!["General", "Anime"]
+        );
+        assert_eq!(
+            normalize_plugin_action_labels(
+                "Upscale",
+                &[
+                    "Upscale 2× (Fast)",
+                    "Upscale 4× (General)",
+                    "Upscale 4× (Anime)"
+                ]
+            ),
+            vec!["2×", "4× General", "4× Anime"]
+        );
+        assert!(plugin_order_rank("photon.rmbg.onnx") < plugin_order_rank("photon.upscale.onnx"));
+        assert!(plugin_order_rank("photon.upscale.onnx") < plugin_order_rank("photon.dewatermark"));
+        assert!(
+            plugin_order_rank("photon.caption.onnx") < plugin_order_rank("photon.ocr.tesseract")
+        );
     }
 }

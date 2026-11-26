@@ -5,12 +5,19 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use iced::mouse;
+use iced::widget::canvas::{
+    self, Action, Frame, Geometry, LineCap, LineJoin, Path as CanvasPath, Stroke,
+};
 use iced::widget::overlay::menu as iced_menu;
 use iced::widget::{
     Shader, button as iced_button, column, container, image as iced_image, mouse_area, pick_list,
     progress_bar, responsive, row, rule, scrollable, stack, text, text_input,
 };
-use iced::{Alignment, Border, Color, ContentFit, Element, Fill, Length, Padding, Shadow};
+use iced::{
+    Alignment, Border, Color, ContentFit, Element, Fill, Length, Padding, Point, Rectangle,
+    Renderer, Shadow, Size,
+};
 use photon_i18n::tr;
 use photon_panels::{
     DraggablePanelHeaderSpec, PanelFrameSpec, PanelSplitterEdge, SidebarOrderState, kv_row,
@@ -880,56 +887,76 @@ pub fn build_viewer_view<'a>(state: ViewerViewState<'a>) -> Element<'a, ViewerMe
                 ViewerMessage::Dispatch(Command::ViewerNext),
             ),
         };
-        let edge_btn = |icon: Icon, msg: ViewerMessage| -> Element<'_, ViewerMessage> {
-            iced_button(
-                container(photon_ui::icons::render(icon, 26.0, None))
-                    .width(Fill)
-                    .height(Fill)
-                    .align_x(Alignment::Center)
-                    .align_y(Alignment::Center),
-            )
-            .width(Length::Fixed(56.0))
-            .height(Fill)
-            .padding(0)
-            .on_press(msg)
-            .style(|theme, status| {
-                let pal = PaletteTokens::for_theme(theme);
-                match status {
-                    iced_button::Status::Hovered | iced_button::Status::Pressed => {
-                        iced_button::Style {
-                            background: Some(
-                                pal.bg_elevated
-                                    .scale_alpha(
-                                        if matches!(status, iced_button::Status::Pressed) {
-                                            0.7
-                                        } else {
-                                            0.45
-                                        },
-                                    )
-                                    .into(),
-                            ),
-                            text_color: pal.text_primary,
-                            border: Border::default(),
-                            ..Default::default()
-                        }
-                    }
-                    _ => iced_button::Style {
-                        background: None,
-                        text_color: iced::Color::TRANSPARENT,
-                        border: Border::default(),
-                        ..Default::default()
-                    },
-                }
-            })
-            .into()
+        let (left_img_size, right_img_size) = match viewer_mode {
+            ViewerViewMode::Single => {
+                let sz = state.viewer_frame.map(|f| (f.width, f.height)).or_else(|| {
+                    state
+                        .snapshot
+                        .meta
+                        .viewer_path
+                        .as_deref()
+                        .and_then(|p| state.image_sizes.get(p).copied())
+                });
+                (sz, None)
+            }
+            ViewerViewMode::Double => {
+                let (left_slot, right_slot) = dual_spread_slots(state);
+                let l_sz = state
+                    .viewer_frame
+                    .map(|f| (f.width, f.height))
+                    .or_else(|| left_slot.and_then(|(_, p)| state.image_sizes.get(p).copied()));
+                let r_sz = state
+                    .viewer_pair_frame
+                    .map(|f| (f.width, f.height))
+                    .or_else(|| right_slot.and_then(|(_, p)| state.image_sizes.get(p).copied()));
+                (l_sz, r_sz)
+            }
+            ViewerViewMode::Webtoon => (None, None),
         };
-        let edge_overlay = row![
-            edge_btn(Icon::Prev, left_msg),
-            iced::widget::space::horizontal().width(Fill),
-            edge_btn(Icon::Next, right_msg),
-        ]
-        .width(Fill)
-        .height(Fill);
+        let dual_gap_px = f32::from(state.viewer_manga_page_gap);
+        let quarter_turns = state.viewer_quarter_turns;
+        let zoom = state.zoom;
+        let pan_x = state.pan_x;
+        let pan_y = state.pan_y;
+
+        let edge_overlay: Element<'_, ViewerMessage> = responsive(move |bounds| {
+            let (left_overlaps, right_overlaps) = viewer_edge_nav_overlap(
+                viewer_mode,
+                left_img_size,
+                right_img_size,
+                dual_gap_px,
+                quarter_turns,
+                zoom,
+                pan_x,
+                pan_y,
+                bounds.width,
+                bounds.height,
+                VIEWER_EDGE_NAV_ZONE_WIDTH,
+            );
+            let left_btn = iced::widget::canvas(EdgeNavButtonProgram {
+                is_next: false,
+                auto_hide: left_overlaps,
+                on_press: left_msg.clone(),
+            })
+            .width(Length::Fixed(VIEWER_EDGE_NAV_ZONE_WIDTH))
+            .height(Fill);
+            let right_btn = iced::widget::canvas(EdgeNavButtonProgram {
+                is_next: true,
+                auto_hide: right_overlaps,
+                on_press: right_msg.clone(),
+            })
+            .width(Length::Fixed(VIEWER_EDGE_NAV_ZONE_WIDTH))
+            .height(Fill);
+            row![
+                left_btn,
+                iced::widget::space::horizontal().width(Fill),
+                right_btn,
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into()
+        })
+        .into();
         stack![viewport, edge_overlay]
             .width(Fill)
             .height(Fill)
@@ -2742,16 +2769,385 @@ pub fn build_viewer_context_menu<'a>(
     (est_h, menu_panel_entries(entries, 225.0))
 }
 
+pub const VIEWER_EDGE_NAV_ZONE_WIDTH: f32 = 56.0;
+
+/// Compute whether the rendered Viewer image overlaps the left and right edge-navigation
+/// button zones (`[0, zone_w]` and `[vp_w - zone_w, vp_w]`).
+///
+/// - When an edge does **not** overlap (`false`), the Prev/Next button stays always visible.
+/// - When an edge **does** overlap (`true`), the Prev/Next button is hidden by default and
+///   revealed only when the cursor hovers over that edge zone.
+#[allow(clippy::too_many_arguments)]
+pub fn viewer_edge_nav_overlap(
+    viewer_mode: ViewerViewMode,
+    left_size: Option<(u32, u32)>,
+    right_size: Option<(u32, u32)>,
+    dual_gap_px: f32,
+    quarter_turns: u8,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
+    vp_w: f32,
+    vp_h: f32,
+    zone_w: f32,
+) -> (bool, bool) {
+    let vp_w = vp_w.max(1.0);
+    let vp_h = vp_h.max(1.0);
+    let zone_w = zone_w.max(0.0);
+    let Some((lw, lh)) = left_size.filter(|(w, h)| *w > 0 && *h > 0) else {
+        return (false, false);
+    };
+    let (img_left, img_right) = match viewer_mode {
+        ViewerViewMode::Single => {
+            let (left, _top, drawn_w, _drawn_h, _, _) = viewer_fit_geometry(
+                lw as f32,
+                lh as f32,
+                quarter_turns,
+                zoom,
+                pan_x,
+                pan_y,
+                vp_w,
+                vp_h,
+            );
+            (left, left + drawn_w)
+        }
+        ViewerViewMode::Double => {
+            let valid_right = right_size.filter(|(w, h)| *w > 0 && *h > 0);
+            let geom = viewer_double_fit_geometries(
+                (lw, lh),
+                valid_right,
+                dual_gap_px,
+                quarter_turns,
+                zoom,
+                pan_x,
+                pan_y,
+                vp_w,
+                vp_h,
+            );
+            (geom.spread_left, geom.spread_left + geom.drawn_w)
+        }
+        ViewerViewMode::Webtoon => return (false, false),
+    };
+    let left_overlaps = img_left < zone_w && img_right > 0.0;
+    let right_overlaps = img_right > (vp_w - zone_w) && img_left < vp_w;
+    (left_overlaps, right_overlaps)
+}
+
+#[derive(Debug, Clone)]
+struct EdgeNavButtonProgram {
+    is_next: bool,
+    auto_hide: bool,
+    on_press: ViewerMessage,
+}
+
+#[derive(Debug, Default)]
+struct EdgeNavButtonState {
+    hovered: bool,
+    pressed: bool,
+}
+
+impl canvas::Program<ViewerMessage> for EdgeNavButtonProgram {
+    type State = EdgeNavButtonState;
+
+    fn update(
+        &self,
+        state: &mut Self::State,
+        event: &canvas::Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<Action<ViewerMessage>> {
+        match event {
+            canvas::Event::Mouse(mouse::Event::CursorMoved { .. })
+            | canvas::Event::Mouse(mouse::Event::CursorLeft) => {
+                let over = cursor.is_over(bounds);
+                if over != state.hovered {
+                    state.hovered = over;
+                    if !over {
+                        state.pressed = false;
+                    }
+                    return Some(Action::request_redraw());
+                }
+                None
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if cursor.is_over(bounds) {
+                    state.hovered = true;
+                    state.pressed = true;
+                    return Some(Action::request_redraw().and_capture());
+                }
+                None
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                if state.pressed {
+                    state.pressed = false;
+                    if cursor.is_over(bounds) {
+                        return Some(Action::publish(self.on_press.clone()).and_capture());
+                    }
+                    return Some(Action::request_redraw());
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        theme: &iced::Theme,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let hovered = cursor.is_over(bounds) || state.hovered;
+        if self.auto_hide && !hovered && !state.pressed {
+            return Vec::new();
+        }
+
+        let pal = PaletteTokens::for_theme(theme);
+        let size = bounds.size();
+        let mut frame = Frame::new(renderer, size);
+
+        if hovered || state.pressed {
+            let strip_alpha = if state.pressed { 0.55 } else { 0.30 };
+            frame.fill_rectangle(
+                Point::ORIGIN,
+                size,
+                pal.bg_elevated.scale_alpha(strip_alpha),
+            );
+        }
+
+        let pill_w = 36.0_f32.min((size.width - 8.0).max(20.0));
+        let pill_h = 52.0_f32.min((size.height - 16.0).max(28.0));
+        let pill_origin = Point::new((size.width - pill_w) * 0.5, (size.height - pill_h) * 0.5);
+        let pill_path = CanvasPath::rounded_rectangle(
+            pill_origin,
+            Size::new(pill_w, pill_h),
+            iced::border::Radius::from(10.0),
+        );
+        let pill_bg = if state.pressed {
+            pal.bg_pressed.scale_alpha(0.92)
+        } else if hovered {
+            pal.bg_elevated.scale_alpha(0.90)
+        } else {
+            pal.bg_elevated.scale_alpha(0.68)
+        };
+        let pill_border = if hovered || state.pressed {
+            pal.border_strong.scale_alpha(0.85)
+        } else {
+            pal.border.scale_alpha(0.70)
+        };
+        frame.fill(&pill_path, pill_bg);
+        frame.stroke(
+            &pill_path,
+            Stroke::default().with_width(1.0).with_color(pill_border),
+        );
+
+        let cx = size.width * 0.5;
+        let cy = size.height * 0.5;
+        let chevron = CanvasPath::new(|b| {
+            if self.is_next {
+                b.move_to(Point::new(cx - 3.5, cy - 7.5));
+                b.line_to(Point::new(cx + 4.0, cy));
+                b.line_to(Point::new(cx - 3.5, cy + 7.5));
+            } else {
+                b.move_to(Point::new(cx + 3.5, cy - 7.5));
+                b.line_to(Point::new(cx - 4.0, cy));
+                b.line_to(Point::new(cx + 3.5, cy + 7.5));
+            }
+        });
+        let ink = if hovered || state.pressed {
+            pal.text_primary
+        } else {
+            pal.text_secondary
+        };
+        frame.stroke(
+            &chevron,
+            Stroke::default()
+                .with_width(2.2)
+                .with_color(ink)
+                .with_line_cap(LineCap::Round)
+                .with_line_join(LineJoin::Round),
+        );
+
+        vec![frame.into_geometry()]
+    }
+
+    fn mouse_interaction(
+        &self,
+        _state: &Self::State,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        if cursor.is_over(bounds) {
+            mouse::Interaction::Pointer
+        } else {
+            mouse::Interaction::default()
+        }
+    }
+}
+
+fn plugin_order_rank(plugin_id: &str) -> u8 {
+    match plugin_id {
+        "photon.rmbg.onnx" => 10,
+        "photon.upscale.onnx" => 20,
+        "photon.dewatermark" => 30,
+        "photon.ai_inpaint.onnx" => 35,
+        "photon.caption.onnx" => 40,
+        "photon.ocr.tesseract" => 50,
+        "photon.ocr.ai" => 55,
+        "photon.translate" => 60,
+        _ => 100,
+    }
+}
+
+/// Remove trailing parenthetical descriptions `(...)` from plugin display names.
+pub fn normalize_plugin_display_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some((head, tail)) = trimmed.rsplit_once('(')
+        && tail.trim_end().ends_with(')')
+    {
+        let clean = head.trim();
+        if !clean.is_empty() {
+            return clean.to_owned();
+        }
+    }
+    trimmed.to_owned()
+}
+
+fn strip_redundant_plugin_prefix<'a>(plugin_name: &str, raw_action: &'a str) -> &'a str {
+    let action = raw_action.trim();
+    let plugin_lower = plugin_name.trim().to_ascii_lowercase();
+    let action_lower = action.to_ascii_lowercase();
+    if !plugin_lower.is_empty()
+        && action_lower.starts_with(&plugin_lower)
+        && action.len() > plugin_lower.len()
+        && action.is_char_boundary(plugin_lower.len())
+    {
+        let after = &action[plugin_lower.len()..];
+        let rest = after.trim();
+        if let Some(stripped) = rest
+            .strip_prefix('—')
+            .or_else(|| rest.strip_prefix('–'))
+            .or_else(|| rest.strip_prefix('-'))
+            .or_else(|| rest.strip_prefix(':'))
+            .or_else(|| rest.strip_prefix('·'))
+        {
+            let clean = stripped.trim();
+            if !clean.is_empty() {
+                return clean;
+            }
+        }
+        if rest.starts_with('(') && rest.ends_with(')') {
+            let inner = rest[1..rest.len() - 1].trim();
+            if !inner.is_empty() {
+                return inner;
+            }
+        }
+        if after.starts_with(' ') && !rest.is_empty() {
+            return rest;
+        }
+    }
+    action
+}
+
+/// Normalize child action labels for a plugin submenu so they stay concise without repeating
+/// the parent plugin name or redundant parenthetical descriptions, while guaranteeing sibling
+/// labels never collide.
+pub fn normalize_plugin_action_labels(plugin_name: &str, raw_labels: &[&str]) -> Vec<String> {
+    let stage1: Vec<String> = raw_labels
+        .iter()
+        .map(|raw| strip_redundant_plugin_prefix(plugin_name, raw).to_owned())
+        .collect();
+
+    let stripped: Vec<Option<String>> = stage1
+        .iter()
+        .map(|s| {
+            if let Some((head, tail)) = s.rsplit_once('(')
+                && tail.trim_end().ends_with(')')
+            {
+                let clean = head.trim();
+                if !clean.is_empty() {
+                    return Some(clean.to_owned());
+                }
+            }
+            None
+        })
+        .collect();
+
+    // Count how many times each candidate stripped label appears so we never collapse
+    // distinct siblings (e.g. `Upscale 4× (General)` vs `Upscale 4× (Anime)`) into duplicates.
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for (idx, orig) in stage1.iter().enumerate() {
+        let key = stripped[idx]
+            .as_deref()
+            .unwrap_or(orig.as_str())
+            .to_ascii_lowercase();
+        *counts.entry(key).or_insert(0) += 1;
+    }
+
+    stage1
+        .into_iter()
+        .enumerate()
+        .map(|(idx, orig)| {
+            if let Some(clean) = &stripped[idx] {
+                if counts
+                    .get(&clean.to_ascii_lowercase())
+                    .copied()
+                    .unwrap_or(0)
+                    == 1
+                {
+                    return clean.clone();
+                }
+                // Siblings share the same base before `(...)`; extract the concise qualifier.
+                if let Some((_, tail)) = orig.rsplit_once('(') {
+                    let qual = tail.trim_end().trim_end_matches(')').trim();
+                    let qual = qual
+                        .strip_prefix(".txt ·")
+                        .or_else(|| qual.strip_prefix(".txt·"))
+                        .map(str::trim)
+                        .unwrap_or(qual);
+                    if !qual.is_empty() {
+                        if counts.len() == 1 && stage1_shares_base(&stripped) {
+                            return qual.to_owned();
+                        }
+                        return format!("{clean} {qual}");
+                    }
+                }
+            }
+            orig
+        })
+        .collect()
+}
+
+fn stage1_shares_base(stripped: &[Option<String>]) -> bool {
+    let mut first: Option<&str> = None;
+    for item in stripped {
+        let Some(base) = item.as_deref() else {
+            return false;
+        };
+        match first {
+            None => first = Some(base),
+            Some(f) if !f.eq_ignore_ascii_case(base) => return false,
+            _ => {}
+        }
+    }
+    first.is_some()
+}
+
 fn plugin_display_name(meta: &photon_protocol::UiStateMeta, plugin_id: &str) -> String {
-    meta.plugins
+    let raw = meta
+        .plugins
         .iter()
         .find(|p| p.id == plugin_id)
-        .map(|p| p.name.clone())
-        .unwrap_or_else(|| plugin_id.to_owned())
+        .map(|p| p.name.as_str())
+        .unwrap_or(plugin_id);
+    normalize_plugin_display_name(raw)
 }
 
 /// Secondary submenu for Viewer context menu containing Read & Translate and installed Plugins
-/// grouped by plugin (hover/click opens a tertiary submenu with that plugin's actions).
+/// grouped by plugin in deterministic logical order (hover/click opens a tertiary submenu with
+/// that plugin's concise child actions).
 pub fn build_viewer_plugins_submenu<'a>(
     state: ViewerViewState<'a>,
     target_path: Option<&str>,
@@ -2788,14 +3184,24 @@ pub fn build_viewer_plugins_submenu<'a>(
         let qas = viewer_quick_actions(&state.snapshot.meta);
         if !qas.is_empty() {
             entries.push(MenuEntry::Separator);
-            let mut plugin_ids: Vec<String> = Vec::new();
+            let mut plugin_groups: Vec<(String, String)> = Vec::new();
             for qa in qas {
-                if !plugin_ids.contains(&qa.plugin_id) {
-                    plugin_ids.push(qa.plugin_id.clone());
+                if !plugin_groups.iter().any(|(id, _)| id == &qa.plugin_id) {
+                    let label = plugin_display_name(&state.snapshot.meta, &qa.plugin_id);
+                    plugin_groups.push((qa.plugin_id.clone(), label));
                 }
             }
-            for plugin_id in plugin_ids {
-                let label = plugin_display_name(&state.snapshot.meta, &plugin_id);
+            plugin_groups.sort_by(|(id_a, name_a), (id_b, name_b)| {
+                plugin_order_rank(id_a)
+                    .cmp(&plugin_order_rank(id_b))
+                    .then_with(|| {
+                        name_a
+                            .to_ascii_lowercase()
+                            .cmp(&name_b.to_ascii_lowercase())
+                    })
+                    .then_with(|| id_a.cmp(id_b))
+            });
+            for (plugin_id, label) in plugin_groups {
                 entries.push(MenuEntry::Item(
                     MenuItem::new(
                         label,
@@ -2812,7 +3218,7 @@ pub fn build_viewer_plugins_submenu<'a>(
     entries.push(MenuEntry::Separator);
     entries.push(MenuEntry::Item(
         MenuItem::new(
-            tr(lang, "action-plugin-settings"),
+            tr(lang, "action-manage-plugins"),
             ViewerMessage::OpenPluginSettings,
         )
         .icon(Icon::Plug),
@@ -2822,7 +3228,7 @@ pub fn build_viewer_plugins_submenu<'a>(
     Some((est_h, menu_panel_entries(entries, 220.0)))
 }
 
-/// Tertiary submenu listing Quick Actions for a single plugin in the Viewer context menu.
+/// Tertiary submenu listing concise Quick Actions for a single plugin in the Viewer context menu.
 pub fn build_viewer_plugin_group_submenu<'a>(
     state: ViewerViewState<'a>,
     target_path: Option<&str>,
@@ -2831,13 +3237,23 @@ pub fn build_viewer_plugin_group_submenu<'a>(
     let target_path = target_path
         .map(str::to_owned)
         .or_else(|| state.snapshot.meta.viewer_path.clone())?;
-    let entries: Vec<MenuEntry<'a, ViewerMessage>> = viewer_quick_actions(&state.snapshot.meta)
+    let actions: Vec<_> = viewer_quick_actions(&state.snapshot.meta)
         .into_iter()
         .filter(|qa| qa.plugin_id == plugin_id)
-        .map(|qa| {
+        .collect();
+    if actions.is_empty() {
+        return None;
+    }
+    let plugin_name = plugin_display_name(&state.snapshot.meta, plugin_id);
+    let raw_labels: Vec<&str> = actions.iter().map(|qa| qa.label.as_str()).collect();
+    let labels = normalize_plugin_action_labels(&plugin_name, &raw_labels);
+    let entries: Vec<MenuEntry<'a, ViewerMessage>> = actions
+        .into_iter()
+        .zip(labels)
+        .map(|(qa, label)| {
             MenuEntry::Item(
                 MenuItem::new(
-                    qa.label.clone(),
+                    label,
                     ViewerMessage::ContextMenuDispatch(Command::QuickActionRun {
                         plugin_id: qa.plugin_id.clone(),
                         action_id: qa.id.clone(),
@@ -2848,9 +3264,6 @@ pub fn build_viewer_plugin_group_submenu<'a>(
             )
         })
         .collect();
-    if entries.is_empty() {
-        return None;
-    }
     let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
     Some((est_h, menu_panel_entries(entries, 220.0)))
 }
@@ -3719,5 +4132,175 @@ mod tests {
         // + spacing(8) + reader options(36) + spacing(8).
         assert_eq!(viewer_utilities_menu_right_offset(680.0), 185.0);
         assert!(viewer_utilities_menu_right_offset(680.0) > 0.0);
+    }
+
+    #[test]
+    fn viewer_edge_nav_overlap_distinguishes_margins_and_overflow() {
+        // Portrait image centered in wide viewport leaves generous side margins -> always visible.
+        assert_eq!(
+            viewer_edge_nav_overlap(
+                ViewerViewMode::Single,
+                Some((800, 1200)),
+                None,
+                0.0,
+                0,
+                1.0,
+                0.0,
+                0.0,
+                1200.0,
+                800.0,
+                VIEWER_EDGE_NAV_ZONE_WIDTH,
+            ),
+            (false, false)
+        );
+
+        // Wide landscape image touches left/right edges -> auto-hide both edges until hover.
+        assert_eq!(
+            viewer_edge_nav_overlap(
+                ViewerViewMode::Single,
+                Some((1920, 1080)),
+                None,
+                0.0,
+                0,
+                1.0,
+                0.0,
+                0.0,
+                1200.0,
+                800.0,
+                VIEWER_EDGE_NAV_ZONE_WIDTH,
+            ),
+            (true, true)
+        );
+
+        // Zoomed-in portrait image overflows into both edge zones -> auto-hide both.
+        assert_eq!(
+            viewer_edge_nav_overlap(
+                ViewerViewMode::Single,
+                Some((800, 1200)),
+                None,
+                0.0,
+                0,
+                2.5,
+                0.0,
+                0.0,
+                1200.0,
+                800.0,
+                VIEWER_EDGE_NAV_ZONE_WIDTH,
+            ),
+            (true, true)
+        );
+
+        // Portrait image panned left enters only the left edge zone.
+        assert_eq!(
+            viewer_edge_nav_overlap(
+                ViewerViewMode::Single,
+                Some((800, 1200)),
+                None,
+                0.0,
+                0,
+                1.0,
+                -300.0,
+                0.0,
+                1200.0,
+                800.0,
+                VIEWER_EDGE_NAV_ZONE_WIDTH,
+            ),
+            (true, false)
+        );
+
+        // Rotating portrait 90 degrees makes it wide -> overlaps both edge zones.
+        assert_eq!(
+            viewer_edge_nav_overlap(
+                ViewerViewMode::Single,
+                Some((800, 1600)),
+                None,
+                0.0,
+                1,
+                1.0,
+                0.0,
+                0.0,
+                1200.0,
+                800.0,
+                VIEWER_EDGE_NAV_ZONE_WIDTH,
+            ),
+            (true, true)
+        );
+
+        // Double spread fitting inside margins vs filling width.
+        assert_eq!(
+            viewer_edge_nav_overlap(
+                ViewerViewMode::Double,
+                Some((600, 1200)),
+                Some((600, 1200)),
+                10.0,
+                0,
+                1.0,
+                0.0,
+                0.0,
+                1400.0,
+                800.0,
+                VIEWER_EDGE_NAV_ZONE_WIDTH,
+            ),
+            (false, false)
+        );
+        assert_eq!(
+            viewer_edge_nav_overlap(
+                ViewerViewMode::Double,
+                Some((1000, 1200)),
+                Some((1000, 1200)),
+                10.0,
+                0,
+                1.0,
+                0.0,
+                0.0,
+                1200.0,
+                800.0,
+                VIEWER_EDGE_NAV_ZONE_WIDTH,
+            ),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn plugin_menu_normalization_produces_concise_non_colliding_labels() {
+        assert_eq!(
+            normalize_plugin_display_name("Remove BG (ONNX Runtime)"),
+            "Remove BG"
+        );
+        assert_eq!(normalize_plugin_display_name("Upscale"), "Upscale");
+        assert_eq!(
+            normalize_plugin_action_labels(
+                "Upscale",
+                &[
+                    "Upscale 2× (Fast)",
+                    "Upscale 4× (General)",
+                    "Upscale 4× (Anime)"
+                ]
+            ),
+            vec!["2×", "4× General", "4× Anime"]
+        );
+        assert_eq!(
+            normalize_plugin_action_labels(
+                "Remove BG",
+                &["Remove bg (General)", "Remove bg (Anime)"]
+            ),
+            vec!["General", "Anime"]
+        );
+        assert_eq!(
+            normalize_plugin_action_labels(
+                "AI Caption",
+                &["Caption (.txt · WD-ViT)", "Caption (.txt · SwinV2)"]
+            ),
+            vec!["WD-ViT", "SwinV2"]
+        );
+        assert_eq!(
+            normalize_plugin_action_labels("OCR Copy", &["OCR Copy (EN)", "OCR Copy (VI)"]),
+            vec!["EN", "VI"]
+        );
+        // Already-normalized labels stay untouched.
+        assert_eq!(
+            normalize_plugin_action_labels("Upscale", &["2×", "4× General", "4× Anime"]),
+            vec!["2×", "4× General", "4× Anime"]
+        );
     }
 }

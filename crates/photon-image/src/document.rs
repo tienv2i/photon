@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use image::{Rgba, RgbaImage};
 use photon_protocol::{
-    ApplyTarget, BrushSettings, CanvasAnchor, ColorAdjustments, ColorBalanceAdjustment,
-    CurvesAdjustment, DrawShapeKind, FlipAxis, GradientColorMode, GradientKind, HealingMode,
-    HsvAdjustment, LayerTransformSpec, LiquifyMode, LiveStrokeKind, ResizeFilter, ResizeMode,
-    SelectionBooleanOp, SelectionModifyOp, SelectionShape, ShapeFillMode, UiText, VectorPathNode,
+    ApplyTarget, BlendMode, BrushSettings, CanvasAnchor, ColorAdjustments, ColorBalanceAdjustment,
+    CurvesAdjustment, DrawShapeKind, FlipAxis, GradientColorMode, GradientKind, GradientRepeat,
+    GradientStop, HealingMode, HsvAdjustment, LayerTransformSpec, LiquifyMode, LiveStrokeKind,
+    ResizeFilter, ResizeMode, SelectionBooleanOp, SelectionModifyOp, SelectionShape, ShapeFillMode,
+    UiText, VectorPathNode,
 };
 
 use crate::{
@@ -77,6 +78,7 @@ pub enum EditOp {
         label: UiText,
         pixels: Arc<RgbaImage>,
         mask: Option<Arc<Vec<u8>>>,
+        selection: Option<SelectionMask>,
     },
     DrawShape {
         kind: DrawShapeKind,
@@ -104,9 +106,12 @@ pub enum EditOp {
         color_mode: GradientColorMode,
         fg_color: [u8; 3],
         bg_color: [u8; 3],
+        stops: Vec<GradientStop>,
         opacity: f32,
+        repeat: GradientRepeat,
         reverse: bool,
         dither: bool,
+        blend_mode: BlendMode,
     },
     Healing {
         points: Vec<[f64; 2]>,
@@ -193,6 +198,9 @@ struct LiveStrokeSession {
     begin_point: [f64; 2],
     last_point: [f64; 2],
     editing_mask: bool,
+    quick_mask: bool,
+    unclipped_pixels: Option<RgbaImage>,
+    unclipped_mask: Option<Vec<u8>>,
 }
 
 /// Non-destructive working document with bounded CoW layer-stack history.
@@ -420,16 +428,24 @@ impl EditorDocument {
                 validate_healing(&[[x, y]], radius, hardness, strength)?;
             }
         }
+        let is_paint = matches!(stroke, LiveStrokeKind::Paint { .. });
+        let quick_mask = is_paint && self.stack.selection.quick_mask_active;
         let active = self.stack.active_layer();
-        if active.locked {
-            return Err(ImageError::coded("layer_locked"));
+        if !quick_mask {
+            if active.locked {
+                return Err(ImageError::coded("layer_locked"));
+            }
+            if !active.visible {
+                return Err(ImageError::coded("layer_hidden"));
+            }
         }
-        if !active.visible {
-            return Err(ImageError::coded("layer_hidden"));
-        }
-        let editing_mask = matches!(stroke, LiveStrokeKind::Paint { .. })
-            && active.editing_mask
-            && active.mask.is_some();
+        let editing_mask = is_paint && !quick_mask && active.editing_mask && active.mask.is_some();
+        let has_sel = !quick_mask && self.stack.selection.has_selection();
+        let unclipped_pixels =
+            (is_paint && !quick_mask && !editing_mask && has_sel).then(|| (*active.pixels).clone());
+        let unclipped_mask = (is_paint && editing_mask && has_sel)
+            .then(|| active.mask.as_deref().cloned())
+            .flatten();
         let before_stack = self.stack.clone();
         self.live_stroke = Some(LiveStrokeSession {
             before_stack,
@@ -437,6 +453,9 @@ impl EditorDocument {
             begin_point: [x, y],
             last_point: [x, y],
             editing_mask,
+            quick_mask,
+            unclipped_pixels,
+            unclipped_mask,
         });
         self.apply_live_segment(&[[x, y]]);
         self.current = composite_stack(&self.stack);
@@ -476,6 +495,9 @@ impl EditorDocument {
         };
         if !commit {
             self.stack = session.before_stack;
+            if session.quick_mask {
+                self.selection_revision += 1;
+            }
             self.current = composite_stack(&self.stack);
             self.pixel_revision += 1;
             return Ok(true);
@@ -496,6 +518,7 @@ impl EditorDocument {
             label,
             pixels: Arc::clone(&active.pixels),
             mask: active.mask.as_ref().map(Arc::clone),
+            selection: session.quick_mask.then(|| self.stack.selection.clone()),
         };
         self.push_step(op, ApplyTarget::ActiveLayer, session.before_stack);
         self.current = composite_stack(&self.stack);
@@ -504,23 +527,58 @@ impl EditorDocument {
     }
 
     fn apply_live_segment(&mut self, points: &[[f64; 2]]) {
-        let Some(session) = self.live_stroke.as_ref() else {
+        let Some(session) = self.live_stroke.as_mut() else {
             return;
         };
         let stroke = session.stroke;
         let begin_point = session.begin_point;
         let editing_mask = session.editing_mask;
+        let quick_mask = session.quick_mask;
         let before_pixels = Arc::clone(&session.before_stack.active_layer().pixels);
+        let before_mask = session.before_stack.active_layer().mask.clone();
+
+        if quick_mask
+            && let LiveStrokeKind::Paint {
+                color,
+                radius,
+                opacity,
+                erase,
+                brush,
+            } = stroke
+        {
+            let (cw, ch) = (self.stack.canvas_width, self.stack.canvas_height);
+            let next_mask = paint_mask_stroke(
+                &self.stack.selection.alpha,
+                cw,
+                ch,
+                points,
+                color,
+                radius,
+                opacity,
+                erase,
+                brush,
+                None,
+            );
+            self.stack.selection.alpha = Arc::new(next_mask);
+            self.stack.selection.recompute_bounds();
+            self.selection_revision += 1;
+            return;
+        }
+
         let sel_snapshot = self
             .stack
             .selection
             .has_selection()
             .then(|| self.stack.selection.clone());
         let active = self.stack.active_layer_mut();
-        let ox = f64::from(active.offset_x);
-        let oy = f64::from(active.offset_y);
-        let mx_off = f64::from(active.offset_x + active.mask_offset_x);
-        let my_off = f64::from(active.offset_y + active.mask_offset_y);
+        let ox_i = active.offset_x;
+        let oy_i = active.offset_y;
+        let ox = f64::from(ox_i);
+        let oy = f64::from(oy_i);
+        let mx_i = active.offset_x + active.mask_offset_x;
+        let my_i = active.offset_y + active.mask_offset_y;
+        let mx_off = f64::from(mx_i);
+        let my_off = f64::from(my_i);
         match stroke {
             LiveStrokeKind::Paint {
                 color,
@@ -535,24 +593,92 @@ impl EditorDocument {
                         .map(|[x, y]| [x - mx_off, y - my_off])
                         .collect();
                     let (lw, lh) = active.pixels.dimensions();
-                    let next_mask = paint_mask_stroke(
-                        mask_arc, lw, lh, &mask_pts, color, radius, opacity, erase, brush,
-                    );
-                    active.mask = Some(Arc::new(next_mask));
+                    if let (Some(unclipped), Some(sel), Some(orig_mask)) = (
+                        session.unclipped_mask.as_mut(),
+                        sel_snapshot.as_ref(),
+                        before_mask.as_deref(),
+                    ) {
+                        *unclipped = paint_mask_stroke(
+                            unclipped, lw, lh, &mask_pts, color, radius, opacity, erase, brush,
+                            None,
+                        );
+                        let mut next_mask = (**mask_arc).clone();
+                        if let Some((left, top, right, bottom)) =
+                            stroke_local_bbox(&mask_pts, radius, brush, lw, lh)
+                        {
+                            clip_mask_by_selection_rect(
+                                orig_mask,
+                                unclipped,
+                                &mut next_mask,
+                                lw,
+                                lh,
+                                mx_i,
+                                my_i,
+                                sel,
+                                left,
+                                top,
+                                right,
+                                bottom,
+                            );
+                        }
+                        active.mask = Some(Arc::new(next_mask));
+                    } else {
+                        let next_mask = paint_mask_stroke(
+                            mask_arc,
+                            lw,
+                            lh,
+                            &mask_pts,
+                            color,
+                            radius,
+                            opacity,
+                            erase,
+                            brush,
+                            sel_snapshot.as_ref().map(|s| (s, mx_i, my_i)),
+                        );
+                        active.mask = Some(Arc::new(next_mask));
+                    }
                     return;
                 }
                 let local_pts: Vec<[f64; 2]> =
                     points.iter().map(|[x, y]| [x - ox, y - oy]).collect();
-                let painted = pixels::paint_stroke_with_brush(
-                    &active.pixels,
-                    &local_pts,
-                    color,
-                    radius,
-                    opacity,
-                    erase,
-                    brush,
-                );
-                active.pixels = Arc::new(painted);
+                if let (Some(unclipped), Some(sel)) =
+                    (session.unclipped_pixels.as_mut(), sel_snapshot.as_ref())
+                {
+                    *unclipped = pixels::paint_stroke_with_brush_clipped(
+                        unclipped, &local_pts, color, radius, opacity, erase, brush, None,
+                    );
+                    let mut next = (*active.pixels).clone();
+                    let (lw, lh) = next.dimensions();
+                    if let Some((left, top, right, bottom)) =
+                        stroke_local_bbox(&local_pts, radius, brush, lw, lh)
+                    {
+                        clip_rgba_by_selection_rect(
+                            &before_pixels,
+                            unclipped,
+                            &mut next,
+                            ox_i,
+                            oy_i,
+                            sel,
+                            left,
+                            top,
+                            right,
+                            bottom,
+                        );
+                    }
+                    active.pixels = Arc::new(next);
+                } else {
+                    let painted = pixels::paint_stroke_with_brush_clipped(
+                        &active.pixels,
+                        &local_pts,
+                        color,
+                        radius,
+                        opacity,
+                        erase,
+                        brush,
+                        sel_snapshot.as_ref().map(|s| (s, ox_i, oy_i)),
+                    );
+                    active.pixels = Arc::new(painted);
+                }
             }
             LiveStrokeKind::Liquify {
                 mode,
@@ -612,7 +738,11 @@ impl EditorDocument {
         let Some(step) = self.undo_stack.pop() else {
             return Ok(false);
         };
+        let prev_sel = self.stack.selection.clone();
         self.stack = step.before;
+        if selection_differs(&prev_sel, &self.stack.selection) {
+            self.selection_revision += 1;
+        }
         self.current = composite_stack(&self.stack);
         self.redo_stack.push((step.operation, step.target));
         self.pixel_revision += 1;
@@ -626,11 +756,20 @@ impl EditorDocument {
         let before = self.stack.clone();
         let res = match &op {
             EditOp::Layer(layer_op) => self.stack.apply_op(layer_op).map(|_| ()),
-            EditOp::LiveStrokeCommit { pixels, mask, .. } => {
-                let active = self.stack.active_layer_mut();
-                active.pixels = Arc::clone(pixels);
-                if let Some(m) = mask {
-                    active.mask = Some(Arc::clone(m));
+            EditOp::LiveStrokeCommit {
+                pixels,
+                mask,
+                selection,
+                ..
+            } => {
+                if let Some(sel) = selection {
+                    self.stack.selection = sel.clone();
+                } else {
+                    let active = self.stack.active_layer_mut();
+                    active.pixels = Arc::clone(pixels);
+                    if let Some(m) = mask {
+                        active.mask = Some(Arc::clone(m));
+                    }
                 }
                 Ok(())
             }
@@ -639,6 +778,9 @@ impl EditorDocument {
         if let Err(err) = res {
             self.redo_stack.push((op, target));
             return Err(err);
+        }
+        if selection_differs(&before.selection, &self.stack.selection) {
+            self.selection_revision += 1;
         }
         self.push_preserving_redo(op, target, before);
         self.current = composite_stack(&self.stack);
@@ -1034,6 +1176,8 @@ impl EditorDocument {
                 fill,
                 fill_alpha,
             } => {
+                let old_w = self.stack.canvas_width;
+                let old_h = self.stack.canvas_height;
                 if self.is_simple_single_layer() {
                     let layer = &mut self.stack.layers[0];
                     let next = render_single_op(&layer.pixels, layer.original.as_deref(), op)?;
@@ -1042,8 +1186,6 @@ impl EditorDocument {
                     self.stack.canvas_height = next.height();
                     layer.pixels = Arc::new(next);
                 } else {
-                    let old_w = self.stack.canvas_width;
-                    let old_h = self.stack.canvas_height;
                     self.stack.canvas_width = *width;
                     self.stack.canvas_height = *height;
                     for layer in &mut self.stack.layers {
@@ -1058,6 +1200,7 @@ impl EditorDocument {
                         fill_expanded_bottom_layer(&mut self.stack, *fill, *fill_alpha);
                     }
                 }
+                self.transform_canvas_selection(old_w, old_h, op);
                 return Ok(());
             }
             EditOp::Resize {
@@ -1068,6 +1211,8 @@ impl EditorDocument {
                 fill,
                 fill_alpha,
             } => {
+                let old_w = self.stack.canvas_width;
+                let old_h = self.stack.canvas_height;
                 if self.is_simple_single_layer() {
                     let layer = &mut self.stack.layers[0];
                     let next = render_single_op(&layer.pixels, layer.original.as_deref(), op)?;
@@ -1092,10 +1237,10 @@ impl EditorDocument {
                     self.stack.layers = vec![Layer::new(id, "Background", Arc::new(next))];
                     self.stack.active_layer_id = id;
                 } else {
-                    let old_w = f64::from(self.stack.canvas_width.max(1));
-                    let old_h = f64::from(self.stack.canvas_height.max(1));
-                    let sx = f64::from(*width) / old_w;
-                    let sy = f64::from(*height) / old_h;
+                    let old_wf = f64::from(old_w.max(1));
+                    let old_hf = f64::from(old_h.max(1));
+                    let sx = f64::from(*width) / old_wf;
+                    let sy = f64::from(*height) / old_hf;
                     for layer in &mut self.stack.layers {
                         let (lw, lh) = layer.dimensions();
                         let new_lw = ((f64::from(lw) * sx).round() as u32).max(1);
@@ -1117,6 +1262,7 @@ impl EditorDocument {
                     self.stack.canvas_width = *width;
                     self.stack.canvas_height = *height;
                 }
+                self.transform_canvas_selection(old_w, old_h, op);
                 return Ok(());
             }
             EditOp::CanvasSize {
@@ -1126,6 +1272,8 @@ impl EditorDocument {
                 fill,
                 fill_alpha,
             } => {
+                let old_w = self.stack.canvas_width;
+                let old_h = self.stack.canvas_height;
                 if self.is_simple_single_layer() {
                     let layer = &mut self.stack.layers[0];
                     let next = render_single_op(&layer.pixels, layer.original.as_deref(), op)?;
@@ -1134,8 +1282,6 @@ impl EditorDocument {
                     self.stack.canvas_height = next.height();
                     layer.pixels = Arc::new(next);
                 } else {
-                    let old_w = self.stack.canvas_width;
-                    let old_h = self.stack.canvas_height;
                     let (dx, dy) = pixels::anchor_offset(old_w, old_h, *width, *height, *anchor);
                     for layer in &mut self.stack.layers {
                         layer.offset_x += dx;
@@ -1147,12 +1293,14 @@ impl EditorDocument {
                         fill_expanded_bottom_layer(&mut self.stack, *fill, *fill_alpha);
                     }
                 }
+                self.transform_canvas_selection(old_w, old_h, op);
                 return Ok(());
             }
             _ => {}
         }
 
-        // Paint always targets the active layer (or its mask if `editing_mask`).
+        // Paint always targets Quick Mask (when active), active layer's mask (`editing_mask`),
+        // or the active layer's pixels — strictly clipped to any active `SelectionMask`.
         if let EditOp::Paint {
             points,
             color,
@@ -1162,6 +1310,26 @@ impl EditorDocument {
             brush,
         } = op
         {
+            if self.stack.selection.quick_mask_active {
+                let (cw, ch) = (self.stack.canvas_width, self.stack.canvas_height);
+                let next_mask = paint_mask_stroke(
+                    &self.stack.selection.alpha,
+                    cw,
+                    ch,
+                    points,
+                    *color,
+                    *radius,
+                    *opacity,
+                    *erase,
+                    *brush,
+                    None,
+                );
+                self.stack.selection.alpha = Arc::new(next_mask);
+                self.stack.selection.recompute_bounds();
+                self.selection_revision += 1;
+                return Ok(());
+            }
+
             let active = self.stack.active_layer();
             if active.locked {
                 return Err(ImageError::coded("layer_locked"));
@@ -1169,28 +1337,46 @@ impl EditorDocument {
             if !active.visible {
                 return Err(ImageError::coded("layer_hidden"));
             }
-            let ox = f64::from(active.offset_x);
-            let oy = f64::from(active.offset_y);
-            let local_pts: Vec<[f64; 2]> = points.iter().map(|[x, y]| [x - ox, y - oy]).collect();
+            let sel_snapshot = self
+                .stack
+                .selection
+                .has_selection()
+                .then(|| self.stack.selection.clone());
 
             if active.editing_mask
                 && let Some(mask_arc) = active.mask.as_ref()
             {
-                let mx_off = f64::from(active.offset_x + active.mask_offset_x);
-                let my_off = f64::from(active.offset_y + active.mask_offset_y);
+                let mx_i = active.offset_x + active.mask_offset_x;
+                let my_i = active.offset_y + active.mask_offset_y;
+                let mx_off = f64::from(mx_i);
+                let my_off = f64::from(my_i);
                 let mask_pts: Vec<[f64; 2]> = points
                     .iter()
                     .map(|[x, y]| [x - mx_off, y - my_off])
                     .collect();
                 let (lw, lh) = active.dimensions();
                 let next_mask = paint_mask_stroke(
-                    mask_arc, lw, lh, &mask_pts, *color, *radius, *opacity, *erase, *brush,
+                    mask_arc,
+                    lw,
+                    lh,
+                    &mask_pts,
+                    *color,
+                    *radius,
+                    *opacity,
+                    *erase,
+                    *brush,
+                    sel_snapshot.as_ref().map(|s| (s, mx_i, my_i)),
                 );
                 self.stack.active_layer_mut().mask = Some(Arc::new(next_mask));
                 return Ok(());
             }
 
-            let next = pixels::paint_stroke_with_brush(
+            let ox_i = active.offset_x;
+            let oy_i = active.offset_y;
+            let ox = f64::from(ox_i);
+            let oy = f64::from(oy_i);
+            let local_pts: Vec<[f64; 2]> = points.iter().map(|[x, y]| [x - ox, y - oy]).collect();
+            let next = pixels::paint_stroke_with_brush_clipped(
                 &active.pixels,
                 &local_pts,
                 *color,
@@ -1198,6 +1384,7 @@ impl EditorDocument {
                 *opacity,
                 *erase,
                 *brush,
+                sel_snapshot.as_ref().map(|s| (s, ox_i, oy_i)),
             );
             self.stack.active_layer_mut().pixels = Arc::new(next);
             return Ok(());
@@ -1436,15 +1623,20 @@ impl EditorDocument {
         }
 
         if self.is_simple_single_layer() {
+            let old_w = self.stack.canvas_width;
+            let old_h = self.stack.canvas_height;
             let layer = &mut self.stack.layers[0];
             let next = render_single_op(&layer.pixels, layer.original.as_deref(), op)?;
             transform_layer_geometry(layer, op)?;
             self.stack.canvas_width = next.width();
             self.stack.canvas_height = next.height();
             layer.pixels = Arc::new(next);
+            self.transform_canvas_selection(old_w, old_h, op);
             return Ok(());
         }
 
+        let old_w = self.stack.canvas_width;
+        let old_h = self.stack.canvas_height;
         match op {
             EditOp::Rotate { degrees } => {
                 let cw = self.stack.canvas_width;
@@ -1469,6 +1661,7 @@ impl EditorDocument {
                     self.stack.canvas_width = ch;
                     self.stack.canvas_height = cw;
                 }
+                self.transform_canvas_selection(old_w, old_h, op);
             }
             EditOp::Flip { axis } => {
                 let cw = self.stack.canvas_width;
@@ -1487,6 +1680,7 @@ impl EditorDocument {
                     }
                     layer.pixels = Arc::new(next);
                 }
+                self.transform_canvas_selection(old_w, old_h, op);
             }
             EditOp::AdjustColor(_)
             | EditOp::AdjustHsv(_)
@@ -1506,9 +1700,63 @@ impl EditorDocument {
                 self.stack.canvas_height = nh;
                 self.stack.layers = vec![Layer::new(id, "Background", Arc::new(next))];
                 self.stack.active_layer_id = id;
+                self.transform_canvas_selection(old_w, old_h, op);
             }
         }
         Ok(())
+    }
+
+    fn transform_canvas_selection(&mut self, old_w: u32, old_h: u32, op: &EditOp) {
+        let had_active =
+            self.stack.selection.has_selection() || self.stack.selection.quick_mask_active;
+        match op {
+            EditOp::Crop {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => {
+                self.stack.selection = self.stack.selection.crop(*x, *y, *width, *height);
+            }
+            EditOp::Resize {
+                width,
+                height,
+                mode,
+                ..
+            } => {
+                if *mode == ResizeMode::Stretch {
+                    self.stack.selection = self.stack.selection.resize(*width, *height);
+                } else {
+                    self.stack.selection = SelectionMask::empty(*width, *height);
+                }
+            }
+            EditOp::CanvasSize {
+                width,
+                height,
+                anchor,
+                ..
+            } => {
+                let (dx, dy) = pixels::anchor_offset(old_w, old_h, *width, *height, *anchor);
+                self.stack.selection = self.stack.selection.crop(-dx, -dy, *width, *height);
+            }
+            EditOp::Rotate { degrees } => {
+                let turns = degrees.rem_euclid(360) / 90;
+                self.stack.selection = self.stack.selection.rotate_90(turns);
+            }
+            EditOp::Flip { axis } => {
+                self.stack.selection = self.stack.selection.flip(*axis == FlipAxis::Horizontal);
+            }
+            _ => {
+                let (cw, ch) = (self.stack.canvas_width, self.stack.canvas_height);
+                if self.stack.selection.width != cw || self.stack.selection.height != ch {
+                    self.stack.selection = SelectionMask::empty(cw, ch);
+                }
+            }
+        }
+        if had_active {
+            self.selection_revision += 1;
+        }
     }
 
     pub fn selection(&self) -> &SelectionMask {
@@ -1653,6 +1901,7 @@ impl EditorDocument {
                 label,
                 pixels: pixels_arc,
                 mask: None,
+                selection: None,
             },
             ApplyTarget::ActiveLayer,
             before,
@@ -1809,6 +2058,32 @@ impl EditorDocument {
                 }
             }
         }
+        if new_w != lw || new_h != lh || new_ox != ox || new_oy != oy {
+            let shift_x = (ox - new_ox) as usize;
+            let shift_y = (oy - new_oy) as usize;
+            if let Some(old_mask) = &layer.mask
+                && old_mask.len() == (lw as usize) * (lh as usize)
+            {
+                let mut padded_mask = vec![0u8; (new_w as usize) * (new_h as usize)];
+                for row in 0..(lh as usize) {
+                    let src_start = row * (lw as usize);
+                    let dst_start = (shift_y + row) * (new_w as usize) + shift_x;
+                    padded_mask[dst_start..dst_start + (lw as usize)]
+                        .copy_from_slice(&old_mask[src_start..src_start + (lw as usize)]);
+                }
+                layer.mask = Some(Arc::new(padded_mask));
+            }
+            if let Some(old_orig) = &layer.original {
+                let mut padded_orig = RgbaImage::from_pixel(new_w, new_h, Rgba([0, 0, 0, 0]));
+                image::imageops::replace(
+                    &mut padded_orig,
+                    old_orig.as_ref(),
+                    i64::from(ox - new_ox),
+                    i64::from(oy - new_oy),
+                );
+                layer.original = Some(Arc::new(padded_orig));
+            }
+        }
         layer.pixels = Arc::new(merged);
         layer.offset_x = new_ox;
         layer.offset_y = new_oy;
@@ -1930,9 +2205,12 @@ fn render_drawing_op(
             color_mode,
             fg_color,
             bg_color,
+            stops,
             opacity,
+            repeat,
             reverse,
             dither,
+            blend_mode,
         } => {
             let fg = if is_mask {
                 to_gray(*fg_color)
@@ -1944,21 +2222,203 @@ fn render_drawing_op(
             } else {
                 *bg_color
             };
-            drawing::draw_gradient(
+            let shape = match kind {
+                GradientKind::Linear => drawing::GradientShapeSpec::Linear,
+                GradientKind::Bilinear | GradientKind::Reflected => {
+                    drawing::GradientShapeSpec::Bilinear
+                }
+                GradientKind::Radial => drawing::GradientShapeSpec::Radial,
+                GradientKind::Square => drawing::GradientShapeSpec::Square,
+                GradientKind::Conical => drawing::GradientShapeSpec::Conical,
+                GradientKind::Spiral => drawing::GradientShapeSpec::Spiral,
+            };
+            let rep = match repeat {
+                GradientRepeat::None => drawing::GradientRepeatSpec::None,
+                GradientRepeat::Forwards => drawing::GradientRepeatSpec::Forwards,
+                GradientRepeat::Alternating => drawing::GradientRepeatSpec::Alternating,
+            };
+            let bmode = if is_mask {
+                drawing::GradientBlendMode::Normal
+            } else {
+                match blend_mode {
+                    BlendMode::Normal => drawing::GradientBlendMode::Normal,
+                    BlendMode::Multiply => drawing::GradientBlendMode::Multiply,
+                    BlendMode::Screen => drawing::GradientBlendMode::Screen,
+                    BlendMode::Overlay => drawing::GradientBlendMode::Overlay,
+                    BlendMode::Darken => drawing::GradientBlendMode::Darken,
+                    BlendMode::Lighten => drawing::GradientBlendMode::Lighten,
+                    BlendMode::Difference => drawing::GradientBlendMode::Difference,
+                }
+            };
+            let mut spec_stops: Vec<drawing::GradientStopSpec> =
+                if *color_mode == GradientColorMode::Custom && stops.len() >= 2 {
+                    stops
+                        .iter()
+                        .map(|s| drawing::GradientStopSpec {
+                            pos: s.pos,
+                            color: if is_mask { to_gray(s.color) } else { s.color },
+                            alpha: s.alpha,
+                        })
+                        .collect()
+                } else {
+                    match color_mode {
+                        GradientColorMode::FgToTransparent => vec![
+                            drawing::GradientStopSpec {
+                                pos: 0.0,
+                                color: fg,
+                                alpha: 1.0,
+                            },
+                            drawing::GradientStopSpec {
+                                pos: 1.0,
+                                color: fg,
+                                alpha: 0.0,
+                            },
+                        ],
+                        GradientColorMode::FgToBg | GradientColorMode::Custom => vec![
+                            drawing::GradientStopSpec {
+                                pos: 0.0,
+                                color: fg,
+                                alpha: 1.0,
+                            },
+                            drawing::GradientStopSpec {
+                                pos: 1.0,
+                                color: bg,
+                                alpha: 1.0,
+                            },
+                        ],
+                    }
+                };
+            if spec_stops.len() < 2 {
+                spec_stops = vec![
+                    drawing::GradientStopSpec {
+                        pos: 0.0,
+                        color: fg,
+                        alpha: 1.0,
+                    },
+                    drawing::GradientStopSpec {
+                        pos: 1.0,
+                        color: bg,
+                        alpha: 1.0,
+                    },
+                ];
+            }
+            drawing::render_gradient(
                 src,
-                [start[0] - ox, start[1] - oy],
-                [end[0] - ox, end[1] - oy],
-                *kind,
-                *color_mode,
+                [f64::from(start[0] - ox), f64::from(start[1] - oy)],
+                [f64::from(end[0] - ox), f64::from(end[1] - oy)],
                 fg,
+                1.0,
                 bg,
-                *opacity,
+                1.0,
+                &spec_stops,
+                f64::from(*opacity),
+                shape,
+                rep,
                 *reverse,
                 *dither,
+                bmode,
                 selection.map(|s| (s, offset_x, offset_y)),
             )
         }
         _ => src.clone(),
+    }
+}
+
+#[inline]
+fn selection_differs(a: &SelectionMask, b: &SelectionMask) -> bool {
+    !Arc::ptr_eq(&a.alpha, &b.alpha)
+        || a.bounds != b.bounds
+        || a.quick_mask_active != b.quick_mask_active
+        || a.width != b.width
+        || a.height != b.height
+}
+
+fn stroke_local_bbox(
+    local_pts: &[[f64; 2]],
+    radius: f32,
+    brush: BrushSettings,
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    if width == 0 || height == 0 || local_pts.is_empty() {
+        return None;
+    }
+    let r = f64::from(radius);
+    let scatter = f64::from(brush.scatter).clamp(0.0, 2.5);
+    let pad = r + r * scatter * 1.5 + 3.0;
+    let mut min_x = local_pts[0][0];
+    let mut min_y = local_pts[0][1];
+    let mut max_x = local_pts[0][0];
+    let mut max_y = local_pts[0][1];
+    for &[x, y] in &local_pts[1..] {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    let left = (min_x - pad).floor().max(0.0) as u32;
+    let top = (min_y - pad).floor().max(0.0) as u32;
+    let right = ((max_x + pad).ceil().max(0.0) as u32).min(width);
+    let bottom = ((max_y + pad).ceil().max(0.0) as u32).min(height);
+    (left < right && top < bottom).then_some((left, top, right, bottom))
+}
+
+#[inline]
+fn blend_clipped_rgba_pixel(b: [u8; 4], a: [u8; 4], s: u8) -> [u8; 4] {
+    if s == 255 {
+        return a;
+    }
+    if s == 0 {
+        return b;
+    }
+    let t = f32::from(s) / 255.0;
+    let inv = 1.0 - t;
+    let ba = f32::from(b[3]) / 255.0;
+    let aa = f32::from(a[3]) / 255.0;
+    let wb = ba * inv;
+    let wa = aa * t;
+    let out_a = wb + wa;
+    if out_a <= 1e-6 {
+        return [0, 0, 0, 0];
+    }
+    let mix_c = |bc: u8, ac: u8| -> u8 {
+        ((f32::from(bc) * wb + f32::from(ac) * wa) / out_a)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    [
+        mix_c(b[0], a[0]),
+        mix_c(b[1], a[1]),
+        mix_c(b[2], a[2]),
+        (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn clip_rgba_by_selection_rect(
+    before: &RgbaImage,
+    unclipped: &RgbaImage,
+    out: &mut RgbaImage,
+    offset_x: i32,
+    offset_y: i32,
+    sel: &SelectionMask,
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+) {
+    let (w, h) = before.dimensions();
+    if unclipped.dimensions() != (w, h) || out.dimensions() != (w, h) {
+        return;
+    }
+    for y in top..bottom.min(h) {
+        let cy = offset_y + y as i32;
+        for x in left..right.min(w) {
+            let s = sel.alpha_at(offset_x + x as i32, cy);
+            let b = before.get_pixel(x, y).0;
+            let a = unclipped.get_pixel(x, y).0;
+            out.put_pixel(x, y, Rgba(blend_clipped_rgba_pixel(b, a, s)));
+        }
     }
 }
 
@@ -1981,19 +2441,45 @@ fn clip_rgba_by_selection(
                 continue;
             }
             let b = before.get_pixel(x, y).0;
-            if s == 0 {
-                after.put_pixel(x, y, Rgba(b));
+            let a = after.get_pixel(x, y).0;
+            after.put_pixel(x, y, Rgba(blend_clipped_rgba_pixel(b, a, s)));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn clip_mask_by_selection_rect(
+    before: &[u8],
+    unclipped: &[u8],
+    out: &mut [u8],
+    lw: u32,
+    lh: u32,
+    offset_x: i32,
+    offset_y: i32,
+    sel: &SelectionMask,
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+) {
+    let len = (lw as usize).saturating_mul(lh as usize);
+    if before.len() < len || unclipped.len() < len || out.len() < len {
+        return;
+    }
+    for y in top..bottom.min(lh) {
+        let cy = offset_y + y as i32;
+        for x in left..right.min(lw) {
+            let s = sel.alpha_at(offset_x + x as i32, cy);
+            let idx = (y * lw + x) as usize;
+            if s == 255 {
+                out[idx] = unclipped[idx];
+            } else if s == 0 {
+                out[idx] = before[idx];
             } else {
-                let a = after.get_pixel(x, y).0;
                 let t = s as u16;
                 let inv = 255 - t;
-                let blended = [
-                    ((b[0] as u16 * inv + a[0] as u16 * t + 127) / 255) as u8,
-                    ((b[1] as u16 * inv + a[1] as u16 * t + 127) / 255) as u8,
-                    ((b[2] as u16 * inv + a[2] as u16 * t + 127) / 255) as u8,
-                    ((b[3] as u16 * inv + a[3] as u16 * t + 127) / 255) as u8,
-                ];
-                after.put_pixel(x, y, Rgba(blended));
+                out[idx] =
+                    ((before[idx] as u16 * inv + unclipped[idx] as u16 * t + 127) / 255) as u8;
             }
         }
     }
@@ -2042,6 +2528,7 @@ fn paint_mask_stroke(
     opacity: f32,
     erase: bool,
     brush: BrushSettings,
+    selection: Option<(&SelectionMask, i32, i32)>,
 ) -> Vec<u8> {
     let mut mask_img = RgbaImage::new(lw, lh);
     for y in 0..lh {
@@ -2058,7 +2545,7 @@ fn paint_mask_stroke(
             .round()
             .clamp(0.0, 255.0) as u8
     };
-    let painted = pixels::paint_stroke_with_brush(
+    let painted = pixels::paint_stroke_with_brush_clipped(
         &mask_img,
         local_pts,
         [gray, gray, gray],
@@ -2066,6 +2553,7 @@ fn paint_mask_stroke(
         opacity,
         false,
         brush,
+        selection,
     );
     let mut out = vec![0u8; (lw as usize) * (lh as usize)];
     for y in 0..lh {
@@ -3228,5 +3716,430 @@ mod tests {
         assert_eq!(psd_doc.dimensions(), (1, 1));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn brush_and_eraser_strictly_respect_rect_and_inverted_selections() {
+        let base = RgbaImage::from_pixel(32, 32, Rgba([10, 20, 30, 255]));
+        let mut doc = EditorDocument::from_rgba(PathBuf::from("sel_brush.png"), base);
+
+        doc.select_shape(
+            &SelectionShape::Rect {
+                x: 8.0,
+                y: 8.0,
+                width: 12.0,
+                height: 12.0,
+                feather: 0.0,
+                anti_alias: false,
+            },
+            SelectionBooleanOp::Replace,
+        );
+
+        // 1. EditOp::Paint (fast round brush) crossing the selection boundary
+        doc.apply(EditOp::Paint {
+            points: vec![[4.0, 14.0], [24.0, 14.0]],
+            color: [240, 40, 40],
+            radius: 4.0,
+            opacity: 1.0,
+            erase: false,
+            brush: BrushSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(doc.working_pixels().get_pixel(14, 14).0, [240, 40, 40, 255]);
+        assert_eq!(doc.working_pixels().get_pixel(6, 14).0, [10, 20, 30, 255]);
+        assert_eq!(doc.working_pixels().get_pixel(22, 14).0, [10, 20, 30, 255]);
+
+        // 2. Live stroke (soft/chalk brush + eraser) crossing the selection boundary
+        doc.live_stroke_begin(
+            LiveStrokeKind::Paint {
+                color: [0, 220, 80],
+                radius: 4.0,
+                opacity: 1.0,
+                erase: false,
+                brush: BrushSettings {
+                    tip: photon_protocol::BrushTip::Round,
+                    hardness: 0.4,
+                    ..BrushSettings::default()
+                },
+            },
+            4.0,
+            10.0,
+        )
+        .unwrap();
+        doc.live_stroke_step(&[[24.0, 10.0]]).unwrap();
+        doc.live_stroke_end(true).unwrap();
+        assert!(doc.working_pixels().get_pixel(12, 10).0[1] > 180);
+        assert_eq!(doc.working_pixels().get_pixel(5, 10).0, [10, 20, 30, 255]);
+        assert_eq!(doc.working_pixels().get_pixel(21, 10).0, [10, 20, 30, 255]);
+
+        // 3. Live eraser stroke crossing the selection boundary
+        doc.live_stroke_begin(
+            LiveStrokeKind::Paint {
+                color: [0, 0, 0],
+                radius: 4.0,
+                opacity: 1.0,
+                erase: true,
+                brush: BrushSettings::default(),
+            },
+            4.0,
+            14.0,
+        )
+        .unwrap();
+        doc.live_stroke_step(&[[24.0, 14.0]]).unwrap();
+        doc.live_stroke_end(true).unwrap();
+        assert_eq!(doc.working_pixels().get_pixel(14, 14).0[3], 0);
+        assert_eq!(doc.working_pixels().get_pixel(6, 14).0, [10, 20, 30, 255]);
+        assert_eq!(doc.working_pixels().get_pixel(22, 14).0, [10, 20, 30, 255]);
+
+        // 4. Inverted selection: now exterior is editable and interior (8..20) is protected
+        doc.invert_selection();
+        doc.apply(EditOp::Paint {
+            points: vec![[4.0, 14.0], [16.0, 14.0]],
+            color: [20, 120, 250],
+            radius: 3.0,
+            opacity: 1.0,
+            erase: false,
+            brush: BrushSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(doc.working_pixels().get_pixel(5, 14).0, [20, 120, 250, 255]);
+        assert_eq!(doc.working_pixels().get_pixel(14, 14).0[3], 0);
+    }
+
+    #[test]
+    fn brush_and_eraser_respect_feathered_selection_without_over_saturation() {
+        let base = RgbaImage::from_pixel(24, 24, Rgba([0, 0, 0, 255]));
+        let mut doc = EditorDocument::from_rgba(PathBuf::from("feather.png"), base);
+
+        // Set a half-selected (128) region on x in 8..16 and full (255) on x in 16..20.
+        let mut mask = vec![0u8; 24 * 24];
+        for y in 4..20 {
+            for x in 8..16 {
+                mask[y * 24 + x] = 128;
+            }
+            for x in 16..20 {
+                mask[y * 24 + x] = 255;
+            }
+        }
+        doc.stack
+            .selection
+            .combine(&mask, SelectionBooleanOp::Replace);
+
+        // Repeated live stroke passes over the 50% feathered region in ONE stroke
+        // must never exceed ~50% blend (around 128).
+        doc.live_stroke_begin(
+            LiveStrokeKind::Paint {
+                color: [255, 255, 255],
+                radius: 4.0,
+                opacity: 1.0,
+                erase: false,
+                brush: BrushSettings::default(),
+            },
+            10.0,
+            12.0,
+        )
+        .unwrap();
+        for _ in 0..5 {
+            doc.live_stroke_step(&[[18.0, 12.0]]).unwrap();
+            doc.live_stroke_step(&[[10.0, 12.0]]).unwrap();
+        }
+        doc.live_stroke_end(true).unwrap();
+
+        let outside = doc.working_pixels().get_pixel(6, 12).0;
+        let feathered = doc.working_pixels().get_pixel(12, 12).0;
+        let full = doc.working_pixels().get_pixel(18, 12).0;
+        assert_eq!(outside, [0, 0, 0, 255]);
+        assert!(
+            (124..=132).contains(&feathered[0]),
+            "feathered pixel over-saturated or under-painted: {feathered:?}"
+        );
+        assert_eq!(full, [255, 255, 255, 255]);
+
+        // Now erase with a feathered selection on an opaque layer: alpha should drop to ~50%
+        let base2 = RgbaImage::from_pixel(24, 24, Rgba([200, 100, 50, 255]));
+        let mut doc2 = EditorDocument::from_rgba(PathBuf::from("feather_erase.png"), base2);
+        doc2.stack
+            .selection
+            .combine(&mask, SelectionBooleanOp::Replace);
+        doc2.apply(EditOp::Paint {
+            points: vec![[6.0, 12.0], [19.0, 12.0]],
+            color: [0, 0, 0],
+            radius: 4.0,
+            opacity: 1.0,
+            erase: true,
+            brush: BrushSettings::default(),
+        })
+        .unwrap();
+        assert_eq!(doc2.working_pixels().get_pixel(6, 12).0[3], 255);
+        let feather_erased_a = doc2.working_pixels().get_pixel(12, 12).0[3];
+        assert!(
+            (124..=132).contains(&feather_erased_a),
+            "feathered erase alpha expected ~127, got {feather_erased_a}"
+        );
+        assert_eq!(doc2.working_pixels().get_pixel(18, 12).0[3], 0);
+    }
+
+    #[test]
+    fn brush_and_eraser_respect_selection_on_offset_layer_and_layer_mask() {
+        let base = RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 255]));
+        let mut doc = EditorDocument::from_rgba(PathBuf::from("offset_sel.png"), base);
+
+        // Add an offset layer at (10, 8) with size 16x16 (covers canvas x=10..26, y=8..24)
+        let layer_px = Arc::new(RgbaImage::from_pixel(16, 16, Rgba([50, 50, 50, 255])));
+        doc.apply_layer_op(LayerOperation::AddImage {
+            name: "Offset".to_owned(),
+            offset_x: 10,
+            offset_y: 8,
+            pixels: layer_px,
+        })
+        .unwrap();
+        let layer_id = doc.stack().active_layer_id;
+
+        // Canvas-space selection at x=14..22, y=10..20
+        doc.select_shape(
+            &SelectionShape::Rect {
+                x: 14.0,
+                y: 10.0,
+                width: 8.0,
+                height: 10.0,
+                feather: 0.0,
+                anti_alias: false,
+            },
+            SelectionBooleanOp::Replace,
+        );
+
+        // Paint across canvas x=10..25 at y=14 (layer local y=6)
+        doc.live_stroke_begin(
+            LiveStrokeKind::Paint {
+                color: [255, 200, 0],
+                radius: 3.0,
+                opacity: 1.0,
+                erase: false,
+                brush: BrushSettings::default(),
+            },
+            10.0,
+            14.0,
+        )
+        .unwrap();
+        doc.live_stroke_step(&[[25.0, 14.0]]).unwrap();
+        doc.live_stroke_end(true).unwrap();
+
+        let active_px = &doc.stack().active_layer().pixels;
+        // Layer-local x=2 -> canvas x=12 (outside selection) stays [50, 50, 50, 255]
+        assert_eq!(active_px.get_pixel(2, 6).0, [50, 50, 50, 255]);
+        // Layer-local x=8 -> canvas x=18 (inside selection) becomes [255, 200, 0, 255]
+        assert_eq!(active_px.get_pixel(8, 6).0, [255, 200, 0, 255]);
+        // Layer-local x=14 -> canvas x=24 (outside selection) stays [50, 50, 50, 255]
+        assert_eq!(active_px.get_pixel(14, 6).0, [50, 50, 50, 255]);
+
+        // Add mask and paint/erase on mask with unlinked mask offset (+2, 0)
+        doc.apply_layer_op(LayerOperation::AddMask {
+            id: layer_id,
+            reveal_all: true,
+        })
+        .unwrap();
+        doc.stack.active_layer_mut().mask_offset_x = 2;
+        assert!(doc.stack().active_layer().editing_mask);
+
+        // Mask origin in canvas is (10 + 2, 8) = (12, 8).
+        // Canvas selection is x=14..22, so mask-local selected x is 2..10.
+        doc.apply(EditOp::Paint {
+            points: vec![[12.0, 14.0], [24.0, 14.0]],
+            color: [0, 0, 0],
+            radius: 3.0,
+            opacity: 1.0,
+            erase: true,
+            brush: BrushSettings::default(),
+        })
+        .unwrap();
+        let mask = doc.stack().active_layer().mask.as_ref().unwrap();
+        // Mask-local x=0 -> canvas x=12 (outside selection) stays 255
+        assert_eq!(mask[6 * 16 + 0], 255);
+        // Mask-local x=6 -> canvas x=18 (inside selection) erased to 0
+        assert_eq!(mask[6 * 16 + 6], 0);
+        // Mask-local x=12 -> canvas x=24 (outside selection) stays 255
+        assert_eq!(mask[6 * 16 + 12], 255);
+    }
+
+    #[test]
+    fn quick_mask_live_brush_and_eraser_edit_selection_with_undo_redo() {
+        let base = RgbaImage::from_pixel(24, 24, Rgba([40, 80, 120, 255]));
+        let mut doc = EditorDocument::from_rgba(PathBuf::from("quick_mask.png"), base);
+        assert!(doc.toggle_quick_mask());
+        let rev0 = doc.selection_revision;
+
+        // Live paint white adds to quick mask selection without modifying layer pixels
+        doc.live_stroke_begin(
+            LiveStrokeKind::Paint {
+                color: [255, 255, 255],
+                radius: 3.0,
+                opacity: 1.0,
+                erase: false,
+                brush: BrushSettings::default(),
+            },
+            12.0,
+            12.0,
+        )
+        .unwrap();
+        assert!(doc.selection_revision > rev0);
+        assert!(doc.selection().has_selection());
+        assert_eq!(doc.selection().alpha_at(12, 12), 255);
+        doc.live_stroke_end(true).unwrap();
+
+        // Layer pixels remain completely untouched
+        assert_eq!(doc.working_pixels().get_pixel(12, 12).0, [40, 80, 120, 255]);
+
+        // Undo & redo restore quick mask selection and bump selection_revision
+        let rev_after_stroke = doc.selection_revision;
+        assert!(doc.undo().unwrap());
+        assert!(!doc.selection().has_selection());
+        assert!(doc.selection_revision > rev_after_stroke);
+
+        let rev_after_undo = doc.selection_revision;
+        assert!(doc.redo().unwrap());
+        assert!(doc.selection().has_selection());
+        assert_eq!(doc.selection().alpha_at(12, 12), 255);
+        assert!(doc.selection_revision > rev_after_undo);
+
+        // Live erase in quick mask removes from selection
+        doc.live_stroke_begin(
+            LiveStrokeKind::Paint {
+                color: [255, 255, 255],
+                radius: 2.0,
+                opacity: 1.0,
+                erase: true,
+                brush: BrushSettings::default(),
+            },
+            12.0,
+            12.0,
+        )
+        .unwrap();
+        doc.live_stroke_end(true).unwrap();
+        assert_eq!(doc.selection().alpha_at(12, 12), 0);
+    }
+
+    #[test]
+    fn transform_layer_with_partial_selection_offset_mask_feather_and_undo_redo() {
+        // 1. Partial selection on an offset layer + expansion + selection mask update + undo/redo
+        let bg = RgbaImage::from_pixel(40, 40, Rgba([20, 20, 20, 255]));
+        let mut doc = EditorDocument::from_rgba(PathBuf::from("sel_tr.png"), bg);
+        let fg = Arc::new(RgbaImage::from_pixel(20, 20, Rgba([200, 40, 30, 255])));
+        doc.apply_layer_op(LayerOperation::AddImage {
+            name: "FG".to_owned(),
+            offset_x: 10,
+            offset_y: 10,
+            pixels: fg,
+        })
+        .unwrap();
+        let fg_id = doc.stack().active_layer_id;
+
+        // Add a layer mask revealing [4..20, 4..20] in layer-local coords (canvas [14..30, 14..30])
+        doc.apply_layer_op(LayerOperation::AddMask {
+            id: fg_id,
+            reveal_all: false,
+        })
+        .unwrap();
+        {
+            let layer = doc.stack.active_layer_mut();
+            let mut m = vec![0u8; 20 * 20];
+            for y in 4..20 {
+                for x in 4..20 {
+                    m[y * 20 + x] = 255;
+                }
+            }
+            layer.mask = Some(Arc::new(m));
+        }
+
+        // Select partial box [14, 14, 8, 8] (inside both layer and mask)
+        doc.select_shape(
+            &SelectionShape::Rect {
+                x: 14.0,
+                y: 14.0,
+                width: 8.0,
+                height: 8.0,
+                feather: 0.0,
+                anti_alias: false,
+            },
+            SelectionBooleanOp::Replace,
+        );
+        let rev_before = doc.selection_revision;
+
+        // Translate selected pixels to (-10, -10) -> canvas [4..12, 4..12] (expands layer bounds!)
+        doc.apply(EditOp::TransformLayer {
+            layer_id: Some(fg_id),
+            transform: LayerTransformSpec {
+                translate_x: -10.0,
+                translate_y: -10.0,
+                ..LayerTransformSpec::default()
+            },
+        })
+        .unwrap();
+
+        let layer = doc.stack().active_layer();
+        assert_eq!((layer.offset_x, layer.offset_y), (4, 4));
+        assert_eq!(layer.dimensions(), (26, 26));
+        // Layer mask must stay aligned to new dimensions (26x26) instead of being dropped
+        let mask_buf = layer.mask.as_ref().expect("mask preserved");
+        assert_eq!(mask_buf.len(), 26 * 26);
+        // Old canvas (18, 18) -> new layer-local (14, 14) remains revealed in mask
+        assert_eq!(mask_buf[14 * 26 + 14], 255);
+        // Old hole at canvas (18, 18) in layer pixels is cleared to transparent
+        assert_eq!(layer.pixels.get_pixel(14, 14).0[3], 0);
+        // Moved pixels at canvas (8, 8) -> layer-local (4, 4) are opaque red
+        assert_eq!(layer.pixels.get_pixel(4, 4).0, [200, 40, 30, 255]);
+        // Selection mask moved to [4..12, 4..12] and selection_revision bumped
+        assert!(doc.selection_revision > rev_before);
+        assert_eq!(doc.selection().bounds, Some([4, 4, 8, 8]));
+        assert_eq!(doc.selection().alpha_at(8, 8), 255);
+        assert_eq!(doc.selection().alpha_at(18, 18), 0);
+
+        // Undo restores layer offset, pixels, mask, and original selection
+        let rev_after_tr = doc.selection_revision;
+        assert!(doc.undo().unwrap());
+        assert!(doc.selection_revision > rev_after_tr);
+        assert_eq!(doc.selection().bounds, Some([14, 14, 8, 8]));
+        assert_eq!(doc.stack().active_layer().offset_x, 10);
+        assert_eq!(doc.stack().active_layer().dimensions(), (20, 20));
+        assert_eq!(
+            doc.stack().active_layer().pixels.get_pixel(8, 8).0,
+            [200, 40, 30, 255]
+        );
+
+        // Redo re-applies selection transform cleanly
+        assert!(doc.redo().unwrap());
+        assert_eq!(doc.selection().bounds, Some([4, 4, 8, 8]));
+        assert_eq!(doc.stack().active_layer().dimensions(), (26, 26));
+
+        // 2. Feathered selection + scale/rotate + fractional edge RGB preservation
+        let solid = RgbaImage::from_pixel(32, 32, Rgba([100, 150, 200, 255]));
+        let mut fdoc = EditorDocument::from_rgba(PathBuf::from("feather.png"), solid);
+        let mut feather_mask = vec![0u8; 32 * 32];
+        for y in 8..24 {
+            for x in 8..24 {
+                let edge = x == 8 || x == 23 || y == 8 || y == 23;
+                feather_mask[y * 32 + x] = if edge { 128 } else { 255 };
+            }
+        }
+        fdoc.stack
+            .selection
+            .combine(&feather_mask, SelectionBooleanOp::Replace);
+        fdoc.apply(EditOp::TransformLayer {
+            layer_id: None,
+            transform: LayerTransformSpec {
+                translate_x: 4.5,
+                translate_y: 2.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+                rotation_deg: 0.0,
+                ..LayerTransformSpec::default()
+            },
+        })
+        .unwrap();
+        // Color channels of moved interior pixel must stay [100, 150, 200] without bicubic overshoot
+        let moved_px = fdoc.working_pixels().get_pixel(16, 14).0;
+        assert_eq!(moved_px[3], 255);
+        assert!((i16::from(moved_px[0]) - 100).abs() <= 1);
+        assert!((i16::from(moved_px[1]) - 150).abs() <= 1);
+        assert!((i16::from(moved_px[2]) - 200).abs() <= 1);
     }
 }

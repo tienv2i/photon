@@ -4,8 +4,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BatchState, Language, LayerSummary, LayoutState, PluginInfo, Theme, TranslateSettings,
-    TranslationResult, UiText, Workspace, default_one_f32,
+    AiModelStatus, AiQuickAction, AiSettings, AiTaskState, BatchState, Language, LayerSummary,
+    LayoutState, PluginInfo, SavedTranslation, Theme, TranslateSettings, TranslationResult, UiText,
+    Workspace, default_one_f32,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -76,6 +77,8 @@ impl Default for ColorAdjustments {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EditorState {
+    #[serde(default)]
+    pub id: u64,
     pub path: String,
     pub name: String,
     pub width: u32,
@@ -102,6 +105,19 @@ pub struct EditorState {
     pub adjustments: ColorAdjustments,
     #[serde(default)]
     pub selection: EditorSelectionSummary,
+}
+
+/// Compact summary of one open Editor document tab published in `UiStateMeta`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorTabSummary {
+    pub id: u64,
+    pub path: String,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub modified: bool,
+    pub active: bool,
 }
 
 /// Summary of the Editor's active pixel selection mask.
@@ -152,11 +168,19 @@ pub struct UiStateMeta {
     pub selection_info: Option<SelectionInfo>,
     pub layout: LayoutState,
     pub remember_last_folder: bool,
+    #[serde(default = "crate::default_true")]
+    pub save_ui_state_on_exit: bool,
     pub hardware_acceleration: bool,
     pub viewer_index: Option<usize>,
     pub viewer_path: Option<String>,
     pub viewer_count: usize,
     pub editor: Option<EditorState>,
+    #[serde(default)]
+    pub editor_tabs: Vec<EditorTabSummary>,
+    #[serde(default)]
+    pub active_editor_tab_id: Option<u64>,
+    #[serde(default)]
+    pub focus_request_seq: u64,
     pub status: UiText,
     pub safe_mode: bool,
     pub active_tasks: Vec<TaskSnapshot>,
@@ -167,9 +191,21 @@ pub struct UiStateMeta {
     #[serde(default)]
     pub translation: Option<TranslationResult>,
     #[serde(default)]
+    pub viewer_saved_translation: Option<SavedTranslation>,
+    #[serde(default)]
     pub translate_settings: TranslateSettings,
     #[serde(default)]
     pub plugins: Vec<PluginInfo>,
+    #[serde(default)]
+    pub ai_settings: AiSettings,
+    #[serde(default)]
+    pub ai_models: Vec<AiModelStatus>,
+    #[serde(default)]
+    pub quick_actions: Vec<AiQuickAction>,
+    #[serde(default)]
+    pub ai_task: Option<AiTaskState>,
+    #[serde(default)]
+    pub editor_caption: Option<String>,
     #[serde(default)]
     pub has_pixel_clipboard: bool,
 }

@@ -26,9 +26,11 @@ pub struct DraggablePanelHeaderSpec<M> {
     pub compact_tabs: bool,
     pub collapsed: bool,
     pub dragging: bool,
+    pub options_active: bool,
     pub drop_indicator: DropIndicator,
     pub drag_tooltip: Option<String>,
     pub swap_tooltip: Option<String>,
+    pub options_tooltip: Option<String>,
     pub collapse_tooltip: Option<String>,
     pub close_tooltip: Option<String>,
     pub on_toggle_collapse: Option<M>,
@@ -36,6 +38,7 @@ pub struct DraggablePanelHeaderSpec<M> {
     pub on_drag_hover: Option<M>,
     pub on_drag_end: Option<M>,
     pub on_swap: Option<M>,
+    pub on_options: Option<M>,
     pub on_close: Option<M>,
 }
 
@@ -49,9 +52,11 @@ impl<M> Default for DraggablePanelHeaderSpec<M> {
             compact_tabs: false,
             collapsed: false,
             dragging: false,
+            options_active: false,
             drop_indicator: DropIndicator::None,
             drag_tooltip: None,
             swap_tooltip: None,
+            options_tooltip: None,
             collapse_tooltip: None,
             close_tooltip: None,
             on_toggle_collapse: None,
@@ -59,6 +64,7 @@ impl<M> Default for DraggablePanelHeaderSpec<M> {
             on_drag_hover: None,
             on_drag_end: None,
             on_swap: None,
+            on_options: None,
             on_close: None,
         }
     }
@@ -126,6 +132,16 @@ impl<M> DraggablePanelHeaderSpec<M> {
         self
     }
 
+    pub fn options_active(mut self, active: bool) -> Self {
+        self.options_active = active;
+        self
+    }
+
+    pub fn options_tooltip(mut self, tooltip: impl Into<String>) -> Self {
+        self.options_tooltip = Some(tooltip.into());
+        self
+    }
+
     pub fn collapse_tooltip(mut self, tooltip: impl Into<String>) -> Self {
         self.collapse_tooltip = Some(tooltip.into());
         self
@@ -158,6 +174,11 @@ impl<M> DraggablePanelHeaderSpec<M> {
 
     pub fn on_swap(mut self, msg: Option<M>) -> Self {
         self.on_swap = msg;
+        self
+    }
+
+    pub fn on_options(mut self, msg: Option<M>) -> Self {
+        self.on_options = msg;
         self
     }
 
@@ -243,6 +264,20 @@ pub fn draggable_panel_header<'a, M: Clone + 'a>(
         header_row = header_row.push(with_optional_tooltip(
             swap_btn,
             spec.swap_tooltip,
+            TooltipPosition::Left,
+        ));
+    }
+
+    if let Some(options_msg) = spec.on_options {
+        let variant = if spec.options_active {
+            ButtonVariant::Tab { active: true }
+        } else {
+            ButtonVariant::Ghost
+        };
+        let options_btn = ui_button::compact_icon(Icon::Sliders, variant, Some(options_msg));
+        header_row = header_row.push(with_optional_tooltip(
+            options_btn,
+            spec.options_tooltip,
             TooltipPosition::Left,
         ));
     }

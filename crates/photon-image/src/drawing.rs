@@ -622,6 +622,324 @@ const BAYER_4X4: [[f32; 4]; 4] = [
     ],
 ];
 
+/// Color/alpha stop in `[0.0, 1.0]` along a gradient ramp.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientStopSpec {
+    pub pos: f64,
+    pub color: [u8; 3],
+    pub alpha: f64,
+}
+
+/// Krita-style gradient geometry shape.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GradientShapeSpec {
+    #[default]
+    Linear,
+    Bilinear,
+    Radial,
+    Square,
+    Conical,
+    Spiral,
+}
+
+impl From<GradientKind> for GradientShapeSpec {
+    fn from(kind: GradientKind) -> Self {
+        match kind {
+            GradientKind::Linear => Self::Linear,
+            GradientKind::Bilinear | GradientKind::Reflected => Self::Bilinear,
+            GradientKind::Radial => Self::Radial,
+            GradientKind::Square => Self::Square,
+            GradientKind::Conical => Self::Conical,
+            GradientKind::Spiral => Self::Spiral,
+        }
+    }
+}
+
+/// Repeat policy outside `[0.0, 1.0]` for gradients.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GradientRepeatSpec {
+    #[default]
+    None,
+    Forwards,
+    Alternating,
+}
+
+/// Blend mode applied when compositing a gradient over `src`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GradientBlendMode {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    Difference,
+}
+
+impl GradientBlendMode {
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "multiply" => Self::Multiply,
+            "screen" => Self::Screen,
+            "overlay" => Self::Overlay,
+            "darken" => Self::Darken,
+            "lighten" => Self::Lighten,
+            "difference" => Self::Difference,
+            _ => Self::Normal,
+        }
+    }
+}
+
+/// Krita-style multi-stop gradient fill (`Linear`, `Bilinear`, `Radial`, `Square`,
+/// `Conical`, `Spiral`) with repeat policy (`None`, `Forwards`, `Alternating`),
+/// 4×4 Bayer ordered dithering, 7 blend modes, and optional `SelectionMask` clipping.
+#[allow(clippy::too_many_arguments)]
+pub fn render_gradient(
+    src: &RgbaImage,
+    start: [f64; 2],
+    end: [f64; 2],
+    start_color: [u8; 3],
+    start_alpha: f64,
+    end_color: [u8; 3],
+    end_alpha: f64,
+    stops: &[GradientStopSpec],
+    opacity: f64,
+    shape: GradientShapeSpec,
+    repeat: GradientRepeatSpec,
+    reverse: bool,
+    dither: bool,
+    blend_mode: GradientBlendMode,
+    selection: Option<(&SelectionMask, i32, i32)>,
+) -> RgbaImage {
+    let mut out = src.clone();
+    let (w, h) = out.dimensions();
+    let op = opacity.clamp(0.0, 1.0) as f32;
+    if w == 0 || h == 0 || op <= 0.0 {
+        return out;
+    }
+    let dx = end[0] - start[0];
+    let dy = end[1] - start[1];
+    let len_sq = dx * dx + dy * dy;
+    let len = len_sq.sqrt();
+    if len < 1e-6 {
+        return out;
+    }
+    let base_angle = dy.atan2(dx);
+    let ux = dx / len;
+    let uy = dy / len;
+    let active_sel = selection.filter(|(sel, _, _)| sel.has_selection());
+
+    let mut ramp: Vec<(f32, [u8; 3], f32)> = if stops.len() >= 2 {
+        stops
+            .iter()
+            .map(|s| {
+                (
+                    s.pos.clamp(0.0, 1.0) as f32,
+                    s.color,
+                    s.alpha.clamp(0.0, 1.0) as f32,
+                )
+            })
+            .collect()
+    } else {
+        vec![
+            (0.0, start_color, start_alpha.clamp(0.0, 1.0) as f32),
+            (1.0, end_color, end_alpha.clamp(0.0, 1.0) as f32),
+        ]
+    };
+    ramp.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let sample_ramp = |t_in: f32| -> ([f32; 3], f32) {
+        let t = if reverse { 1.0 - t_in } else { t_in }.clamp(0.0, 1.0);
+        if t <= ramp[0].0 {
+            let c = ramp[0].1;
+            return (
+                [f32::from(c[0]), f32::from(c[1]), f32::from(c[2])],
+                ramp[0].2,
+            );
+        }
+        let last = ramp.len() - 1;
+        if t >= ramp[last].0 {
+            let c = ramp[last].1;
+            return (
+                [f32::from(c[0]), f32::from(c[1]), f32::from(c[2])],
+                ramp[last].2,
+            );
+        }
+        for i in 0..last {
+            let (p0, c0, a0) = ramp[i];
+            let (p1, c1, a1) = ramp[i + 1];
+            if t >= p0 && t <= p1 {
+                let span = (p1 - p0).max(1e-6);
+                let f = ((t - p0) / span).clamp(0.0, 1.0);
+                let inv = 1.0 - f;
+                let a = a0 * inv + a1 * f;
+                let denom = a.max(1e-5);
+                let r = (f32::from(c0[0]) * a0 * inv + f32::from(c1[0]) * a1 * f) / denom;
+                let g = (f32::from(c0[1]) * a0 * inv + f32::from(c1[1]) * a1 * f) / denom;
+                let b = (f32::from(c0[2]) * a0 * inv + f32::from(c1[2]) * a1 * f) / denom;
+                return ([r, g, b], a);
+            }
+        }
+        let c = ramp[last].1;
+        (
+            [f32::from(c[0]), f32::from(c[1]), f32::from(c[2])],
+            ramp[last].2,
+        )
+    };
+
+    for py in 0..h {
+        let vy = f64::from(py) + 0.5 - start[1];
+        let bayer_row = &BAYER_4X4[(py & 3) as usize];
+        for px in 0..w {
+            let sel_w = active_sel
+                .map(|(sel, ox, oy)| sel.clip_factor(ox + px as i32, oy + py as i32))
+                .unwrap_or(1.0);
+            if sel_w <= 0.0 {
+                continue;
+            }
+            let vx = f64::from(px) + 0.5 - start[0];
+            let raw_t = match shape {
+                GradientShapeSpec::Linear => (vx * dx + vy * dy) / len_sq,
+                GradientShapeSpec::Bilinear => ((vx * dx + vy * dy) / len_sq).abs(),
+                GradientShapeSpec::Radial => vx.hypot(vy) / len,
+                GradientShapeSpec::Square => {
+                    let rx = (vx * ux + vy * uy).abs();
+                    let ry = (-vx * uy + vy * ux).abs();
+                    rx.max(ry) / len
+                }
+                GradientShapeSpec::Conical => {
+                    let a = (vy.atan2(vx) - base_angle).rem_euclid(TAU);
+                    a / TAU
+                }
+                GradientShapeSpec::Spiral => {
+                    let dist = vx.hypot(vy) / len;
+                    let a = (vy.atan2(vx) - base_angle).rem_euclid(TAU) / TAU;
+                    (dist + a).rem_euclid(1.0)
+                }
+            };
+            let t = match repeat {
+                GradientRepeatSpec::None => raw_t.clamp(0.0, 1.0),
+                GradientRepeatSpec::Forwards => raw_t.rem_euclid(1.0),
+                GradientRepeatSpec::Alternating => {
+                    let m = raw_t.rem_euclid(2.0);
+                    if m <= 1.0 { m } else { 2.0 - m }
+                }
+            } as f32;
+
+            let ([rf, gf, bf], ramp_a) = sample_ramp(t);
+            let sa = (ramp_a * op * sel_w).clamp(0.0, 1.0);
+            if sa <= 1e-5 {
+                continue;
+            }
+            let d = if dither {
+                bayer_row[(px & 3) as usize]
+            } else {
+                0.0
+            };
+            let sr = (rf + d).round().clamp(0.0, 255.0) as u8;
+            let sg = (gf + d).round().clamp(0.0, 255.0) as u8;
+            let sb = (bf + d).round().clamp(0.0, 255.0) as u8;
+
+            if blend_mode == GradientBlendMode::Normal {
+                blend_source_over_pixel(out.get_pixel_mut(px, py), [sr, sg, sb], sa);
+            } else {
+                let pixel = out.get_pixel_mut(px, py);
+                let dst = pixel.0;
+                let da = f32::from(dst[3]) / 255.0;
+                let out_a = sa + da * (1.0 - sa);
+                if out_a <= 1e-5 {
+                    pixel.0 = [0, 0, 0, 0];
+                    continue;
+                }
+                let blend_ch = |sc_u: u8, dc_u: u8| -> u8 {
+                    let sc = f32::from(sc_u) / 255.0;
+                    let dc = f32::from(dc_u) / 255.0;
+                    let b = match blend_mode {
+                        GradientBlendMode::Normal => sc,
+                        GradientBlendMode::Multiply => dc * sc,
+                        GradientBlendMode::Screen => 1.0 - (1.0 - dc) * (1.0 - sc),
+                        GradientBlendMode::Overlay => {
+                            if dc < 0.5 {
+                                2.0 * dc * sc
+                            } else {
+                                1.0 - 2.0 * (1.0 - dc) * (1.0 - sc)
+                            }
+                        }
+                        GradientBlendMode::Darken => dc.min(sc),
+                        GradientBlendMode::Lighten => dc.max(sc),
+                        GradientBlendMode::Difference => (dc - sc).abs(),
+                    };
+                    let eff = (1.0 - da) * sc + da * b;
+                    ((sa * eff + (1.0 - sa) * da * dc) / out_a * 255.0)
+                        .round()
+                        .clamp(0.0, 255.0) as u8
+                };
+                pixel.0 = [
+                    blend_ch(sr, dst[0]),
+                    blend_ch(sg, dst[1]),
+                    blend_ch(sb, dst[2]),
+                    (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
+                ];
+            }
+        }
+    }
+    out
+}
+
+/// Render a luminance-converted multi-stop gradient onto a single-channel layer mask.
+#[allow(clippy::too_many_arguments)]
+pub fn render_gradient_on_mask(
+    mask: &[u8],
+    width: u32,
+    height: u32,
+    start: [f64; 2],
+    end: [f64; 2],
+    start_color: [u8; 3],
+    start_alpha: f64,
+    end_color: [u8; 3],
+    end_alpha: f64,
+    stops: &[GradientStopSpec],
+    opacity: f64,
+    shape: GradientShapeSpec,
+    repeat: GradientRepeatSpec,
+    reverse: bool,
+    dither: bool,
+    selection: Option<(&SelectionMask, i32, i32)>,
+) -> Vec<u8> {
+    let to_gray = |c: [u8; 3]| -> [u8; 3] {
+        let g = rgb_luminance(c);
+        [g, g, g]
+    };
+    let gray_stops: Vec<GradientStopSpec> = stops
+        .iter()
+        .map(|s| GradientStopSpec {
+            pos: s.pos,
+            color: to_gray(s.color),
+            alpha: s.alpha,
+        })
+        .collect();
+    let mask_img = mask_to_rgba(mask, width, height);
+    let rendered = render_gradient(
+        &mask_img,
+        start,
+        end,
+        to_gray(start_color),
+        start_alpha,
+        to_gray(end_color),
+        end_alpha,
+        &gray_stops,
+        opacity,
+        shape,
+        repeat,
+        reverse,
+        dither,
+        GradientBlendMode::Normal,
+        selection,
+    );
+    rgba_to_mask(&rendered)
+}
+
 /// Render a gradient (`Linear`, `Radial`, `Conical`, `Reflected`) onto `src`.
 /// Supports `reverse`, ordered 4×4 Bayer `dither`, and optional `SelectionMask` clipping.
 #[allow(clippy::too_many_arguments)]
@@ -638,79 +956,27 @@ pub fn draw_gradient(
     dither: bool,
     selection: Option<(&SelectionMask, i32, i32)>,
 ) -> RgbaImage {
-    let (w, h) = src.dimensions();
-    if w == 0 || h == 0 || opacity <= 0.0 {
-        return src.clone();
-    }
-    let dx = f64::from(end[0] - start[0]);
-    let dy = f64::from(end[1] - start[1]);
-    let len_sq = dx * dx + dy * dy;
-    let len = len_sq.sqrt();
-    if len < 1e-6 {
-        return src.clone();
-    }
-    let base_angle = dy.atan2(dx);
-    let sx = f64::from(start[0]);
-    let sy = f64::from(start[1]);
-    let alpha_scale = opacity.clamp(0.0, 1.0);
-    let active_sel = selection.filter(|(sel, _, _)| sel.has_selection());
-
-    let mut out = src.clone();
-    for py in 0..h {
-        let vy = f64::from(py) + 0.5 - sy;
-        let bayer_row = &BAYER_4X4[(py & 3) as usize];
-        for px in 0..w {
-            let sel_w = active_sel
-                .map(|(sel, ox, oy)| sel.clip_factor(ox + px as i32, oy + py as i32))
-                .unwrap_or(1.0);
-            if sel_w <= 0.0 {
-                continue;
-            }
-            let vx = f64::from(px) + 0.5 - sx;
-            let raw_t = match kind {
-                GradientKind::Linear => ((vx * dx + vy * dy) / len_sq).clamp(0.0, 1.0),
-                GradientKind::Radial => (vx.hypot(vy) / len).clamp(0.0, 1.0),
-                GradientKind::Conical => {
-                    let ang = vy.atan2(vx);
-                    ((ang - base_angle).rem_euclid(TAU) / TAU).clamp(0.0, 1.0)
-                }
-                GradientKind::Reflected => ((vx * dx + vy * dy) / len_sq).abs().clamp(0.0, 1.0),
-            } as f32;
-            let t = if reverse { 1.0 - raw_t } else { raw_t };
-            let dither_bias = if dither {
-                bayer_row[(px & 3) as usize]
-            } else {
-                0.0
-            };
-
-            let (rgb, a) = match color_mode {
-                GradientColorMode::FgToBg => {
-                    let lerp = |a: u8, b: u8| -> u8 {
-                        (f32::from(a) + (f32::from(b) - f32::from(a)) * t + dither_bias)
-                            .round()
-                            .clamp(0.0, 255.0) as u8
-                    };
-                    (
-                        [
-                            lerp(fg_color[0], bg_color[0]),
-                            lerp(fg_color[1], bg_color[1]),
-                            lerp(fg_color[2], bg_color[2]),
-                        ],
-                        alpha_scale * sel_w,
-                    )
-                }
-                GradientColorMode::FgToTransparent => {
-                    let a_dither = (alpha_scale * (1.0 - t) + dither_bias / 255.0).clamp(0.0, 1.0);
-                    (fg_color, a_dither * sel_w)
-                }
-            };
-            if a > 0.0 {
-                let pixel = out.get_pixel_mut(px, py);
-                blend_source_over_pixel(pixel, rgb, a);
-            }
-        }
-    }
-    out
+    let (end_color, end_alpha) = match color_mode {
+        GradientColorMode::FgToBg | GradientColorMode::Custom => (bg_color, 1.0),
+        GradientColorMode::FgToTransparent => (fg_color, 0.0),
+    };
+    render_gradient(
+        src,
+        [f64::from(start[0]), f64::from(start[1])],
+        [f64::from(end[0]), f64::from(end[1])],
+        fg_color,
+        1.0,
+        end_color,
+        end_alpha,
+        &[],
+        f64::from(opacity),
+        GradientShapeSpec::from(kind),
+        GradientRepeatSpec::None,
+        reverse,
+        dither,
+        GradientBlendMode::Normal,
+        selection,
+    )
 }
 
 /// Convert RGB to grayscale luminance for mask operations.
@@ -980,5 +1246,179 @@ mod tests {
         assert_eq!(out.get_pixel(28, 8).0, [10, 10, 10, 255]);
         // Inside selection painted
         assert!(out.get_pixel(16, 8).0[0] >= 200);
+    }
+
+    #[test]
+    fn multistop_shapes_repeat_blend_modes_and_mask_render() {
+        let base = RgbaImage::from_pixel(32, 32, Rgba([100, 100, 100, 255]));
+        let stops = [
+            GradientStopSpec {
+                pos: 1.0,
+                color: [0, 0, 255],
+                alpha: 1.0,
+            },
+            GradientStopSpec {
+                pos: 0.0,
+                color: [255, 0, 0],
+                alpha: 1.0,
+            },
+            GradientStopSpec {
+                pos: 0.5,
+                color: [0, 255, 0],
+                alpha: 1.0,
+            },
+        ];
+
+        // 1. Multi-stop linear (unsorted input stops sorted internally)
+        let lin = render_gradient(
+            &base,
+            [0.0, 16.0],
+            [32.0, 16.0],
+            [0, 0, 0],
+            1.0,
+            [0, 0, 0],
+            1.0,
+            &stops,
+            1.0,
+            GradientShapeSpec::Linear,
+            GradientRepeatSpec::None,
+            false,
+            false,
+            GradientBlendMode::Normal,
+            None,
+        );
+        assert!(lin.get_pixel(0, 16).0[0] > 230);
+        assert!(lin.get_pixel(16, 16).0[1] > 230);
+        assert!(lin.get_pixel(31, 16).0[2] > 230);
+
+        // 2. Square & Spiral & Bilinear shapes
+        let sq = render_gradient(
+            &base,
+            [16.0, 16.0],
+            [24.0, 16.0],
+            [255, 255, 255],
+            1.0,
+            [0, 0, 0],
+            1.0,
+            &[],
+            1.0,
+            GradientShapeSpec::Square,
+            GradientRepeatSpec::None,
+            false,
+            false,
+            GradientBlendMode::Normal,
+            None,
+        );
+        // Corners at equal Chebyshev distance (8 px from center) should match axis at 8 px
+        assert_eq!(sq.get_pixel(24, 24).0, sq.get_pixel(24, 16).0);
+
+        let sp = render_gradient(
+            &base,
+            [16.0, 16.0],
+            [24.0, 16.0],
+            [255, 0, 0],
+            1.0,
+            [0, 0, 255],
+            1.0,
+            &[],
+            1.0,
+            GradientShapeSpec::Spiral,
+            GradientRepeatSpec::Forwards,
+            false,
+            false,
+            GradientBlendMode::Normal,
+            None,
+        );
+        assert_ne!(sp.get_pixel(18, 12).0, sp.get_pixel(22, 20).0);
+
+        let bi = render_gradient(
+            &base,
+            [16.0, 16.0],
+            [24.0, 16.0],
+            [255, 0, 0],
+            1.0,
+            [0, 0, 255],
+            1.0,
+            &[],
+            1.0,
+            GradientShapeSpec::Bilinear,
+            GradientRepeatSpec::Alternating,
+            false,
+            false,
+            GradientBlendMode::Normal,
+            None,
+        );
+        // Bilinear is symmetric around start x=16 (pixel centers 11.5 and 20.5 are equidistant)
+        assert_eq!(bi.get_pixel(11, 16).0, bi.get_pixel(20, 16).0);
+        assert!(bi.get_pixel(31, 16).0[0] > bi.get_pixel(24, 16).0[0]);
+
+        // 3. Blend modes (Multiply darkens 100 with 128 -> ~50; Difference |100-200|=100)
+        let mul = render_gradient(
+            &base,
+            [0.0, 0.0],
+            [32.0, 0.0],
+            [128, 128, 128],
+            1.0,
+            [128, 128, 128],
+            1.0,
+            &[],
+            1.0,
+            GradientShapeSpec::Linear,
+            GradientRepeatSpec::None,
+            false,
+            false,
+            GradientBlendMode::Multiply,
+            None,
+        );
+        assert!((48..=53).contains(&mul.get_pixel(16, 16).0[0]));
+
+        let diff = render_gradient(
+            &base,
+            [0.0, 0.0],
+            [32.0, 0.0],
+            [200, 200, 200],
+            1.0,
+            [200, 200, 200],
+            1.0,
+            &[],
+            1.0,
+            GradientShapeSpec::Linear,
+            GradientRepeatSpec::None,
+            false,
+            false,
+            GradientBlendMode::Difference,
+            None,
+        );
+        assert!((98..=102).contains(&diff.get_pixel(16, 16).0[0]));
+
+        // 4. Mask luminance rendering + selection clipping
+        let mut sel = SelectionMask::empty(16, 16);
+        let sel_mask: Vec<u8> = (0..16 * 16)
+            .map(|i| if (i % 16) >= 8 { 255 } else { 0 })
+            .collect();
+        sel.combine(&sel_mask, SelectionBooleanOp::Replace);
+        let init_mask = vec![255u8; 16 * 16];
+        let next_mask = render_gradient_on_mask(
+            &init_mask,
+            16,
+            16,
+            [0.0, 8.0],
+            [16.0, 8.0],
+            [0, 0, 0],
+            1.0,
+            [255, 255, 255],
+            1.0,
+            &[],
+            1.0,
+            GradientShapeSpec::Linear,
+            GradientRepeatSpec::None,
+            false,
+            false,
+            Some((&sel, 0, 0)),
+        );
+        // Left half untouched (255), right half transitions toward 255 from ~128
+        assert_eq!(next_mask[8 * 16 + 2], 255);
+        assert!(next_mask[8 * 16 + 9] < 200);
+        assert!(next_mask[8 * 16 + 15] > 230);
     }
 }

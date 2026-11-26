@@ -16,6 +16,7 @@ pub struct ViewerUiPresentation {
     pub filmstrip_open: bool,
     pub is_fullscreen: bool,
     pub color_popover_open: bool,
+    pub translate_open: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -30,6 +31,8 @@ pub fn build_ui_tree(
     viewer_ui: &ViewerUiPresentation,
     editor_ui: &EditorUiState,
     context_menu: Option<&ActiveContextMenu>,
+    settings_open: bool,
+    settings_tab: &str,
 ) -> UiTreeSnapshot {
     let lang = snapshot.meta.language;
     let ws = snapshot.meta.workspace;
@@ -53,9 +56,38 @@ pub fn build_ui_tree(
             enabled: true,
             visible: true,
             bounds: None,
-            value: None,
+            value: Some(settings_open.to_string()),
+        },
+        SemanticWidgetNode {
+            id: "settings.dialog".to_owned(),
+            role: "dialog".to_owned(),
+            label: tr(lang, "settings-title"),
+            workspace: ws,
+            enabled: settings_open,
+            visible: settings_open,
+            bounds: None,
+            value: settings_open.then(|| settings_tab.to_owned()),
         },
     ];
+
+    for (tab_key, label_key) in [
+        ("general", "settings-tab-general"),
+        ("viewer", "settings-tab-viewer"),
+        ("quick_access", "settings-tab-quick-access"),
+        ("plugins", "settings-tab-plugins"),
+        ("translate", "settings-tab-translate"),
+    ] {
+        widgets.push(SemanticWidgetNode {
+            id: format!("settings.tab.{tab_key}"),
+            role: "tab".to_owned(),
+            label: tr(lang, label_key),
+            workspace: ws,
+            enabled: settings_open,
+            visible: settings_open,
+            bounds: None,
+            value: Some((settings_open && settings_tab == tab_key).to_string()),
+        });
+    }
 
     if ws != Workspace::Browser {
         widgets.push(SemanticWidgetNode {
@@ -774,6 +806,30 @@ pub fn build_ui_tree(
                     viewer_ui.color_popover_open,
                     None,
                 ),
+                (
+                    "viewer.translate.toggle",
+                    "toggle",
+                    "menu-viewer-read-translate",
+                    has_img,
+                    true,
+                    Some(viewer_ui.translate_open.to_string()),
+                ),
+                (
+                    "viewer.translate.scan",
+                    "button",
+                    "translate-scan-page",
+                    viewer_ui.translate_open && has_img,
+                    viewer_ui.translate_open,
+                    None,
+                ),
+                (
+                    "viewer.translate.settings",
+                    "button",
+                    "action-translate-settings",
+                    viewer_ui.translate_open,
+                    viewer_ui.translate_open,
+                    None,
+                ),
             ] {
                 widgets.push(SemanticWidgetNode {
                     id: id.to_owned(),
@@ -805,6 +861,56 @@ pub fn build_ui_tree(
                 visible: true,
                 bounds: None,
                 value: ed.map(|e| e.name.clone()),
+            });
+
+            let tabs = &snapshot.meta.editor_tabs;
+            let active_tab_id = snapshot.meta.active_editor_tab_id;
+            widgets.push(SemanticWidgetNode {
+                id: "editor.tab_bar".to_owned(),
+                role: "tablist".to_owned(),
+                label: tr(lang, "workspace-editor"),
+                workspace: ws,
+                enabled: !tabs.is_empty(),
+                visible: !tabs.is_empty(),
+                bounds: None,
+                value: active_tab_id.map(|id| id.to_string()),
+            });
+            for (idx, tab) in tabs.iter().enumerate() {
+                widgets.push(SemanticWidgetNode {
+                    id: format!("editor.tab.{idx}"),
+                    role: "tab".to_owned(),
+                    label: tab.name.clone(),
+                    workspace: ws,
+                    enabled: true,
+                    visible: true,
+                    bounds: None,
+                    value: Some(format!(
+                        "id={} active={} modified={}",
+                        tab.id,
+                        active_tab_id == Some(tab.id),
+                        tab.modified
+                    )),
+                });
+                widgets.push(SemanticWidgetNode {
+                    id: format!("editor.tab.{idx}.close"),
+                    role: "button".to_owned(),
+                    label: tr(lang, "tooltip-editor-close-tab"),
+                    workspace: ws,
+                    enabled: true,
+                    visible: true,
+                    bounds: None,
+                    value: Some(tab.id.to_string()),
+                });
+            }
+            widgets.push(SemanticWidgetNode {
+                id: "editor.tab.new".to_owned(),
+                role: "button".to_owned(),
+                label: tr(lang, "tooltip-editor-new-tab"),
+                workspace: ws,
+                enabled: true,
+                visible: !tabs.is_empty(),
+                bounds: None,
+                value: None,
             });
 
             for (id, label_key, tool) in [
@@ -867,11 +973,6 @@ pub fn build_ui_tree(
                 ),
                 ("editor.tool.crop", "tool-crop", EditorTool::Crop),
                 (
-                    "editor.tool.canvas_size",
-                    "tool-canvas-size",
-                    EditorTool::CanvasSize,
-                ),
-                (
                     "editor.tool.rotate_angle",
                     "tool-rotate-angle",
                     EditorTool::RotateAngle,
@@ -925,6 +1026,21 @@ pub fn build_ui_tree(
                     "editor.tool.transform",
                     "tool-transform",
                     EditorTool::Transform,
+                ),
+                (
+                    "editor.tool.remove_bg",
+                    "tool-ai-rembg",
+                    EditorTool::RemoveBg,
+                ),
+                (
+                    "editor.tool.watermark",
+                    "tool-ai-watermark",
+                    EditorTool::Watermark,
+                ),
+                (
+                    "editor.tool.caption",
+                    "tool-ai-caption",
+                    EditorTool::Caption,
                 ),
             ] {
                 widgets.push(SemanticWidgetNode {
@@ -992,7 +1108,17 @@ pub fn build_ui_tree(
             widgets.push(SemanticWidgetNode {
                 id: "editor.resize".to_owned(),
                 role: "button".to_owned(),
-                label: tr(lang, "action-resize"),
+                label: tr(lang, "action-image-size"),
+                workspace: ws,
+                enabled: has_doc,
+                visible: true,
+                bounds: None,
+                value: None,
+            });
+            widgets.push(SemanticWidgetNode {
+                id: "editor.canvas_size".to_owned(),
+                role: "button".to_owned(),
+                label: tr(lang, "action-canvas-size-dialog"),
                 workspace: ws,
                 enabled: has_doc,
                 visible: true,
@@ -1510,8 +1636,8 @@ pub fn build_ui_tree(
                 ("flip_h", "action-flip-h", has_doc),
                 ("flip_v", "action-flip-v", has_doc),
                 ("crop", "action-crop", has_doc),
-                ("resize", "action-resize", has_doc),
-                ("canvas_size", "tool-canvas-size", has_doc),
+                ("resize", "action-image-size", has_doc),
+                ("canvas_size", "action-canvas-size-dialog", has_doc),
                 ("fit", "action-fit", has_doc),
                 ("compare", "action-compare-original", has_doc),
                 (
@@ -1608,6 +1734,29 @@ pub fn build_ui_tree(
                 });
             }
         }
+    }
+
+    if settings_open && settings_tab == "plugins" {
+        widgets.push(SemanticWidgetNode {
+            id: "settings.plugins.device".to_owned(),
+            role: "toggle".to_owned(),
+            label: tr(lang, "settings-plugins-ai-device"),
+            workspace: ws,
+            enabled: true,
+            visible: true,
+            bounds: None,
+            value: Some(snapshot.meta.ai_settings.device.as_str().to_owned()),
+        });
+        widgets.push(SemanticWidgetNode {
+            id: "settings.plugins.refresh".to_owned(),
+            role: "button".to_owned(),
+            label: tr(lang, "action-refresh-plugins"),
+            workspace: ws,
+            enabled: true,
+            visible: true,
+            bounds: None,
+            value: Some(snapshot.meta.plugins.len().to_string()),
+        });
     }
 
     let gpu_adapter = match gpu_backend {

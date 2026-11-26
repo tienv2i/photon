@@ -7,6 +7,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+mod ai;
 mod batch;
 mod command;
 mod editor_types;
@@ -14,6 +15,7 @@ mod layout;
 mod state;
 mod translate;
 
+pub use ai::*;
 pub use batch::*;
 pub use command::*;
 pub use editor_types::*;

@@ -16,6 +16,10 @@ use thiserror::Error;
 
 pub use codec::{decode_rgba, generate_thumbnail, probe_dimensions};
 pub use document::{EditOp, EditorDocument, render_single_op, validate_dimensions};
+pub use drawing::{
+    GradientBlendMode, GradientRepeatSpec, GradientShapeSpec, GradientStopSpec, render_gradient,
+    render_gradient_on_mask,
+};
 pub use healing::healing_stroke;
 pub use layer::{
     Layer, LayerOperation, LayerStack, LayerThumbnail, blend_layer_onto, composite_stack,

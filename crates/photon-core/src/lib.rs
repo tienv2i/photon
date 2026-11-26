@@ -1,6 +1,7 @@
 //! Authoritative Core state machine, Tokio actor command gateway,
 //! event bus, and deterministic sandbox replay engine.
 
+pub mod ai;
 pub mod batch;
 pub mod core;
 pub mod file_ops;

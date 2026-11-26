@@ -594,6 +594,23 @@ pub fn paint_stroke_with_brush(
     erase: bool,
     brush: BrushSettings,
 ) -> RgbaImage {
+    paint_stroke_with_brush_clipped(src, points, color, radius, opacity, erase, brush, None)
+}
+
+/// Paint or erase a freehand stroke supporting all 5 [`BrushTip`] profiles,
+/// optionally clipped to `selection` (`(mask, layer_offset_x, layer_offset_y)`).
+#[allow(clippy::too_many_arguments)]
+pub fn paint_stroke_with_brush_clipped(
+    src: &RgbaImage,
+    points: &[[f64; 2]],
+    color: [u8; 3],
+    radius: f32,
+    opacity: f32,
+    erase: bool,
+    brush: BrushSettings,
+    selection: Option<(&SelectionMask, i32, i32)>,
+) -> RgbaImage {
+    let active_sel = selection.filter(|(s, _, _)| s.has_selection());
     let smoothed = crate::drawing::smooth_stroke_points(
         points,
         brush.smoothing_mode,
@@ -607,7 +624,15 @@ pub fn paint_stroke_with_brush(
     let scatter = f64::from(brush.scatter).clamp(0.0, 2.5);
 
     if brush.tip == BrushTip::Round && hardness >= 0.84 && flow >= 0.99 && scatter <= 0.001 {
-        return paint_smooth_round_stroke(src, points, color, radius, f64::from(opacity), erase);
+        return paint_smooth_round_stroke(
+            src,
+            points,
+            color,
+            radius,
+            f64::from(opacity),
+            erase,
+            active_sel,
+        );
     }
 
     let (width, height) = src.dimensions();
@@ -793,24 +818,34 @@ pub fn paint_stroke_with_brush(
             if amount <= 0.0 {
                 continue;
             }
-            let alpha = (amount * alpha_scale).clamp(0.0, 1.0);
-            if alpha <= 0.0 {
+            let sel_factor = active_sel
+                .map(|(s, ox, oy)| s.clip_factor(ox + x as i32, oy + y as i32))
+                .unwrap_or(1.0);
+            if sel_factor <= 0.0 {
                 continue;
             }
-            let pixel = result.get_pixel_mut(x, y);
-            if erase {
-                let da = f32::from(pixel.0[3]) / 255.0;
-                let out_alpha = da * (1.0 - alpha);
-                pixel.0[3] = (out_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
-                if pixel.0[3] == 0 {
-                    pixel.0 = [0, 0, 0, 0];
-                }
-            } else {
-                blend_source_over_pixel(pixel, color, alpha);
-            }
+            let alpha = (amount * alpha_scale * sel_factor).clamp(0.0, 1.0);
+            apply_paint_coverage_pixel(result.get_pixel_mut(x, y), color, alpha, erase);
         }
     }
     result
+}
+
+#[inline]
+fn apply_paint_coverage_pixel(pixel: &mut Rgba<u8>, color: [u8; 3], alpha: f32, erase: bool) {
+    if alpha <= 0.0 {
+        return;
+    }
+    if erase {
+        let da = f32::from(pixel.0[3]) / 255.0;
+        let out_alpha = da * (1.0 - alpha);
+        pixel.0[3] = (out_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+        if pixel.0[3] == 0 {
+            pixel.0 = [0, 0, 0, 0];
+        }
+    } else {
+        blend_source_over_pixel(pixel, color, alpha);
+    }
 }
 
 fn paint_smooth_round_stroke(
@@ -820,6 +855,7 @@ fn paint_smooth_round_stroke(
     radius: f64,
     opacity: f64,
     erase: bool,
+    active_sel: Option<(&SelectionMask, i32, i32)>,
 ) -> RgbaImage {
     let (width, height) = src.dimensions();
     let mut result = src.clone();
@@ -896,21 +932,14 @@ fn paint_smooth_round_stroke(
             if amount <= 0.0 {
                 continue;
             }
-            let alpha = (amount * alpha_scale).clamp(0.0, 1.0);
-            if alpha <= 0.0 {
+            let sel_factor = active_sel
+                .map(|(s, ox, oy)| s.clip_factor(ox + x as i32, oy + y as i32))
+                .unwrap_or(1.0);
+            if sel_factor <= 0.0 {
                 continue;
             }
-            let pixel = result.get_pixel_mut(x, y);
-            if erase {
-                let da = f32::from(pixel.0[3]) / 255.0;
-                let out_alpha = da * (1.0 - alpha);
-                pixel.0[3] = (out_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
-                if pixel.0[3] == 0 {
-                    pixel.0 = [0, 0, 0, 0];
-                }
-            } else {
-                blend_source_over_pixel(pixel, color, alpha);
-            }
+            let alpha = (amount * alpha_scale * sel_factor).clamp(0.0, 1.0);
+            apply_paint_coverage_pixel(result.get_pixel_mut(x, y), color, alpha, erase);
         }
     }
     result
@@ -1329,15 +1358,15 @@ fn sample_bicubic_premultiplied(src: &RgbaImage, sx: f64, sy: f64) -> [u8; 4] {
         }
     }
 
-    let out_a = pa.clamp(0.0, 1.0);
-    if out_a <= 1e-6 {
+    if pa <= 1e-6 {
         return [0, 0, 0, 0];
     }
-    let inv_a = out_a.recip();
+    let inv_pa = pa.recip();
+    let out_a = pa.min(1.0);
     [
-        (pr * inv_a).round().clamp(0.0, 255.0) as u8,
-        (pg * inv_a).round().clamp(0.0, 255.0) as u8,
-        (pb * inv_a).round().clamp(0.0, 255.0) as u8,
+        (pr * inv_pa).round().clamp(0.0, 255.0) as u8,
+        (pg * inv_pa).round().clamp(0.0, 255.0) as u8,
+        (pb * inv_pa).round().clamp(0.0, 255.0) as u8,
         (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
     ]
 }

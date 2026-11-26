@@ -23,4 +23,6 @@ pub use splitter::{
     PanelSplitter, PanelSplitterEdge, panel_splitter, split_portions, stacked_panel_heights,
     vertical_panel_splitter,
 };
-pub use tabs::{PanelTabItem, inline_panel_tab_bar, panel_tab_bar};
+pub use tabs::{
+    DocumentTabItem, PanelTabItem, document_tab_bar, inline_panel_tab_bar, panel_tab_bar,
+};

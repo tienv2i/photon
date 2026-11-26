@@ -36,7 +36,10 @@ Instead of 3 disconnected binaries (which break GPU texture sharing and cross-wo
 - **3 Workspaces** (`Browser`, `Viewer`, `Editor`) switchable instantly in-window with zero re-decode.
 - **Multi-window (`iced::daemon`)**: extra windows can be opened (`--new-window` or UI action) sharing the same `CoreRuntime` and `wgpu` caches.
 - **Headless mode (`photon --headless`)**: runs `CoreRuntime` + `photon-ipc` (including `PluginRun`, batch ops, and `.ora`/codec pipelines) without opening any window or GPU surface for automation, CI, and CLI control.
-- **Single-instance forwarding**: launching `photon <path>` when an instance is already listening on `control.sock` forwards `OpenFiles` / `OpenFolder` / `EditorOpen` over IPC and exits `0`.
+- **Single-instance & Independent Viewer coordination**:
+  - Launching Browser/Editor (`photon`, `photon browse`, `photon edit`, `photon <dir>`) when a main instance is listening on `control.sock` forwards the command + `FocusWindow` over IPC and exits `0`.
+  - Launching Viewer (`photon view <file>`, `photon <file>`, Browser open, or Viewer "Open in New Window") checks `$XDG_RUNTIME_DIR/photon[-dev]/viewers/` (`v-<pid>.json`, `v-<pid>.sock`, `CanonicalPathLock`). If a live Viewer already holds that canonical path, it sends `FocusWindow` to raise that window; otherwise it spawns an independent `StandaloneViewer` (`Core::new_viewer_ephemeral`) so Viewer windows are isolated from each other and the main app.
+- **Separated Settings vs UI State**: Settings persist in `config.json` (`theme`, `language`, `remember_last_folder`, `save_ui_state_on_exit`, `hardware_acceleration`, `favorites`, `plugins`, `ai`, `translate`, and Settings-level defaults), while runtime UI state persists in `ui_state.json` (`last_folder`, window bounds/maximized, panel visibility/order/splits, `viewer_viewport_background`, sort/view modes), flushed on exit (when `save_ui_state_on_exit` or `Ctrl` force-save), `Ctrl+,`, `ResetConfig`, or `photonctl reset`.
 
 ## GPU & Large-Image Pipeline (`iced 0.14` + `wgpu 27`)
 - **Renderer Selection**: At startup (`crates/photon-desktop/src/main.rs`), `core.config.hardware_acceleration == false` or `--safe-mode` selects `ICED_BACKEND=tiny-skia` (software renderer); otherwise `wgpu` is used. Settings displays the active renderer and a restart-required notice when toggled.

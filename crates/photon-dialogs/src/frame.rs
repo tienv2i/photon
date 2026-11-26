@@ -77,6 +77,22 @@ where
     Id: Ord + Clone + 'static,
     M: Clone + 'a,
 {
+    render_managed_dialog_with_header(base, manager, viewport, spec, None)
+}
+
+/// Render a managed dialog with an optional non-scrolling `header_strip` pinned between the
+/// title bar and the scrollable body.
+pub fn render_managed_dialog_with_header<'a, Id, M>(
+    base: impl Into<Element<'a, M>>,
+    manager: &DialogManager<Id>,
+    viewport: Size,
+    spec: ManagedDialogSpec<'a, Id, M>,
+    header_strip: Option<Element<'a, M>>,
+) -> Element<'a, M>
+where
+    Id: Ord + Clone + 'static,
+    M: Clone + 'a,
+{
     let base_el = base.into();
     if !spec.open {
         return base_el;
@@ -93,7 +109,7 @@ where
     let on_close = spec.on_close.clone();
     let on_noop = spec.on_noop.clone();
 
-    let frame_card = build_dialog_frame(rect, viewport, user_resized, margin, spec);
+    let frame_card = build_dialog_frame(rect, viewport, user_resized, margin, spec, header_strip);
 
     // Only the dialog card itself is wrapped in `opaque(...)`; the full-viewport positioning
     // wrapper leaves empty space pass-through for `Floating` and `Cutout` modes.
@@ -133,6 +149,7 @@ fn build_dialog_frame<'a, Id, M>(
     user_resized: bool,
     margin: f32,
     spec: ManagedDialogSpec<'a, Id, M>,
+    header_strip: Option<Element<'a, M>>,
 ) -> Element<'a, M>
 where
     Id: Ord + Clone + 'static,
@@ -218,6 +235,7 @@ where
         })
     };
 
+    let has_header_strip = header_strip.is_some();
     let max_card_h = (viewport.height - margin.max(0.0) * 2.0).max(160.0);
     let body_scroll = scrollable(container(spec.body).padding(14).width(Length::Fill))
         .width(Length::Fill)
@@ -231,7 +249,8 @@ where
         body_scroll.into()
     } else {
         let footer_reserve = if spec.footer.is_some() { 54.0 } else { 0.0 };
-        let max_body_h = (max_card_h - 44.0 - footer_reserve).max(60.0);
+        let header_strip_reserve = if has_header_strip { 48.0 } else { 0.0 };
+        let max_body_h = (max_card_h - 44.0 - footer_reserve - header_strip_reserve).max(60.0);
         container(body_scroll)
             .width(Length::Fill)
             .height(Length::Shrink)
@@ -239,13 +258,21 @@ where
             .into()
     };
 
-    let mut content_col = column![header, hairline(), body_el]
+    let mut content_col = column![header, hairline()]
         .width(Length::Fill)
         .height(if user_resized {
             Length::Fill
         } else {
             Length::Shrink
         });
+
+    if let Some(strip) = header_strip {
+        content_col = content_col
+            .push(container(strip).padding([8, 14]).width(Length::Fill))
+            .push(hairline());
+    }
+
+    content_col = content_col.push(body_el);
 
     if let Some(footer) = spec.footer {
         content_col = content_col

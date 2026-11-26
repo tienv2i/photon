@@ -68,8 +68,34 @@ impl AppPaths {
         self.config_dir.join("config.json")
     }
 
+    pub fn ui_state_file(&self) -> PathBuf {
+        self.state_dir.join("ui_state.json")
+    }
+
     pub fn journal_file(&self) -> PathBuf {
         self.journal_dir.join("commands.jsonl")
+    }
+
+    pub fn plugins_dir(&self) -> PathBuf {
+        self.data_dir.join("plugins")
+    }
+
+    pub fn models_dir(&self) -> PathBuf {
+        self.data_dir.join("models")
+    }
+
+    pub fn ai_ipc_dir(&self) -> PathBuf {
+        self.runtime_dir.join("ai-ipc")
+    }
+
+    pub fn viewers_dir(&self) -> PathBuf {
+        self.runtime_dir.join("viewers")
+    }
+
+    pub fn ensure_viewers_dir(&self) -> std::io::Result<PathBuf> {
+        let dir = self.viewers_dir();
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
     }
 
     pub fn ensure_runtime_dirs(&self) -> std::io::Result<()> {
@@ -156,4 +182,15 @@ fn runtime_home() -> PathBuf {
 #[cfg(not(target_os = "windows"))]
 fn runtime_home() -> PathBuf {
     env_path("XDG_RUNTIME_DIR").unwrap_or_else(std::env::temp_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewers_dir_resides_under_runtime_dir() {
+        let paths = AppPaths::for_sandbox(Path::new("/tmp/photon-paths-test"));
+        assert_eq!(paths.viewers_dir(), paths.runtime_dir.join("viewers"));
+    }
 }

@@ -282,14 +282,41 @@ pub enum ShapeFillMode {
     StrokeAndFill,
 }
 
+fn default_one_f64() -> f64 {
+    1.0
+}
+
+/// Color/alpha stop in `[0.0, 1.0]` along a multi-stop gradient ramp.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GradientStop {
+    pub pos: f64,
+    pub color: [u8; 3],
+    #[serde(default = "default_one_f64")]
+    pub alpha: f64,
+}
+
+/// Repeat policy outside `[0.0, 1.0]` for `EditorDrawGradient`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GradientRepeat {
+    #[default]
+    None,
+    Forwards,
+    Alternating,
+}
+
 /// Gradient geometry for `EditorDrawGradient`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GradientKind {
     #[default]
     Linear,
+    Bilinear,
     Radial,
+    Square,
     Conical,
+    Spiral,
     Reflected,
 }
 
@@ -300,6 +327,7 @@ pub enum GradientColorMode {
     #[default]
     FgToBg,
     FgToTransparent,
+    Custom,
 }
 
 /// Liquify warp brush mode.
@@ -643,6 +671,7 @@ pub enum SelectionModifyOp {
 pub enum PluginCapability {
     EditorFilter,
     BrowserAction,
+    ViewerAction,
 }
 
 /// Parameter widget/value kind in a plugin parameter schema.
@@ -654,6 +683,7 @@ pub enum PluginParamKind {
     Bool,
     Select,
     Color,
+    String,
 }
 
 /// Typed runtime value for a plugin parameter.
@@ -665,6 +695,16 @@ pub enum PluginParamValue {
     Float(f64),
     Color([u8; 3]),
     Select(String),
+}
+
+impl PluginParamValue {
+    /// Returns the underlying string if this value holds a text or select choice.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Select(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// Declarative parameter specification in `plugin.json`.
@@ -734,6 +774,14 @@ pub struct PluginInfo {
     pub install_dir: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub viewer_actions: Vec<String>,
+    #[serde(default)]
+    pub quick_actions: Vec<crate::PluginQuickAction>,
+    #[serde(default)]
+    pub models: Vec<crate::PluginModelSpec>,
 }
 
 impl PluginInfo {
@@ -755,6 +803,10 @@ impl PluginInfo {
             permissions: manifest.permissions.clone(),
             install_dir: install_dir.into(),
             error,
+            available: true,
+            viewer_actions: Vec::new(),
+            quick_actions: Vec::new(),
+            models: Vec::new(),
         }
     }
 }

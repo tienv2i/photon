@@ -14,22 +14,22 @@ use iced::window;
 use iced::{Alignment, Border, Color, Element, Fill, Length, Point, Rectangle, Shadow, Size};
 use photon_i18n::{tr, tr_args, tr_ui_text};
 use photon_panels::{
-    DraggablePanelHeaderSpec, PanelFrameSpec, PanelTabItem, dock_panel_closable, kv_row,
-    section_card, sidebar_dock, sidebar_panel, stacked_panel_heights,
+    DocumentTabItem, DraggablePanelHeaderSpec, PanelFrameSpec, PanelTabItem, dock_panel_closable,
+    document_tab_bar, kv_row, section_card, sidebar_dock, sidebar_panel, stacked_panel_heights,
 };
 use photon_protocol::{
-    ApplyTarget, BlendMode, BrushSettings, BrushSmoothingMode, BrushTip, CanvasAnchor,
-    CanvasAntiAliasingMode, ColorAdjustments, ColorBalanceAdjustment, Command, CurvesAdjustment,
-    EditorRightPanel, EditorState, EditorToolTab, FlipAxis, GradientColorMode, GradientKind,
-    HealingMode, HsvAdjustment, Language, LayerEffect, LayerTransformSpec, LiquifyMode,
-    PluginCapability, ShapeFillMode, Theme, ViewportDenoiseMode,
+    AiMaskStroke, ApplyTarget, BlendMode, BrushSettings, BrushSmoothingMode, BrushTip,
+    CanvasAnchor, CanvasAntiAliasingMode, ColorAdjustments, ColorBalanceAdjustment, Command,
+    CurvesAdjustment, EditorRightPanel, EditorState, EditorToolTab, FlipAxis, GradientColorMode,
+    GradientKind, GradientRepeat, GradientStop, HealingMode, HsvAdjustment, Language, LayerEffect,
+    LayerTransformSpec, LiquifyMode, PluginCapability, ShapeFillMode, Theme, ViewportDenoiseMode,
 };
 use photon_ui::button::{self, ButtonVariant};
 use photon_ui::dialog::DialogSpec;
 use photon_ui::editor::{
-    DimensionRatioSpec, LayerActionButton, LayerRowSpec, LengthUnit, anchor_grid_3x3,
-    checker_swatch, color_pair_widget, dimension_ratio_grid, layer_action_bar, layer_row,
-    px_to_unit, spacer_h, tool_rail_button_tipped, unit_to_px,
+    DimensionRatioSpec, LayerActionButton, LayerRowSpec, LengthUnit, checker_swatch,
+    color_pair_widget, dimension_ratio_grid, layer_action_bar, layer_row, px_to_unit,
+    tool_rail_button_tipped, unit_to_px,
 };
 use photon_ui::icons::Icon;
 use photon_ui::menu::{
@@ -125,6 +125,10 @@ pub enum EditorMessage {
     ExportMaxEdgeChanged(String),
     ExportMetadataToggled(bool),
     OpenResizeDialog,
+    OpenCanvasSizeDialog,
+    SwitchTab(u64),
+    RequestCloseTab(u64),
+    OpenNewTabDialog,
     OpenColorPicker(ColorPickerTarget),
     ColorPickerSetRgb(u8, u8, u8),
     ColorPickerHexChanged(String),
@@ -150,9 +154,6 @@ pub enum EditorMessage {
     EditorSetLiquifyStrength(f32),
     EditorSetRotateAngle(f64),
     EditorApplyRotateAngle,
-    EditorSetCanvasAnchor(photon_protocol::CanvasAnchor),
-    EditorCanvasDimAction(DimGridAction),
-    EditorApplyCanvasSize,
     ToggleCropMode,
     SetCropPreset(Option<f32>),
     ApplyCrop,
@@ -191,6 +192,18 @@ pub enum EditorMessage {
     EditorSetGradientOpacity(f32),
     EditorToggleGradientReverse,
     EditorToggleGradientDither,
+    EditorSetGradientRepeat(GradientRepeat),
+    EditorSetGradientBlendMode(BlendMode),
+    EditorToggleGradientInteractive,
+    EditorApplyGradientPreset(String),
+    EditorSelectGradientStop(usize),
+    EditorAddGradientStop(f64),
+    EditorRemoveSelectedGradientStop,
+    EditorSetGradientStopPos(usize, f64),
+    EditorToggleGradientStopAlpha(usize),
+    EditorSetGradientStopFg(usize),
+    EditorApplyGradientDraft,
+    EditorCancelGradientDraft,
     EditorSetHealingMode(HealingMode),
     EditorSetHealingRadius(f32),
     EditorSetHealingHardness(f32),
@@ -215,8 +228,58 @@ pub enum EditorMessage {
     CanvasPanTo { pan_x: f32, pan_y: f32 },
     SetAntiAliasingMode(CanvasAntiAliasingMode),
     SetViewportDenoiseMode(ViewportDenoiseMode),
+    EditorSetApplyTarget(ApplyTarget),
+    CopyText(String),
+    AiSetRembgModel(String),
+    AiSetRembgFeather(u8),
+    AiSetRembgRefine(AlphaRefineMode),
+    AiSetRembgRefineRadius(f32),
+    AiSetRembgRefineSoftness(f32),
+    AiRunRemoveBackground,
+    AiSetWatermarkTab(WatermarkTab),
+    AiSetWmDetector(String),
+    AiSetWmInpainter(String),
+    AiSetWmConfidence(f32),
+    AiSetWmMaskPadding(u32),
+    AiSetWmMaskBrushRadius(f32),
+    AiClearWmMaskStrokes,
+    AiSetWmRegion(f32, f32, f32, f32),
+    AiSetWmGeminiSize(Option<u32>),
+    AiSetWmGeminiBrightness(f32),
+    AiSetWmGeminiOffsetX(i32),
+    AiSetWmGeminiOffsetY(i32),
+    AiToggleWmGeminiForce,
+    AiSetWmRegionFeather(u32),
+    AiRunWatermark,
+    AiSetCaptionModel(String),
+    AiSetCaptionGeneralThreshold(f32),
+    AiSetCaptionCharThreshold(f32),
+    AiToggleCaptionUnderscores,
+    AiSetCaptionPrefix(String),
+    AiSetCaptionSuffix(String),
+    AiSetCaptionExclude(String),
+    AiSetCaptionDraft(String),
+    AiRunCaption,
+    AiSaveCaption(String),
+    OpenPluginModels(String),
 }
 use photon_canvas::{CanvasTool, ImageCanvasProgram, default_viewport_bg_rgb};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AlphaRefineMode {
+    #[default]
+    Off,
+    EraseBg,
+    RestoreFg,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WatermarkTab {
+    #[default]
+    AiAuto,
+    Gemini,
+    Region,
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum EditorTool {
@@ -229,7 +292,6 @@ pub enum EditorTool {
     Liquify,
     Eyedropper,
     Crop,
-    CanvasSize,
     RotateAngle,
     MarqueeRect,
     MarqueeEllipse,
@@ -251,6 +313,9 @@ pub enum EditorTool {
     Gradient,
     HealingBrush,
     Transform,
+    RemoveBg,
+    Watermark,
+    Caption,
 }
 
 impl EditorTool {
@@ -301,7 +366,6 @@ impl EditorTool {
             Self::Liquify => Icon::Liquify,
             Self::Eyedropper => Icon::Eyedropper,
             Self::Crop => Icon::Crop,
-            Self::CanvasSize => Icon::CanvasSize,
             Self::RotateAngle => Icon::RotateAngle,
             Self::MarqueeRect => Icon::MarqueeRect,
             Self::MarqueeEllipse => Icon::MarqueeEllipse,
@@ -323,6 +387,9 @@ impl EditorTool {
             Self::Gradient => Icon::Gradient,
             Self::HealingBrush => Icon::HealingBrush,
             Self::Transform => Icon::Transform,
+            Self::RemoveBg => Icon::Mask,
+            Self::Watermark => Icon::Denoise,
+            Self::Caption => Icon::Plug,
         }
     }
 
@@ -348,13 +415,16 @@ impl EditorTool {
             Self::Gradient => "tool-gradient",
             Self::HealingBrush => "tool-healing-brush",
             Self::Transform => "tool-transform",
+            Self::RemoveBg => "tool-ai-rembg",
+            Self::Watermark => "tool-ai-watermark",
+            Self::Caption => "tool-ai-caption",
             _ => "tool-pointer",
         }
     }
 
     pub fn as_canvas_tool(self) -> CanvasTool {
         match self {
-            Self::Pointer | Self::CanvasSize => CanvasTool::Pointer,
+            Self::Pointer | Self::RemoveBg | Self::Watermark | Self::Caption => CanvasTool::Pointer,
             Self::Hand => CanvasTool::Hand,
             Self::Zoom => CanvasTool::Zoom,
             Self::Brush => CanvasTool::Brush,
@@ -439,9 +509,11 @@ pub enum ColorPickerTarget {
     Background,
     CanvasBackground,
     ViewportBackground,
+    ViewerViewportBg,
     CropFill,
     CanvasSizeFill,
     RotateFill,
+    GradientStop(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -765,9 +837,16 @@ pub struct EditorUiState {
     pub flood_fill_sample_all: bool,
     pub gradient_kind: GradientKind,
     pub gradient_color_mode: GradientColorMode,
+    pub gradient_preset_id: String,
+    pub gradient_stops: Vec<GradientStop>,
+    pub gradient_selected_stop: usize,
+    pub gradient_repeat: GradientRepeat,
+    pub gradient_blend_mode: BlendMode,
+    pub gradient_interactive: bool,
     pub gradient_opacity: f32,
     pub gradient_reverse: bool,
     pub gradient_dither: bool,
+    pub gradient_draft: Option<([f32; 2], [f32; 2])>,
     pub healing_mode: HealingMode,
     pub healing_radius: f32,
     pub healing_hardness: f32,
@@ -777,6 +856,194 @@ pub struct EditorUiState {
     pub denoise_strength: f32,
     pub denoise_detail: f32,
     pub transform_spec: LayerTransformSpec,
+    pub ai_rembg_model: String,
+    pub ai_rembg_feather: u8,
+    pub ai_rembg_refine: AlphaRefineMode,
+    pub ai_rembg_refine_radius: f32,
+    pub ai_rembg_refine_softness: f32,
+    pub ai_wm_tab: WatermarkTab,
+    pub ai_wm_detector: String,
+    pub ai_wm_inpainter: String,
+    pub ai_wm_confidence: f32,
+    pub ai_wm_mask_padding: u32,
+    pub ai_wm_brush_radius: f32,
+    pub ai_wm_mask_strokes: Vec<AiMaskStroke>,
+    pub ai_wm_region_x: f32,
+    pub ai_wm_region_y: f32,
+    pub ai_wm_region_w: f32,
+    pub ai_wm_region_h: f32,
+    pub ai_wm_gemini_size: Option<u32>,
+    pub ai_wm_gemini_brightness: f32,
+    pub ai_wm_gemini_offset_x: i32,
+    pub ai_wm_gemini_offset_y: i32,
+    pub ai_wm_gemini_force: bool,
+    pub ai_wm_region_feather: u32,
+    pub ai_caption_model: String,
+    pub ai_caption_general_threshold: f32,
+    pub ai_caption_char_threshold: f32,
+    pub ai_caption_replace_underscores: bool,
+    pub ai_caption_prefix: String,
+    pub ai_caption_suffix: String,
+    pub ai_caption_exclude: String,
+    pub ai_caption_draft: String,
+}
+
+impl EditorUiState {
+    pub fn effective_canvas_tool(&self) -> CanvasTool {
+        match self.tool {
+            EditorTool::RemoveBg if self.ai_rembg_refine != AlphaRefineMode::Off => {
+                CanvasTool::Brush
+            }
+            EditorTool::Watermark => match self.ai_wm_tab {
+                WatermarkTab::AiAuto if self.ai_wm_detector == "brush" => CanvasTool::Brush,
+                WatermarkTab::Region => CanvasTool::MarqueeRect,
+                WatermarkTab::AiAuto if self.ai_wm_detector == "none" => CanvasTool::MarqueeRect,
+                _ => CanvasTool::Pointer,
+            },
+            _ => self.tool.as_canvas_tool(),
+        }
+    }
+
+    pub fn effective_brush_radius(&self) -> f32 {
+        match self.tool {
+            EditorTool::Brush | EditorTool::Eraser => self.brush_radius,
+            EditorTool::HealingBrush => self.healing_radius,
+            EditorTool::Liquify => self.liquify_radius,
+            EditorTool::QuickSelect => self.quick_select_radius,
+            EditorTool::RemoveBg if self.ai_rembg_refine != AlphaRefineMode::Off => {
+                self.ai_rembg_refine_radius
+            }
+            EditorTool::Watermark
+                if self.ai_wm_tab == WatermarkTab::AiAuto && self.ai_wm_detector == "brush" =>
+            {
+                self.ai_wm_brush_radius
+            }
+            _ => 0.0,
+        }
+    }
+
+    pub fn raw_gradient_stops(&self) -> Vec<GradientStop> {
+        if self.gradient_color_mode == GradientColorMode::Custom && self.gradient_stops.len() >= 2 {
+            return self.gradient_stops.clone();
+        }
+        let bg = self.bg_color.unwrap_or([255, 255, 255]);
+        match self.gradient_color_mode {
+            GradientColorMode::FgToTransparent => vec![
+                GradientStop {
+                    pos: 0.0,
+                    color: self.fg_color,
+                    alpha: 1.0,
+                },
+                GradientStop {
+                    pos: 1.0,
+                    color: self.fg_color,
+                    alpha: 0.0,
+                },
+            ],
+            GradientColorMode::FgToBg | GradientColorMode::Custom => vec![
+                GradientStop {
+                    pos: 0.0,
+                    color: self.fg_color,
+                    alpha: 1.0,
+                },
+                GradientStop {
+                    pos: 1.0,
+                    color: bg,
+                    alpha: 1.0,
+                },
+            ],
+        }
+    }
+
+    pub fn resolved_gradient_stops(&self) -> Vec<GradientStop> {
+        let mut list = self.raw_gradient_stops();
+        list.sort_by(|a, b| a.pos.total_cmp(&b.pos));
+        list
+    }
+
+    pub fn ensure_custom_gradient_stops(&mut self) {
+        if self.gradient_color_mode != GradientColorMode::Custom || self.gradient_stops.len() < 2 {
+            self.gradient_stops = self.resolved_gradient_stops();
+            self.gradient_color_mode = GradientColorMode::Custom;
+            self.gradient_preset_id = "custom".to_owned();
+        }
+    }
+
+    pub fn apply_gradient_preset(&mut self, preset_id: &str) {
+        self.gradient_preset_id = preset_id.to_owned();
+        self.gradient_selected_stop = 0;
+        let stop = |pos: f64, hex: &str, alpha: f64| GradientStop {
+            pos,
+            color: parse_hex_rgb(hex).unwrap_or([0, 0, 0]),
+            alpha,
+        };
+        match preset_id {
+            "fg_to_bg" => {
+                self.gradient_color_mode = GradientColorMode::FgToBg;
+                self.gradient_stops.clear();
+            }
+            "fg_to_transparent" => {
+                self.gradient_color_mode = GradientColorMode::FgToTransparent;
+                self.gradient_stops.clear();
+            }
+            "rainbow" => {
+                self.gradient_color_mode = GradientColorMode::Custom;
+                self.gradient_stops = vec![
+                    stop(0.0, "#ff2a2a", 1.0),
+                    stop(0.2, "#ffaa00", 1.0),
+                    stop(0.4, "#ffee00", 1.0),
+                    stop(0.6, "#22cc44", 1.0),
+                    stop(0.8, "#2288ff", 1.0),
+                    stop(1.0, "#aa33ff", 1.0),
+                ];
+            }
+            "sunset" => {
+                self.gradient_color_mode = GradientColorMode::Custom;
+                self.gradient_stops = vec![
+                    stop(0.0, "#2b1055", 1.0),
+                    stop(0.45, "#b5179e", 1.0),
+                    stop(0.78, "#f77f00", 1.0),
+                    stop(1.0, "#fcbf49", 1.0),
+                ];
+            }
+            "ocean" => {
+                self.gradient_color_mode = GradientColorMode::Custom;
+                self.gradient_stops = vec![
+                    stop(0.0, "#03045e", 1.0),
+                    stop(0.5, "#0077b6", 1.0),
+                    stop(1.0, "#90e0ef", 1.0),
+                ];
+            }
+            "fire" => {
+                self.gradient_color_mode = GradientColorMode::Custom;
+                self.gradient_stops = vec![
+                    stop(0.0, "#140404", 1.0),
+                    stop(0.35, "#c1121f", 1.0),
+                    stop(0.7, "#ff9f1c", 1.0),
+                    stop(1.0, "#fff8d6", 1.0),
+                ];
+            }
+            "chrome" => {
+                self.gradient_color_mode = GradientColorMode::Custom;
+                self.gradient_stops = vec![
+                    stop(0.0, "#243040", 1.0),
+                    stop(0.45, "#e6eef8", 1.0),
+                    stop(0.5, "#3a2e25", 1.0),
+                    stop(0.75, "#d4c3a3", 1.0),
+                    stop(1.0, "#ffffff", 1.0),
+                ];
+            }
+            "vignette" => {
+                self.gradient_color_mode = GradientColorMode::Custom;
+                self.gradient_stops = vec![
+                    stop(0.0, "#000000", 0.0),
+                    stop(0.65, "#000000", 0.15),
+                    stop(1.0, "#000000", 0.85),
+                ];
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Default for EditorUiState {
@@ -831,9 +1098,16 @@ impl Default for EditorUiState {
             flood_fill_sample_all: false,
             gradient_kind: GradientKind::Linear,
             gradient_color_mode: GradientColorMode::FgToBg,
+            gradient_preset_id: "fg_to_bg".to_owned(),
+            gradient_stops: Vec::new(),
+            gradient_selected_stop: 0,
+            gradient_repeat: GradientRepeat::None,
+            gradient_blend_mode: BlendMode::Normal,
+            gradient_interactive: true,
             gradient_opacity: 1.0,
             gradient_reverse: false,
             gradient_dither: true,
+            gradient_draft: None,
             healing_mode: HealingMode::Spot,
             healing_radius: 18.0,
             healing_hardness: 0.75,
@@ -843,6 +1117,36 @@ impl Default for EditorUiState {
             denoise_strength: 0.35,
             denoise_detail: 0.6,
             transform_spec: LayerTransformSpec::default(),
+            ai_rembg_model: "birefnet-general".to_owned(),
+            ai_rembg_feather: 2,
+            ai_rembg_refine: AlphaRefineMode::Off,
+            ai_rembg_refine_radius: 24.0,
+            ai_rembg_refine_softness: 0.5,
+            ai_wm_tab: WatermarkTab::AiAuto,
+            ai_wm_detector: "yolo26".to_owned(),
+            ai_wm_inpainter: "migan-pipeline-v2".to_owned(),
+            ai_wm_confidence: 0.25,
+            ai_wm_mask_padding: 8,
+            ai_wm_brush_radius: 20.0,
+            ai_wm_mask_strokes: Vec::new(),
+            ai_wm_region_x: 78.0,
+            ai_wm_region_y: 84.0,
+            ai_wm_region_w: 20.0,
+            ai_wm_region_h: 14.0,
+            ai_wm_gemini_size: None,
+            ai_wm_gemini_brightness: 0.5,
+            ai_wm_gemini_offset_x: 0,
+            ai_wm_gemini_offset_y: 0,
+            ai_wm_gemini_force: false,
+            ai_wm_region_feather: 8,
+            ai_caption_model: "wd-vit-tagger-v3".to_owned(),
+            ai_caption_general_threshold: 0.35,
+            ai_caption_char_threshold: 0.85,
+            ai_caption_replace_underscores: true,
+            ai_caption_prefix: String::new(),
+            ai_caption_suffix: String::new(),
+            ai_caption_exclude: String::new(),
+            ai_caption_draft: String::new(),
         }
     }
 }
@@ -1070,23 +1374,32 @@ pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMe
     let brush_radius_px = if adjust_open {
         0.0
     } else {
-        match state.editor_ui.tool {
-            EditorTool::Brush | EditorTool::Eraser => state.editor_ui.brush_radius,
-            EditorTool::HealingBrush => state.editor_ui.healing_radius,
-            EditorTool::Liquify => state.editor_ui.liquify_radius,
-            EditorTool::QuickSelect => state.editor_ui.quick_select_radius,
-            _ => 0.0,
-        }
+        state.editor_ui.effective_brush_radius()
     };
     // While the cutout Adjustment dialog is active, keep canvas pan/zoom
     // responsive without triggering brush/crop gestures underneath.
     let canvas_tool = if adjust_open {
         CanvasTool::Hand
     } else {
-        state.editor_ui.tool.as_canvas_tool()
+        state.editor_ui.effective_canvas_tool()
     };
     let transform_preview = if !adjust_open && state.editor_ui.tool == EditorTool::Transform {
         state.transform_preview.cloned()
+    } else {
+        None
+    };
+    let gradient_preview = if !adjust_open && state.editor_ui.tool == EditorTool::Gradient {
+        Some(photon_canvas::GradientPreview {
+            start: state.editor_ui.gradient_draft.map(|(a, _)| a),
+            end: state.editor_ui.gradient_draft.map(|(_, b)| b),
+            kind: state.editor_ui.gradient_kind,
+            repeat: state.editor_ui.gradient_repeat,
+            stops: state.editor_ui.resolved_gradient_stops(),
+            opacity: state.editor_ui.gradient_opacity,
+            reverse: state.editor_ui.gradient_reverse,
+            blend_mode: state.editor_ui.gradient_blend_mode,
+            interactive: state.editor_ui.gradient_interactive,
+        })
     } else {
         None
     };
@@ -1133,6 +1446,7 @@ pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMe
             denoise_mode: state.denoise_mode,
             healing_source_px: state.editor_ui.healing_source_px,
             transform_preview,
+            gradient_preview,
         })
         .width(Fill)
         .height(Fill),
@@ -1297,7 +1611,46 @@ pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMe
         let splitter = dock_splitter_handle(DockSplitterKind::EditorRight, right_w);
         editor_row = editor_row.push(splitter).push(inspector);
     }
-    editor_row.into()
+
+    if state.snapshot.meta.editor_tabs.is_empty() {
+        return editor_row.into();
+    }
+
+    let tab_bar = build_editor_tab_bar(state, lang);
+    column![
+        tab_bar,
+        rule::horizontal(1).style(hairline_rule_style),
+        editor_row,
+    ]
+    .width(Fill)
+    .height(Fill)
+    .into()
+}
+
+fn build_editor_tab_bar(state: EditorViewState<'_>, lang: Language) -> Element<'_, EditorMessage> {
+    let items: Vec<DocumentTabItem<EditorMessage>> = state
+        .snapshot
+        .meta
+        .editor_tabs
+        .iter()
+        .map(|tab| {
+            let tip = format!("{} ({}×{})", tab.path, tab.width, tab.height);
+            DocumentTabItem::new(
+                tab.id,
+                tab.name.clone(),
+                tab.active,
+                EditorMessage::SwitchTab(tab.id),
+                EditorMessage::RequestCloseTab(tab.id),
+            )
+            .modified(tab.modified)
+            .tooltip(tip)
+        })
+        .collect();
+    with_tooltip_pos(
+        document_tab_bar(items, Some(EditorMessage::OpenNewTabDialog)),
+        tr(lang, "tooltip-editor-new-tab"),
+        TooltipPosition::Bottom,
+    )
 }
 
 fn build_tool_rail(state: EditorViewState<'_>, lang: Language) -> Element<'_, EditorMessage> {
@@ -1370,23 +1723,6 @@ fn build_tool_rail(state: EditorViewState<'_>, lang: Language) -> Element<'_, Ed
                 true,
                 Some(EditorMessage::EditorSelectTool(EditorTool::Crop)),
                 tr(lang, "tooltip-tool-crop"),
-            ),
-        ]
-        .spacing(4),
-        row![
-            tool_rail_button_tipped(
-                Icon::Resize,
-                false,
-                true,
-                Some(EditorMessage::OpenResizeDialog),
-                tr(lang, "tooltip-tool-resize"),
-            ),
-            tool_rail_button_tipped(
-                Icon::CanvasSize,
-                active_tool == EditorTool::CanvasSize,
-                true,
-                Some(EditorMessage::EditorSelectTool(EditorTool::CanvasSize)),
-                tr(lang, "tooltip-tool-canvas-size"),
             ),
         ]
         .spacing(4),
@@ -1490,9 +1826,30 @@ fn build_tool_rail(state: EditorViewState<'_>, lang: Language) -> Element<'_, Ed
                 Some(EditorMessage::EditorSelectTool(EditorTool::Transform)),
                 tr(lang, "tooltip-tool-transform"),
             ),
-            container(iced::widget::space::horizontal())
-                .width(Length::Fixed(34.0))
-                .height(Length::Fixed(34.0)),
+            tool_rail_button_tipped(
+                Icon::Mask,
+                active_tool == EditorTool::RemoveBg,
+                true,
+                Some(EditorMessage::EditorSelectTool(EditorTool::RemoveBg)),
+                tr(lang, "tool-ai-rembg"),
+            ),
+        ]
+        .spacing(4),
+        row![
+            tool_rail_button_tipped(
+                Icon::Denoise,
+                active_tool == EditorTool::Watermark,
+                true,
+                Some(EditorMessage::EditorSelectTool(EditorTool::Watermark)),
+                tr(lang, "tool-ai-watermark"),
+            ),
+            tool_rail_button_tipped(
+                Icon::Plug,
+                active_tool == EditorTool::Caption,
+                true,
+                Some(EditorMessage::EditorSelectTool(EditorTool::Caption)),
+                tr(lang, "tool-ai-caption"),
+            ),
         ]
         .spacing(4),
     ]
@@ -1705,11 +2062,9 @@ fn build_right_panel_section<'a>(
     if can_reorder {
         header = header
             .drag_tooltip(tr(lang, "tooltip-sidebar-panel-drag"))
-            .swap_tooltip(tr(lang, "tooltip-panel-drag-reorder"))
             .on_drag_start(EditorMessage::BeginDragEditorPanel(panel_kind))
             .on_drag_hover(dragging_any.then_some(EditorMessage::HoverEditorPanelDrop(panel_kind)))
-            .on_drag_end(dragging_any.then_some(EditorMessage::DropEditorPanel(panel_kind)))
-            .on_swap(Some(EditorMessage::SwapEditorPanelOrder));
+            .on_drag_end(dragging_any.then_some(EditorMessage::DropEditorPanel(panel_kind)));
     }
 
     let body = (!collapsed).then(|| match panel_kind {
@@ -2251,84 +2606,7 @@ fn build_tool_options_card<'a>(
             .spacing(8);
             Some(section_card(tr(lang, ui.tool.label_key()), body))
         }
-        EditorTool::Gradient => {
-            let kind_label = |k: GradientKind| match k {
-                GradientKind::Linear => tr(lang, "gradient-linear"),
-                GradientKind::Radial => tr(lang, "gradient-radial"),
-                GradientKind::Conical => tr(lang, "gradient-conical"),
-                GradientKind::Reflected => tr(lang, "gradient-reflected"),
-            };
-            let mut kind_btns: Vec<Element<'_, EditorMessage>> = [
-                GradientKind::Linear,
-                GradientKind::Radial,
-                GradientKind::Conical,
-                GradientKind::Reflected,
-            ]
-            .into_iter()
-            .map(|k| {
-                button::labeled(
-                    kind_label(k),
-                    None,
-                    ButtonVariant::Tab {
-                        active: ui.gradient_kind == k,
-                    },
-                    Some(EditorMessage::EditorSetGradientKind(k)),
-                )
-                .width(Fill)
-                .into()
-            })
-            .collect();
-            let kind_row2 = kind_btns.split_off(2);
-            let kind_grid =
-                column![row(kind_btns).spacing(4), row(kind_row2).spacing(4)].spacing(4);
-            let color_mode_row = row([
-                GradientColorMode::FgToBg,
-                GradientColorMode::FgToTransparent,
-            ]
-            .into_iter()
-            .map(|cm| {
-                let key = match cm {
-                    GradientColorMode::FgToBg => "gradient-fg-bg",
-                    GradientColorMode::FgToTransparent => "gradient-fg-transparent",
-                };
-                button::labeled(
-                    tr(lang, key),
-                    None,
-                    ButtonVariant::Tab {
-                        active: ui.gradient_color_mode == cm,
-                    },
-                    Some(EditorMessage::EditorSetGradientColorMode(cm)),
-                )
-                .width(Fill)
-                .into()
-            }))
-            .spacing(4);
-            let body = column![
-                text(tr(lang, "label-gradient-kind")).size(11),
-                kind_grid,
-                text(tr(lang, "label-gradient-color-mode")).size(11),
-                color_mode_row,
-                kv_row(
-                    tr(lang, "label-opacity"),
-                    format!("{:.0}%", ui.gradient_opacity * 100.0),
-                ),
-                slider(
-                    0.05..=1.0,
-                    ui.gradient_opacity,
-                    EditorMessage::EditorSetGradientOpacity,
-                )
-                .step(0.05_f32)
-                .style(slider_style),
-                checkbox(ui.gradient_reverse)
-                    .label(tr(lang, "label-gradient-reverse"))
-                    .on_toggle(|_| EditorMessage::EditorToggleGradientReverse),
-                checkbox(ui.gradient_dither)
-                    .label(tr(lang, "label-gradient-dither"))
-                    .on_toggle(|_| EditorMessage::EditorToggleGradientDither),
-            ]
-            .spacing(8);
-            Some(section_card(tr(lang, ui.tool.label_key()), body))
-        }
+        EditorTool::Gradient => Some(build_gradient_tool_options(ui, lang)),
         EditorTool::HealingBrush => {
             let mode_row = row(HealingMode::ALL.into_iter().map(|m| {
                 let key = match m {
@@ -2700,61 +2978,1283 @@ fn build_tool_options_card<'a>(
             ]
             .spacing(8),
         )),
-        EditorTool::CanvasSize => {
-            let pw = i64::from(ui.canvas_dims.width_px);
-            let ph = i64::from(ui.canvas_dims.height_px);
-            let dx = pw - i64::from(ed.width);
-            let dy = ph - i64::from(ed.height);
-            let delta_str = format!(
-                "{}×{} ({dx:+} × {dy:+})",
-                ui.canvas_dims.width_px, ui.canvas_dims.height_px
-            );
-            Some(section_card(
-                tr(lang, "tool-canvas-size"),
-                column![
-                    ui.canvas_dims
-                        .view(lang, EditorMessage::EditorCanvasDimAction),
-                    kv_row(tr(lang, "label-delta"), delta_str),
-                    row![
-                        column![
-                            text(tr(lang, "label-anchor")).size(11),
-                            anchor_grid_3x3(ui.canvas_anchor.index(), |idx| {
-                                EditorMessage::EditorSetCanvasAnchor(CanvasAnchor::from_index(idx))
-                            }),
-                        ]
-                        .spacing(4),
-                        spacer_h(8.0),
-                        column![
-                            text(tr(lang, "label-canvas-bg")).size(11),
-                            checker_swatch(
-                                ui.canvas_fill.map(rgb_to_color),
-                                32.0,
-                                24.0,
-                                Some(EditorMessage::OpenColorPicker(
-                                    ColorPickerTarget::CanvasSizeFill
-                                )),
-                            ),
-                        ]
-                        .spacing(4),
-                    ]
-                    .align_y(Alignment::Start),
-                    with_tooltip_pos(
-                        button::labeled(
-                            tr(lang, "action-canvas-size"),
-                            Some(Icon::Check),
-                            ButtonVariant::Primary,
-                            Some(EditorMessage::EditorApplyCanvasSize),
-                        )
-                        .width(Fill),
-                        tr(lang, "action-canvas-size"),
-                        TooltipPosition::Top,
-                    ),
-                ]
-                .spacing(8),
-            ))
-        }
+        EditorTool::RemoveBg => Some(build_ai_rembg_tool_options(state, lang)),
+        EditorTool::Watermark => Some(build_ai_watermark_tool_options(state, lang)),
+        EditorTool::Caption => Some(build_ai_caption_tool_options(state, lang)),
         _ => None,
     }
+}
+
+fn build_apply_target_row<'a>(target: ApplyTarget, lang: Language) -> Element<'a, EditorMessage> {
+    row![
+        button::labeled(
+            tr(lang, "target-active-layer"),
+            None,
+            ButtonVariant::Tab {
+                active: target == ApplyTarget::ActiveLayer,
+            },
+            Some(EditorMessage::EditorSetApplyTarget(
+                ApplyTarget::ActiveLayer
+            )),
+        )
+        .width(Fill),
+        button::labeled(
+            tr(lang, "target-whole-image"),
+            None,
+            ButtonVariant::Tab {
+                active: target == ApplyTarget::WholeImage,
+            },
+            Some(EditorMessage::EditorSetApplyTarget(ApplyTarget::WholeImage)),
+        )
+        .width(Fill),
+        button::labeled(
+            tr(lang, "target-new-layer"),
+            None,
+            ButtonVariant::Tab {
+                active: target == ApplyTarget::NewLayer,
+            },
+            Some(EditorMessage::EditorSetApplyTarget(ApplyTarget::NewLayer)),
+        )
+        .width(Fill),
+    ]
+    .spacing(3)
+    .into()
+}
+
+fn build_ai_task_banner<'a>(
+    state: EditorViewState<'a>,
+    lang: Language,
+) -> Option<Element<'a, EditorMessage>> {
+    let task = state.snapshot.meta.ai_task.as_ref().filter(|t| t.running)?;
+    Some(
+        row![
+            text(format!("{}% · {}", task.percent, task.stage))
+                .size(11)
+                .width(Fill),
+            button::labeled(
+                tr(lang, "action-cancel"),
+                Some(Icon::Close),
+                ButtonVariant::Danger,
+                Some(EditorMessage::Dispatch(Command::AiCancel)),
+            ),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into(),
+    )
+}
+
+#[derive(Debug, Clone, Default)]
+struct GradientBarState {
+    dragging_stop: Option<usize>,
+}
+
+struct GradientBarProgram {
+    raw_stops: Vec<GradientStop>,
+    selected_stop: usize,
+    reverse: bool,
+}
+
+impl GradientBarProgram {
+    fn sample_color(&self, t_in: f64) -> Color {
+        let mut ramp = self.raw_stops.clone();
+        ramp.sort_by(|a, b| a.pos.total_cmp(&b.pos));
+        if ramp.is_empty() {
+            return Color::TRANSPARENT;
+        }
+        let t = if self.reverse { 1.0 - t_in } else { t_in }.clamp(0.0, 1.0);
+        if t <= ramp[0].pos {
+            let s = ramp[0];
+            return Color::from_rgba8(s.color[0], s.color[1], s.color[2], s.alpha as f32);
+        }
+        let last = ramp.len() - 1;
+        if t >= ramp[last].pos {
+            let s = ramp[last];
+            return Color::from_rgba8(s.color[0], s.color[1], s.color[2], s.alpha as f32);
+        }
+        for i in 0..last {
+            let s0 = ramp[i];
+            let s1 = ramp[i + 1];
+            if t >= s0.pos && t <= s1.pos {
+                let f = ((t - s0.pos) / (s1.pos - s0.pos).max(1e-6)).clamp(0.0, 1.0);
+                let inv = 1.0 - f;
+                let a = (s0.alpha * inv + s1.alpha * f).clamp(0.0, 1.0);
+                let denom = a.max(1e-5);
+                let r = (f64::from(s0.color[0]) * s0.alpha * inv
+                    + f64::from(s1.color[0]) * s1.alpha * f)
+                    / denom;
+                let g = (f64::from(s0.color[1]) * s0.alpha * inv
+                    + f64::from(s1.color[1]) * s1.alpha * f)
+                    / denom;
+                let b = (f64::from(s0.color[2]) * s0.alpha * inv
+                    + f64::from(s1.color[2]) * s1.alpha * f)
+                    / denom;
+                return Color::from_rgba8(
+                    r.round().clamp(0.0, 255.0) as u8,
+                    g.round().clamp(0.0, 255.0) as u8,
+                    b.round().clamp(0.0, 255.0) as u8,
+                    a as f32,
+                );
+            }
+        }
+        Color::TRANSPARENT
+    }
+}
+
+impl canvas::Program<EditorMessage> for GradientBarProgram {
+    type State = GradientBarState;
+
+    fn update(
+        &self,
+        state: &mut Self::State,
+        event: &iced::Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<canvas::Action<EditorMessage>> {
+        let w = bounds.width.max(1.0);
+        match event {
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                let pos = cursor.position_in(bounds)?;
+                let bar_w = (w - 12.0).max(1.0);
+                let rel_x = (pos.x - 6.0).clamp(0.0, bar_w);
+                if pos.y >= 20.0 {
+                    for (idx, s) in self.raw_stops.iter().enumerate() {
+                        let sx = (s.pos as f32).clamp(0.0, 1.0) * bar_w;
+                        if (rel_x - sx).abs() <= 9.0 {
+                            state.dragging_stop = Some(idx);
+                            return Some(
+                                canvas::Action::publish(EditorMessage::EditorSelectGradientStop(
+                                    idx,
+                                ))
+                                .and_capture(),
+                            );
+                        }
+                    }
+                }
+                let norm = f64::from((rel_x / bar_w).clamp(0.0, 1.0));
+                Some(
+                    canvas::Action::publish(EditorMessage::EditorAddGradientStop(norm))
+                        .and_capture(),
+                )
+            }
+            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                let idx = state.dragging_stop?;
+                let pos = cursor.position()?;
+                let bar_w = (w - 12.0).max(1.0);
+                let norm = f64::from(((pos.x - bounds.x - 6.0) / bar_w).clamp(0.0, 1.0));
+                Some(
+                    canvas::Action::publish(EditorMessage::EditorSetGradientStopPos(idx, norm))
+                        .and_capture(),
+                )
+            }
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+                if state.dragging_stop.is_some() =>
+            {
+                state.dragging_stop = None;
+                Some(canvas::Action::capture())
+            }
+            _ => None,
+        }
+    }
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        theme: &iced::Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let pal = PaletteTokens::for_theme(theme);
+        let bar_h = 20.0_f32;
+        let bar_w = (bounds.width - 12.0).max(1.0);
+        let sq = 5.0_f32;
+        let cols = (bar_w / sq).ceil() as usize;
+        let rows = (bar_h / sq).ceil() as usize;
+        for r in 0..rows {
+            for c in 0..cols {
+                let col = if (r + c) % 2 == 0 {
+                    Color::from_rgb8(210, 210, 210)
+                } else {
+                    Color::from_rgb8(165, 165, 165)
+                };
+                frame.fill_rectangle(
+                    Point::new(6.0 + c as f32 * sq, r as f32 * sq),
+                    Size::new(sq.min(bar_w - c as f32 * sq), sq.min(bar_h - r as f32 * sq)),
+                    col,
+                );
+            }
+        }
+        let slices = (bar_w as usize).clamp(32, 128);
+        let step_w = bar_w / slices as f32;
+        for i in 0..slices {
+            let t = (i as f64 + 0.5) / slices as f64;
+            let c = self.sample_color(t);
+            frame.fill_rectangle(
+                Point::new(6.0 + i as f32 * step_w, 0.0),
+                Size::new(step_w + 0.6, bar_h),
+                c,
+            );
+        }
+        frame.stroke(
+            &canvas::Path::rectangle(Point::new(6.0, 0.0), Size::new(bar_w, bar_h)),
+            canvas::Stroke::default()
+                .with_color(pal.border_strong)
+                .with_width(1.0),
+        );
+        for (idx, s) in self.raw_stops.iter().enumerate() {
+            let cx = 6.0 + (s.pos as f32).clamp(0.0, 1.0) * bar_w;
+            let cy = bar_h + 8.0;
+            let circle = canvas::Path::circle(Point::new(cx, cy), 5.0);
+            frame.fill(
+                &circle,
+                Color::from_rgb8(s.color[0], s.color[1], s.color[2]),
+            );
+            frame.stroke(
+                &circle,
+                canvas::Stroke::default()
+                    .with_color(if idx == self.selected_stop {
+                        pal.accent
+                    } else {
+                        pal.border_strong
+                    })
+                    .with_width(if idx == self.selected_stop { 2.0 } else { 1.0 }),
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+fn blend_mode_label(b: BlendMode, lang: Language) -> String {
+    match b {
+        BlendMode::Normal => tr(lang, "blend-normal"),
+        BlendMode::Multiply => tr(lang, "blend-multiply"),
+        BlendMode::Screen => tr(lang, "blend-screen"),
+        BlendMode::Overlay => tr(lang, "blend-overlay"),
+        BlendMode::Darken => tr(lang, "blend-darken"),
+        BlendMode::Lighten => tr(lang, "blend-lighten"),
+        BlendMode::Difference => tr(lang, "blend-difference"),
+    }
+}
+
+fn build_gradient_tool_options<'a>(
+    ui: &'a EditorUiState,
+    lang: Language,
+) -> Element<'a, EditorMessage> {
+    let presets = [
+        ("fg_to_bg", "gradient-preset-fg-bg"),
+        ("fg_to_transparent", "gradient-preset-fg-clear"),
+        ("rainbow", "gradient-preset-rainbow"),
+        ("sunset", "gradient-preset-sunset"),
+        ("ocean", "gradient-preset-ocean"),
+        ("fire", "gradient-preset-fire"),
+        ("chrome", "gradient-preset-chrome"),
+        ("vignette", "gradient-preset-vignette"),
+    ];
+    let mut preset_btns: Vec<Element<'_, EditorMessage>> = presets
+        .into_iter()
+        .map(|(id, key)| {
+            button::labeled(
+                tr(lang, key),
+                None,
+                ButtonVariant::Tab {
+                    active: ui.gradient_preset_id == id,
+                },
+                Some(EditorMessage::EditorApplyGradientPreset(id.to_owned())),
+            )
+            .width(Fill)
+            .into()
+        })
+        .collect();
+    let p_r4 = preset_btns.split_off(6);
+    let p_r3 = preset_btns.split_off(4);
+    let p_r2 = preset_btns.split_off(2);
+    let preset_grid = column![
+        row(preset_btns).spacing(3),
+        row(p_r2).spacing(3),
+        row(p_r3).spacing(3),
+        row(p_r4).spacing(3),
+    ]
+    .spacing(3);
+
+    let raw_stops = ui.raw_gradient_stops();
+    let sel_idx = ui
+        .gradient_selected_stop
+        .min(raw_stops.len().saturating_sub(1));
+    let cur_stop = raw_stops.get(sel_idx).copied().unwrap_or(GradientStop {
+        pos: 0.0,
+        color: ui.fg_color,
+        alpha: 1.0,
+    });
+    let can_delete_stop =
+        ui.gradient_color_mode == GradientColorMode::Custom && ui.gradient_stops.len() > 2;
+
+    let stop_bar: Element<'_, EditorMessage> = iced::widget::canvas(GradientBarProgram {
+        raw_stops: raw_stops.clone(),
+        selected_stop: sel_idx,
+        reverse: ui.gradient_reverse,
+    })
+    .width(Fill)
+    .height(Length::Fixed(34.0))
+    .into();
+
+    let stop_controls = row![
+        checker_swatch(
+            Some(rgb_to_color(cur_stop.color)),
+            28.0,
+            22.0,
+            Some(EditorMessage::OpenColorPicker(
+                ColorPickerTarget::GradientStop(sel_idx),
+            )),
+        ),
+        button::labeled(
+            if cur_stop.alpha < 0.5 {
+                "α: 0%"
+            } else {
+                "α: 100%"
+            },
+            None,
+            ButtonVariant::Secondary,
+            Some(EditorMessage::EditorToggleGradientStopAlpha(sel_idx)),
+        ),
+        button::labeled(
+            tr(lang, "action-stop-fg"),
+            None,
+            ButtonVariant::Secondary,
+            Some(EditorMessage::EditorSetGradientStopFg(sel_idx)),
+        ),
+        button::labeled(
+            tr(lang, "action-add-stop"),
+            None,
+            ButtonVariant::Ghost,
+            Some(EditorMessage::EditorAddGradientStop(0.5)),
+        ),
+        button::compact_icon(
+            Icon::Close,
+            ButtonVariant::Ghost,
+            can_delete_stop.then_some(EditorMessage::EditorRemoveSelectedGradientStop),
+        ),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+
+    let shape_label = |k: GradientKind| match k {
+        GradientKind::Linear => tr(lang, "gradient-linear"),
+        GradientKind::Bilinear | GradientKind::Reflected => tr(lang, "gradient-bilinear"),
+        GradientKind::Radial => tr(lang, "gradient-radial"),
+        GradientKind::Square => tr(lang, "gradient-square"),
+        GradientKind::Conical => tr(lang, "gradient-conical"),
+        GradientKind::Spiral => tr(lang, "gradient-spiral"),
+    };
+    let mut shape_btns: Vec<Element<'_, EditorMessage>> = [
+        GradientKind::Linear,
+        GradientKind::Bilinear,
+        GradientKind::Radial,
+        GradientKind::Square,
+        GradientKind::Conical,
+        GradientKind::Spiral,
+    ]
+    .into_iter()
+    .map(|k| {
+        let active = ui.gradient_kind == k
+            || (ui.gradient_kind == GradientKind::Reflected && k == GradientKind::Bilinear);
+        button::labeled(
+            shape_label(k),
+            None,
+            ButtonVariant::Tab { active },
+            Some(EditorMessage::EditorSetGradientKind(k)),
+        )
+        .width(Fill)
+        .into()
+    })
+    .collect();
+    let s_r3 = shape_btns.split_off(4);
+    let s_r2 = shape_btns.split_off(2);
+    let shape_grid = column![
+        row(shape_btns).spacing(3),
+        row(s_r2).spacing(3),
+        row(s_r3).spacing(3),
+    ]
+    .spacing(3);
+
+    let repeat_row = row([
+        (GradientRepeat::None, "gradient-repeat-none"),
+        (GradientRepeat::Forwards, "gradient-repeat-forwards"),
+        (GradientRepeat::Alternating, "gradient-repeat-alternating"),
+    ]
+    .into_iter()
+    .map(|(r, key)| {
+        button::labeled(
+            tr(lang, key),
+            None,
+            ButtonVariant::Tab {
+                active: ui.gradient_repeat == r,
+            },
+            Some(EditorMessage::EditorSetGradientRepeat(r)),
+        )
+        .width(Fill)
+        .into()
+    }))
+    .spacing(3);
+
+    let blend_options: Vec<BlendChoice> = BlendMode::ALL
+        .into_iter()
+        .map(|mode| BlendChoice {
+            mode,
+            label: blend_mode_label(mode, lang),
+        })
+        .collect();
+    let selected_blend = blend_options
+        .iter()
+        .find(|c| c.mode == ui.gradient_blend_mode)
+        .cloned();
+    let blend_picker = pick_list(blend_options, selected_blend, |choice: BlendChoice| {
+        EditorMessage::EditorSetGradientBlendMode(choice.mode)
+    })
+    .text_size(11)
+    .padding([4, 8])
+    .width(Fill)
+    .style(|theme, status| {
+        let t = PaletteTokens::for_theme(theme);
+        let active = matches!(
+            status,
+            iced::widget::pick_list::Status::Hovered
+                | iced::widget::pick_list::Status::Opened { .. }
+        );
+        iced::widget::pick_list::Style {
+            text_color: t.text_primary,
+            placeholder_color: t.text_muted,
+            handle_color: t.text_secondary,
+            background: if active { t.bg_hover } else { t.bg_surface }.into(),
+            border: Border {
+                color: if active { t.accent } else { t.border_strong },
+                width: 1.0,
+                radius: RADIUS_SM.into(),
+            },
+        }
+    })
+    .menu_style(|theme| {
+        let t = PaletteTokens::for_theme(theme);
+        iced_menu::Style {
+            background: t.bg_elevated.into(),
+            border: Border {
+                color: t.border_strong,
+                width: 1.0,
+                radius: RADIUS_SM.into(),
+            },
+            text_color: t.text_primary,
+            selected_text_color: Color::WHITE,
+            selected_background: t.accent.into(),
+            shadow: Shadow::default(),
+        }
+    });
+
+    let mut body = column![
+        text(tr(lang, "label-gradient-presets")).size(11),
+        preset_grid,
+        text(tr(lang, "label-gradient-stops")).size(11),
+        stop_bar,
+        stop_controls,
+        kv_row(
+            tr(lang, "label-stop-pos"),
+            format!("{:.0}%", cur_stop.pos * 100.0),
+        ),
+        slider(0.0..=1.0, cur_stop.pos as f32, move |v| {
+            EditorMessage::EditorSetGradientStopPos(sel_idx, f64::from(v))
+        })
+        .step(0.01_f32)
+        .style(slider_style),
+        text(tr(lang, "label-gradient-kind")).size(11),
+        shape_grid,
+        text(tr(lang, "label-gradient-repeat")).size(11),
+        repeat_row,
+        row![
+            text(tr(lang, "label-gradient-blend"))
+                .size(11)
+                .width(Length::Fixed(52.0)),
+            blend_picker,
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+        kv_row(
+            tr(lang, "label-opacity"),
+            format!("{:.0}%", ui.gradient_opacity * 100.0),
+        ),
+        slider(
+            0.05..=1.0,
+            ui.gradient_opacity,
+            EditorMessage::EditorSetGradientOpacity,
+        )
+        .step(0.05_f32)
+        .style(slider_style),
+        row![
+            checkbox(ui.gradient_reverse)
+                .label(tr(lang, "label-gradient-reverse"))
+                .on_toggle(|_| EditorMessage::EditorToggleGradientReverse),
+            checkbox(ui.gradient_dither)
+                .label(tr(lang, "label-gradient-dither"))
+                .on_toggle(|_| EditorMessage::EditorToggleGradientDither),
+        ]
+        .spacing(8),
+        checkbox(ui.gradient_interactive)
+            .label(tr(lang, "label-gradient-interactive"))
+            .on_toggle(|_| EditorMessage::EditorToggleGradientInteractive),
+    ]
+    .spacing(6);
+
+    if ui.gradient_draft.is_some() {
+        body = body.push(
+            row![
+                button::labeled(
+                    tr(lang, "action-apply"),
+                    Some(Icon::Check),
+                    ButtonVariant::Primary,
+                    Some(EditorMessage::EditorApplyGradientDraft),
+                )
+                .width(Fill),
+                button::labeled(
+                    tr(lang, "action-cancel"),
+                    Some(Icon::Close),
+                    ButtonVariant::Secondary,
+                    Some(EditorMessage::EditorCancelGradientDraft),
+                )
+                .width(Fill),
+            ]
+            .spacing(4),
+        );
+    }
+
+    body = body.push(
+        text(tr(lang, "hint-gradient-interactive"))
+            .size(10)
+            .style(|theme| text::Style {
+                color: Some(PaletteTokens::for_theme(theme).text_muted),
+            }),
+    );
+
+    section_card(tr(lang, ui.tool.label_key()), body)
+}
+
+fn build_ai_model_quick_row<'a>(
+    state: EditorViewState<'a>,
+    lang: Language,
+    plugin_id: &str,
+    model_id: &str,
+) -> Element<'a, EditorMessage> {
+    let status = state
+        .snapshot
+        .meta
+        .ai_models
+        .iter()
+        .find(|m| m.id == model_id);
+    let installed = status.is_some_and(|m| m.installed);
+    let running = state
+        .snapshot
+        .meta
+        .ai_task
+        .as_ref()
+        .is_some_and(|t| t.running);
+    let badge = if installed {
+        tr(lang, "model-status-installed")
+    } else {
+        tr(lang, "model-status-missing")
+    };
+    let mut r = row![
+        text(badge).size(11).style(move |theme| text::Style {
+            color: Some(if installed {
+                PaletteTokens::for_theme(theme).success
+            } else {
+                PaletteTokens::for_theme(theme).warning
+            }),
+        }),
+        iced::widget::space::horizontal(),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+
+    if status.is_some() && !installed {
+        r = r.push(button::labeled(
+            tr(lang, "action-download"),
+            None,
+            ButtonVariant::Secondary,
+            (!running).then(|| {
+                EditorMessage::Dispatch(Command::AiDownloadModel {
+                    model_id: model_id.to_owned(),
+                })
+            }),
+        ));
+    }
+    r = r.push(button::compact_icon_tipped(
+        Icon::Settings,
+        ButtonVariant::Ghost,
+        Some(EditorMessage::OpenPluginModels(plugin_id.to_owned())),
+        tr(lang, "action-plugin-settings-models"),
+    ));
+    r.into()
+}
+
+fn build_ai_rembg_tool_options<'a>(
+    state: EditorViewState<'a>,
+    lang: Language,
+) -> Element<'a, EditorMessage> {
+    let ui = state.editor_ui;
+    let rembg_models: Vec<String> = {
+        let mut ids: Vec<String> = state
+            .snapshot
+            .meta
+            .ai_models
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.id.as_str(),
+                    "u2netp" | "silueta" | "rmbg-1.4" | "birefnet-general" | "birefnet-portrait"
+                ) || m.tier == "fast"
+                    || m.tier == "balanced"
+                    || m.tier == "hq"
+            })
+            .map(|m| m.id.clone())
+            .collect();
+        if ids.is_empty() {
+            ids = vec![
+                "u2netp".to_owned(),
+                "silueta".to_owned(),
+                "rmbg-1.4".to_owned(),
+                "birefnet-general".to_owned(),
+                "birefnet-portrait".to_owned(),
+            ];
+        }
+        ids
+    };
+
+    let mut model_col = column![].spacing(4);
+    for id in rembg_models {
+        let active = ui.ai_rembg_model == id;
+        model_col = model_col.push(
+            button::labeled(
+                id.clone(),
+                None,
+                ButtonVariant::Tab { active },
+                Some(EditorMessage::AiSetRembgModel(id)),
+            )
+            .width(Fill),
+        );
+    }
+
+    let running = state
+        .snapshot
+        .meta
+        .ai_task
+        .as_ref()
+        .is_some_and(|t| t.running);
+
+    let mut col = column![
+        text(tr(lang, "label-ai-model")).size(11),
+        model_col,
+        build_ai_model_quick_row(state, lang, "photon.rmbg.onnx", &ui.ai_rembg_model),
+        kv_row(
+            tr(lang, "label-ai-edge-feather"),
+            format!("{} px", ui.ai_rembg_feather),
+        ),
+        slider(0.0..=20.0, f32::from(ui.ai_rembg_feather), |v| {
+            EditorMessage::AiSetRembgFeather(v.round() as u8)
+        })
+        .step(1.0_f32)
+        .style(slider_style),
+        text(tr(lang, "label-apply-target")).size(11),
+        build_apply_target_row(ui.apply_target, lang),
+        button::labeled(
+            tr(lang, "action-remove-background"),
+            Some(Icon::Mask),
+            ButtonVariant::Primary,
+            (!running).then_some(EditorMessage::AiRunRemoveBackground),
+        )
+        .width(Fill),
+        rule::horizontal(1).style(hairline_rule_style),
+        text(tr(lang, "label-refine-alpha-brush")).size(11),
+        row![
+            button::labeled(
+                tr(lang, "refine-mode-off"),
+                None,
+                ButtonVariant::Tab {
+                    active: ui.ai_rembg_refine == AlphaRefineMode::Off,
+                },
+                Some(EditorMessage::AiSetRembgRefine(AlphaRefineMode::Off)),
+            )
+            .width(Fill),
+            button::labeled(
+                tr(lang, "refine-mode-erase-bg"),
+                None,
+                ButtonVariant::Tab {
+                    active: ui.ai_rembg_refine == AlphaRefineMode::EraseBg,
+                },
+                Some(EditorMessage::AiSetRembgRefine(AlphaRefineMode::EraseBg)),
+            )
+            .width(Fill),
+            button::labeled(
+                tr(lang, "refine-mode-restore-fg"),
+                None,
+                ButtonVariant::Tab {
+                    active: ui.ai_rembg_refine == AlphaRefineMode::RestoreFg,
+                },
+                Some(EditorMessage::AiSetRembgRefine(AlphaRefineMode::RestoreFg)),
+            )
+            .width(Fill),
+        ]
+        .spacing(3),
+        kv_row(
+            tr(lang, "label-brush-size"),
+            format!("{:.0} px", ui.ai_rembg_refine_radius),
+        ),
+        slider(2.0..=150.0, ui.ai_rembg_refine_radius, |v| {
+            EditorMessage::AiSetRembgRefineRadius(v)
+        })
+        .step(1.0_f32)
+        .style(slider_style),
+        kv_row(
+            tr(lang, "label-brush-softness"),
+            format!("{:.0}%", ui.ai_rembg_refine_softness * 100.0),
+        ),
+        slider(0.0..=1.0, ui.ai_rembg_refine_softness, |v| {
+            EditorMessage::AiSetRembgRefineSoftness(v)
+        })
+        .step(0.05_f32)
+        .style(slider_style),
+    ]
+    .spacing(6);
+
+    if let Some(banner) = build_ai_task_banner(state, lang) {
+        col = col.push(banner);
+    }
+
+    section_card(tr(lang, "tool-ai-rembg"), col)
+}
+
+fn build_ai_watermark_tool_options<'a>(
+    state: EditorViewState<'a>,
+    lang: Language,
+) -> Element<'a, EditorMessage> {
+    let ui = state.editor_ui;
+    let running = state
+        .snapshot
+        .meta
+        .ai_task
+        .as_ref()
+        .is_some_and(|t| t.running);
+
+    let tabs = row![
+        button::labeled(
+            tr(lang, "watermark-tab-ai-auto"),
+            None,
+            ButtonVariant::Tab {
+                active: ui.ai_wm_tab == WatermarkTab::AiAuto,
+            },
+            Some(EditorMessage::AiSetWatermarkTab(WatermarkTab::AiAuto)),
+        )
+        .width(Fill),
+        button::labeled(
+            tr(lang, "watermark-tab-gemini"),
+            None,
+            ButtonVariant::Tab {
+                active: ui.ai_wm_tab == WatermarkTab::Gemini,
+            },
+            Some(EditorMessage::AiSetWatermarkTab(WatermarkTab::Gemini)),
+        )
+        .width(Fill),
+        button::labeled(
+            tr(lang, "watermark-tab-region"),
+            None,
+            ButtonVariant::Tab {
+                active: ui.ai_wm_tab == WatermarkTab::Region,
+            },
+            Some(EditorMessage::AiSetWatermarkTab(WatermarkTab::Region)),
+        )
+        .width(Fill),
+    ]
+    .spacing(3);
+
+    let mut col = column![
+        tabs,
+        text(tr(lang, "label-apply-target")).size(11),
+        build_apply_target_row(ui.apply_target, lang),
+    ]
+    .spacing(6);
+
+    let region_controls = || {
+        column![
+            text(tr(lang, "label-corner-presets")).size(11),
+            row![
+                button::labeled(
+                    tr(lang, "corner-bottom-right"),
+                    None,
+                    ButtonVariant::Ghost,
+                    Some(EditorMessage::AiSetWmRegion(78.0, 84.0, 20.0, 14.0)),
+                )
+                .width(Fill),
+                button::labeled(
+                    tr(lang, "corner-bottom-left"),
+                    None,
+                    ButtonVariant::Ghost,
+                    Some(EditorMessage::AiSetWmRegion(2.0, 84.0, 20.0, 14.0)),
+                )
+                .width(Fill),
+            ]
+            .spacing(3),
+            row![
+                button::labeled(
+                    tr(lang, "corner-top-right"),
+                    None,
+                    ButtonVariant::Ghost,
+                    Some(EditorMessage::AiSetWmRegion(78.0, 2.0, 20.0, 14.0)),
+                )
+                .width(Fill),
+                button::labeled(
+                    tr(lang, "corner-top-left"),
+                    None,
+                    ButtonVariant::Ghost,
+                    Some(EditorMessage::AiSetWmRegion(2.0, 2.0, 20.0, 14.0)),
+                )
+                .width(Fill),
+            ]
+            .spacing(3),
+            kv_row(
+                tr(lang, "label-region-x"),
+                format!("{:.0}%", ui.ai_wm_region_x)
+            ),
+            slider(0.0..=95.0, ui.ai_wm_region_x, |v| {
+                EditorMessage::AiSetWmRegion(
+                    v,
+                    ui.ai_wm_region_y,
+                    ui.ai_wm_region_w,
+                    ui.ai_wm_region_h,
+                )
+            })
+            .step(1.0_f32)
+            .style(slider_style),
+            kv_row(
+                tr(lang, "label-region-y"),
+                format!("{:.0}%", ui.ai_wm_region_y)
+            ),
+            slider(0.0..=95.0, ui.ai_wm_region_y, |v| {
+                EditorMessage::AiSetWmRegion(
+                    ui.ai_wm_region_x,
+                    v,
+                    ui.ai_wm_region_w,
+                    ui.ai_wm_region_h,
+                )
+            })
+            .step(1.0_f32)
+            .style(slider_style),
+            kv_row(
+                tr(lang, "label-region-w"),
+                format!("{:.0}%", ui.ai_wm_region_w)
+            ),
+            slider(1.0..=100.0, ui.ai_wm_region_w, |v| {
+                EditorMessage::AiSetWmRegion(
+                    ui.ai_wm_region_x,
+                    ui.ai_wm_region_y,
+                    v,
+                    ui.ai_wm_region_h,
+                )
+            })
+            .step(1.0_f32)
+            .style(slider_style),
+            kv_row(
+                tr(lang, "label-region-h"),
+                format!("{:.0}%", ui.ai_wm_region_h)
+            ),
+            slider(1.0..=100.0, ui.ai_wm_region_h, |v| {
+                EditorMessage::AiSetWmRegion(
+                    ui.ai_wm_region_x,
+                    ui.ai_wm_region_y,
+                    ui.ai_wm_region_w,
+                    v,
+                )
+            })
+            .step(1.0_f32)
+            .style(slider_style),
+        ]
+        .spacing(4)
+    };
+
+    match ui.ai_wm_tab {
+        WatermarkTab::AiAuto => {
+            col = col
+                .push(text(tr(lang, "label-detector-model")).size(11))
+                .push(
+                    row![
+                        button::labeled(
+                            "YOLO26",
+                            None,
+                            ButtonVariant::Tab {
+                                active: ui.ai_wm_detector == "yolo26",
+                            },
+                            Some(EditorMessage::AiSetWmDetector("yolo26".to_owned())),
+                        )
+                        .width(Fill),
+                        button::labeled(
+                            "YOLO11",
+                            None,
+                            ButtonVariant::Tab {
+                                active: ui.ai_wm_detector == "yolo11",
+                            },
+                            Some(EditorMessage::AiSetWmDetector("yolo11".to_owned())),
+                        )
+                        .width(Fill),
+                        button::labeled(
+                            tr(lang, "label-mask-brush"),
+                            None,
+                            ButtonVariant::Tab {
+                                active: ui.ai_wm_detector == "brush",
+                            },
+                            Some(EditorMessage::AiSetWmDetector("brush".to_owned())),
+                        )
+                        .width(Fill),
+                        button::labeled(
+                            "Region",
+                            None,
+                            ButtonVariant::Tab {
+                                active: ui.ai_wm_detector == "none",
+                            },
+                            Some(EditorMessage::AiSetWmDetector("none".to_owned())),
+                        )
+                        .width(Fill),
+                    ]
+                    .spacing(3),
+                )
+                .push(text(tr(lang, "label-inpainter-model")).size(11))
+                .push(
+                    row![
+                        button::labeled(
+                            "MI-GAN v2",
+                            None,
+                            ButtonVariant::Tab {
+                                active: ui.ai_wm_inpainter == "migan-pipeline-v2",
+                            },
+                            Some(EditorMessage::AiSetWmInpainter(
+                                "migan-pipeline-v2".to_owned(),
+                            )),
+                        )
+                        .width(Fill),
+                        button::labeled(
+                            "LaMa FP32",
+                            None,
+                            ButtonVariant::Tab {
+                                active: ui.ai_wm_inpainter == "lama-fp32",
+                            },
+                            Some(EditorMessage::AiSetWmInpainter("lama-fp32".to_owned())),
+                        )
+                        .width(Fill),
+                    ]
+                    .spacing(3),
+                )
+                .push(build_ai_model_quick_row(
+                    state,
+                    lang,
+                    "photon.ai_inpaint.onnx",
+                    &ui.ai_wm_inpainter,
+                ))
+                .push(kv_row(
+                    tr(lang, "label-confidence"),
+                    format!("{:.0}%", ui.ai_wm_confidence * 100.0),
+                ))
+                .push(
+                    slider(0.05..=0.95, ui.ai_wm_confidence, |v| {
+                        EditorMessage::AiSetWmConfidence(v)
+                    })
+                    .step(0.05_f32)
+                    .style(slider_style),
+                )
+                .push(kv_row(
+                    tr(lang, "label-mask-padding"),
+                    format!("{} px", ui.ai_wm_mask_padding),
+                ))
+                .push(
+                    slider(0.0..=64.0, ui.ai_wm_mask_padding as f32, |v| {
+                        EditorMessage::AiSetWmMaskPadding(v.round() as u32)
+                    })
+                    .step(1.0_f32)
+                    .style(slider_style),
+                );
+            if ui.ai_wm_detector == "brush" {
+                col = col
+                    .push(kv_row(
+                        tr(lang, "label-brush-size"),
+                        format!(
+                            "{:.0} px ({} strokes)",
+                            ui.ai_wm_brush_radius,
+                            ui.ai_wm_mask_strokes.len()
+                        ),
+                    ))
+                    .push(
+                        slider(4.0..=150.0, ui.ai_wm_brush_radius, |v| {
+                            EditorMessage::AiSetWmMaskBrushRadius(v)
+                        })
+                        .step(1.0_f32)
+                        .style(slider_style),
+                    )
+                    .push(
+                        button::labeled(
+                            tr(lang, "action-clear-mask"),
+                            Some(Icon::Trash),
+                            ButtonVariant::Secondary,
+                            (!ui.ai_wm_mask_strokes.is_empty())
+                                .then_some(EditorMessage::AiClearWmMaskStrokes),
+                        )
+                        .width(Fill),
+                    );
+            } else if ui.ai_wm_detector == "none" {
+                col = col.push(region_controls());
+            }
+            col = col.push(
+                button::labeled(
+                    tr(lang, "action-remove-watermark"),
+                    Some(Icon::Denoise),
+                    ButtonVariant::Primary,
+                    (!running).then_some(EditorMessage::AiRunWatermark),
+                )
+                .width(Fill),
+            );
+        }
+        WatermarkTab::Gemini => {
+            col = col
+                .push(text(tr(lang, "label-gemini-size")).size(11))
+                .push(
+                    row![
+                        button::labeled(
+                            "Auto",
+                            None,
+                            ButtonVariant::Tab {
+                                active: ui.ai_wm_gemini_size.is_none(),
+                            },
+                            Some(EditorMessage::AiSetWmGeminiSize(None)),
+                        )
+                        .width(Fill),
+                        button::labeled(
+                            "48",
+                            None,
+                            ButtonVariant::Tab {
+                                active: ui.ai_wm_gemini_size == Some(48),
+                            },
+                            Some(EditorMessage::AiSetWmGeminiSize(Some(48))),
+                        )
+                        .width(Fill),
+                        button::labeled(
+                            "96",
+                            None,
+                            ButtonVariant::Tab {
+                                active: ui.ai_wm_gemini_size == Some(96),
+                            },
+                            Some(EditorMessage::AiSetWmGeminiSize(Some(96))),
+                        )
+                        .width(Fill),
+                    ]
+                    .spacing(3),
+                )
+                .push(kv_row(
+                    tr(lang, "label-gemini-brightness"),
+                    format!("{:.2}", ui.ai_wm_gemini_brightness),
+                ))
+                .push(
+                    slider(0.0..=1.0, ui.ai_wm_gemini_brightness, |v| {
+                        EditorMessage::AiSetWmGeminiBrightness(v)
+                    })
+                    .step(0.02_f32)
+                    .style(slider_style),
+                )
+                .push(kv_row(
+                    tr(lang, "label-offset-x"),
+                    format!("{} px", ui.ai_wm_gemini_offset_x),
+                ))
+                .push(
+                    slider(-20.0..=20.0, ui.ai_wm_gemini_offset_x as f32, |v| {
+                        EditorMessage::AiSetWmGeminiOffsetX(v.round() as i32)
+                    })
+                    .step(1.0_f32)
+                    .style(slider_style),
+                )
+                .push(kv_row(
+                    tr(lang, "label-offset-y"),
+                    format!("{} px", ui.ai_wm_gemini_offset_y),
+                ))
+                .push(
+                    slider(-20.0..=20.0, ui.ai_wm_gemini_offset_y as f32, |v| {
+                        EditorMessage::AiSetWmGeminiOffsetY(v.round() as i32)
+                    })
+                    .step(1.0_f32)
+                    .style(slider_style),
+                )
+                .push(
+                    checkbox(ui.ai_wm_gemini_force)
+                        .label(tr(lang, "label-force-remove"))
+                        .on_toggle(|_| EditorMessage::AiToggleWmGeminiForce),
+                )
+                .push(
+                    button::labeled(
+                        tr(lang, "action-remove-watermark"),
+                        Some(Icon::Denoise),
+                        ButtonVariant::Primary,
+                        (!running).then_some(EditorMessage::AiRunWatermark),
+                    )
+                    .width(Fill),
+                );
+        }
+        WatermarkTab::Region => {
+            col = col
+                .push(region_controls())
+                .push(kv_row(
+                    tr(lang, "label-ai-edge-feather"),
+                    format!("{} px", ui.ai_wm_region_feather),
+                ))
+                .push(
+                    slider(0.0..=32.0, ui.ai_wm_region_feather as f32, |v| {
+                        EditorMessage::AiSetWmRegionFeather(v.round() as u32)
+                    })
+                    .step(1.0_f32)
+                    .style(slider_style),
+                )
+                .push(
+                    button::labeled(
+                        tr(lang, "action-inpaint-region"),
+                        Some(Icon::Denoise),
+                        ButtonVariant::Primary,
+                        (!running).then_some(EditorMessage::AiRunWatermark),
+                    )
+                    .width(Fill),
+                );
+        }
+    }
+
+    if let Some(banner) = build_ai_task_banner(state, lang) {
+        col = col.push(banner);
+    }
+
+    section_card(tr(lang, "tool-ai-watermark"), col)
+}
+
+fn build_ai_caption_tool_options<'a>(
+    state: EditorViewState<'a>,
+    lang: Language,
+) -> Element<'a, EditorMessage> {
+    let ui = state.editor_ui;
+    let running = state
+        .snapshot
+        .meta
+        .ai_task
+        .as_ref()
+        .is_some_and(|t| t.running);
+
+    let mut col = column![
+        text(tr(lang, "label-ai-model")).size(11),
+        row![
+            button::labeled(
+                "WD ViT v3",
+                None,
+                ButtonVariant::Tab {
+                    active: ui.ai_caption_model == "wd-vit-tagger-v3",
+                },
+                Some(EditorMessage::AiSetCaptionModel(
+                    "wd-vit-tagger-v3".to_owned(),
+                )),
+            )
+            .width(Fill),
+            button::labeled(
+                "WD SwinV2 v3",
+                None,
+                ButtonVariant::Tab {
+                    active: ui.ai_caption_model == "wd-swinv2-tagger-v3",
+                },
+                Some(EditorMessage::AiSetCaptionModel(
+                    "wd-swinv2-tagger-v3".to_owned(),
+                )),
+            )
+            .width(Fill),
+        ]
+        .spacing(3),
+        build_ai_model_quick_row(state, lang, "photon.caption.onnx", &ui.ai_caption_model),
+        kv_row(
+            tr(lang, "label-general-threshold"),
+            format!("{:.2}", ui.ai_caption_general_threshold),
+        ),
+        slider(0.1..=0.9, ui.ai_caption_general_threshold, |v| {
+            EditorMessage::AiSetCaptionGeneralThreshold(v)
+        })
+        .step(0.05_f32)
+        .style(slider_style),
+        kv_row(
+            tr(lang, "label-character-threshold"),
+            format!("{:.2}", ui.ai_caption_char_threshold),
+        ),
+        slider(0.1..=0.95, ui.ai_caption_char_threshold, |v| {
+            EditorMessage::AiSetCaptionCharThreshold(v)
+        })
+        .step(0.05_f32)
+        .style(slider_style),
+        checkbox(ui.ai_caption_replace_underscores)
+            .label(tr(lang, "label-replace-underscores"))
+            .on_toggle(|_| EditorMessage::AiToggleCaptionUnderscores),
+        text(tr(lang, "label-caption-prefix")).size(11),
+        text_input("", &ui.ai_caption_prefix)
+            .on_input(EditorMessage::AiSetCaptionPrefix)
+            .size(TEXT_SIZE_CONTROL)
+            .padding([4, 8])
+            .style(input_style),
+        text(tr(lang, "label-caption-suffix")).size(11),
+        text_input("", &ui.ai_caption_suffix)
+            .on_input(EditorMessage::AiSetCaptionSuffix)
+            .size(TEXT_SIZE_CONTROL)
+            .padding([4, 8])
+            .style(input_style),
+        text(tr(lang, "label-caption-exclude")).size(11),
+        text_input("tag1, tag2", &ui.ai_caption_exclude)
+            .on_input(EditorMessage::AiSetCaptionExclude)
+            .size(TEXT_SIZE_CONTROL)
+            .padding([4, 8])
+            .style(input_style),
+        button::labeled(
+            tr(lang, "action-generate-caption"),
+            Some(Icon::Plug),
+            ButtonVariant::Primary,
+            (!running).then_some(EditorMessage::AiRunCaption),
+        )
+        .width(Fill),
+        rule::horizontal(1).style(hairline_rule_style),
+        text_input(&tr(lang, "caption-placeholder"), &ui.ai_caption_draft)
+            .on_input(EditorMessage::AiSetCaptionDraft)
+            .size(TEXT_SIZE_CONTROL)
+            .padding([5, 8])
+            .style(input_style),
+        row![
+            button::labeled(
+                tr(lang, "action-save-caption"),
+                Some(Icon::Save),
+                ButtonVariant::Secondary,
+                Some(EditorMessage::AiSaveCaption(ui.ai_caption_draft.clone())),
+            )
+            .width(Fill),
+            button::labeled(
+                tr(lang, "action-copy"),
+                Some(Icon::Copy),
+                ButtonVariant::Ghost,
+                (!ui.ai_caption_draft.trim().is_empty())
+                    .then(|| EditorMessage::CopyText(ui.ai_caption_draft.clone())),
+            ),
+            button::labeled(
+                tr(lang, "action-clear"),
+                Some(Icon::Trash),
+                ButtonVariant::Ghost,
+                Some(EditorMessage::AiSaveCaption(String::new())),
+            ),
+        ]
+        .spacing(4),
+    ]
+    .spacing(6);
+
+    if let Some(banner) = build_ai_task_banner(state, lang) {
+        col = col.push(banner);
+    }
+
+    section_card(tr(lang, "tool-ai-caption"), col)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3535,7 +5035,9 @@ pub fn build_color_picker_dialog<'a>(
 ) -> DialogSpec<'a, EditorMessage> {
     let allow_transparent = !matches!(
         target,
-        ColorPickerTarget::Foreground | ColorPickerTarget::ViewportBackground
+        ColorPickerTarget::Foreground
+            | ColorPickerTarget::ViewportBackground
+            | ColorPickerTarget::ViewerViewportBg
     );
     let preview_color = if transparent && allow_transparent {
         None
@@ -3611,10 +5113,12 @@ pub fn build_color_picker_dialog<'a>(
         ColorPickerTarget::Foreground => tr(lang, "label-foreground"),
         ColorPickerTarget::Background => tr(lang, "label-background"),
         ColorPickerTarget::ViewportBackground => tr(lang, "label-viewport-bg"),
+        ColorPickerTarget::ViewerViewportBg => tr(lang, "menu-viewer-backdrop"),
         ColorPickerTarget::CanvasBackground
         | ColorPickerTarget::CropFill
         | ColorPickerTarget::CanvasSizeFill
         | ColorPickerTarget::RotateFill => tr(lang, "label-canvas-bg"),
+        ColorPickerTarget::GradientStop(_) => tr(lang, "label-gradient-stops"),
     };
 
     let mut footer = row![button::labeled(
@@ -3625,7 +5129,10 @@ pub fn build_color_picker_dialog<'a>(
     ),]
     .spacing(6)
     .align_y(Alignment::Center);
-    if target == ColorPickerTarget::ViewportBackground {
+    if matches!(
+        target,
+        ColorPickerTarget::ViewportBackground | ColorPickerTarget::ViewerViewportBg
+    ) {
         footer = footer.push(button::labeled(
             tr(lang, "action-reset"),
             Some(Icon::Reset),
@@ -3893,16 +5400,20 @@ pub fn build_editor_canvas_context_menu<'a>(
                 .checked(state.crop_uv.is_some()),
         ),
         MenuEntry::Item(
-            MenuItem::new(tr(lang, "action-resize"), EditorMessage::OpenResizeDialog)
-                .icon(Icon::Resize)
-                .shortcut("Ctrl+R"),
+            MenuItem::new(
+                tr(lang, "action-image-size"),
+                EditorMessage::OpenResizeDialog,
+            )
+            .icon(Icon::Resize)
+            .shortcut("Ctrl+R"),
         ),
         MenuEntry::Item(
             MenuItem::new(
-                tr(lang, "tool-canvas-size"),
-                EditorMessage::EditorSelectTool(EditorTool::CanvasSize),
+                tr(lang, "action-canvas-size-dialog"),
+                EditorMessage::OpenCanvasSizeDialog,
             )
-            .icon(Icon::CanvasSize),
+            .icon(Icon::CanvasSize)
+            .shortcut("Ctrl+Shift+R"),
         ),
         MenuEntry::Separator,
         MenuEntry::Item(
@@ -4314,7 +5825,34 @@ pub fn build_editor_plugins_menu_entries<'a>(
         .filter(|p| p.enabled && p.capabilities.contains(&PluginCapability::EditorFilter))
         .collect();
 
-    let mut entries = Vec::new();
+    let has_doc = state.snapshot.meta.editor.is_some();
+    let mut entries = vec![
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "menu-plugins-rembg"),
+                EditorMessage::EditorSelectTool(EditorTool::RemoveBg),
+            )
+            .icon(Icon::Mask)
+            .enabled(has_doc),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "menu-plugins-watermark"),
+                EditorMessage::EditorSelectTool(EditorTool::Watermark),
+            )
+            .icon(Icon::Denoise)
+            .enabled(has_doc),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "menu-plugins-caption"),
+                EditorMessage::EditorSelectTool(EditorTool::Caption),
+            )
+            .icon(Icon::Plug)
+            .enabled(has_doc),
+        ),
+        MenuEntry::Separator,
+    ];
     if enabled_plugins.is_empty() {
         entries.push(MenuEntry::Item(
             MenuItem::new(tr(lang, "menu-plugins-no-enabled"), EditorMessage::Noop).enabled(false),
@@ -4327,7 +5865,7 @@ pub fn build_editor_plugins_menu_entries<'a>(
                     EditorMessage::RunPlugin(plugin.id.clone()),
                 )
                 .icon(Icon::Plug)
-                .enabled(state.snapshot.meta.editor.is_some()),
+                .enabled(has_doc),
             ));
         }
     }

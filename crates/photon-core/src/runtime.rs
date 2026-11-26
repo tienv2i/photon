@@ -7,6 +7,7 @@ use photon_image::{
     EditorDocument, LayerThumbnail, composite_stack, composite_stack_excluding,
     render_layer_thumbnails,
 };
+use photon_plugins::AiWorkerEvent;
 use photon_protocol::{
     Command, CommandResponse, Envelope, Event, EventKind, ProtocolError, Query, UiStateSnapshot,
     UiText, UiTreeSnapshot,
@@ -77,6 +78,15 @@ enum GatewayMsg {
         failed: usize,
         cancelled: bool,
         message: UiText,
+    },
+    AiProgress {
+        task_id: String,
+        percent: u8,
+        stage: String,
+    },
+    AiFinished {
+        task_id: String,
+        event: AiWorkerEvent,
     },
 }
 
@@ -312,6 +322,39 @@ impl CoreRuntime {
                                     });
                                 });
                             }
+
+                            if let Some(ai_job) = core.take_pending_ai() {
+                                let task_id = ai_job.task_id().to_owned();
+                                let kind = ai_job.kind().to_owned();
+                                let _ = event_tx.send(Event {
+                                    seq_id: seq.fetch_add(1, Ordering::Relaxed),
+                                    timestamp_ms: now_ms(),
+                                    revision: rev,
+                                    kind: EventKind::TaskStarted {
+                                        task_id: task_id.clone(),
+                                        kind,
+                                    },
+                                });
+                                let tx_bg = worker_tx.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    let tid = task_id;
+                                    ai_job.run(|ev| match ev {
+                                        AiWorkerEvent::Progress { percent, stage } => {
+                                            let _ = tx_bg.blocking_send(GatewayMsg::AiProgress {
+                                                task_id: tid.clone(),
+                                                percent,
+                                                stage,
+                                            });
+                                        }
+                                        other => {
+                                            let _ = tx_bg.blocking_send(GatewayMsg::AiFinished {
+                                                task_id: tid.clone(),
+                                                event: other,
+                                            });
+                                        }
+                                    });
+                                });
+                            }
                         }
                         let _ = event_tx.send(Event {
                             seq_id: seq.fetch_add(1, Ordering::Relaxed),
@@ -435,8 +478,56 @@ impl CoreRuntime {
                             },
                         });
                     }
+                    GatewayMsg::AiProgress {
+                        task_id,
+                        percent,
+                        stage,
+                    } => {
+                        if let Some(task) = core.apply_ai_progress(&task_id, percent, stage) {
+                            let snap = Arc::new(core.snapshot());
+                            let _ = state_tx.send(snap);
+                            let _ = event_tx.send(Event {
+                                seq_id: seq.fetch_add(1, Ordering::Relaxed),
+                                timestamp_ms: now_ms(),
+                                revision: core.revision(),
+                                kind: EventKind::TaskProgress {
+                                    task_id,
+                                    percent: task.percent,
+                                    stage: task.stage,
+                                },
+                            });
+                        }
+                    }
+                    GatewayMsg::AiFinished { task_id, event } => {
+                        let (ok, message) = core.apply_ai_finished(&task_id, event);
+                        let snap = Arc::new(core.snapshot());
+                        let listing_epoch = snap.meta.listing_epoch;
+                        let ws = snap.meta.workspace;
+                        let rev = core.revision();
+                        let _ = state_tx.send(snap);
+                        let _ = event_tx.send(Event {
+                            seq_id: seq.fetch_add(1, Ordering::Relaxed),
+                            timestamp_ms: now_ms(),
+                            revision: rev,
+                            kind: EventKind::TaskFinished {
+                                task_id,
+                                ok,
+                                message,
+                            },
+                        });
+                        let _ = event_tx.send(Event {
+                            seq_id: seq.fetch_add(1, Ordering::Relaxed),
+                            timestamp_ms: now_ms(),
+                            revision: rev,
+                            kind: EventKind::StateChanged {
+                                workspace: ws,
+                                listing_epoch,
+                            },
+                        });
+                    }
                 }
             }
+            core.persist_ui_state(false);
         });
 
         handle
@@ -452,6 +543,19 @@ fn build_editor_transform_frames(
     let layer_idx = stack.index_of(target_id)?;
     let layer = &stack.layers[layer_idx];
     let (lw, lh) = layer.dimensions();
+    let opacity = if layer.visible {
+        layer.opacity.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let active_mask = if layer.mask_enabled {
+        layer
+            .mask
+            .as_deref()
+            .filter(|m| m.len() == (lw as usize) * (lh as usize))
+    } else {
+        None
+    };
 
     if stack.selection.has_selection()
         && target_id == stack.active_layer_id
@@ -480,7 +584,21 @@ fn build_editor_transform_frames(
                     continue;
                 }
                 let p = remainder.get_pixel(lx as u32, ly as u32).0;
-                let ex_a = ((u16::from(p[3]) * u16::from(sel_a) + 127) / 255) as u8;
+                let mask_factor = match active_mask {
+                    Some(m) => {
+                        let mx = lx - layer.mask_offset_x;
+                        let my = ly - layer.mask_offset_y;
+                        if mx >= 0 && my >= 0 && (mx as u32) < lw && (my as u32) < lh {
+                            f32::from(m[(my as usize) * (lw as usize) + (mx as usize)]) / 255.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    None => 1.0,
+                };
+                let ex_a = ((f32::from(p[3]) * (f32::from(sel_a) / 255.0) * opacity * mask_factor)
+                    .round()
+                    .clamp(0.0, 255.0)) as u8;
                 extracted.put_pixel(sx, sy, image::Rgba([p[0], p[1], p[2], ex_a]));
 
                 let keep = 255 - u16::from(sel_a);
@@ -511,16 +629,92 @@ fn build_editor_transform_frames(
     }
 
     let base = composite_stack_excluding(stack, target_id);
+    let mut layer_rgba = layer.pixels.as_raw().clone();
+    if opacity < 1.0 - 1e-4 {
+        for px in layer_rgba.chunks_exact_mut(4) {
+            px[3] = (f32::from(px[3]) * opacity).round().clamp(0.0, 255.0) as u8;
+        }
+    }
     Some(EditorTransformFrames {
         pixel_revision: doc.pixel_revision,
         layer_id: target_id,
         canvas_width: stack.canvas_width,
         canvas_height: stack.canvas_height,
         base_rgba_excluding_active: base.as_raw().clone(),
-        active_layer_rgba: layer.pixels.as_raw().clone(),
+        active_layer_rgba: layer_rgba,
         offset_x: layer.offset_x,
         offset_y: layer.offset_y,
         layer_width: lw,
         layer_height: lh,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    use image::{Rgba, RgbaImage};
+    use photon_image::LayerOperation;
+    use photon_protocol::{SelectionBooleanOp, SelectionShape};
+
+    #[test]
+    fn build_editor_transform_frames_extracts_selection_hole_on_offset_layer() {
+        let bg = RgbaImage::from_pixel(30, 30, Rgba([10, 20, 30, 255]));
+        let mut doc = EditorDocument::from_rgba(PathBuf::from("tr_frames.png"), bg);
+        let fg = Arc::new(RgbaImage::from_pixel(16, 16, Rgba([220, 50, 40, 255])));
+        doc.apply_layer_op(LayerOperation::AddImage {
+            name: "FG".to_owned(),
+            offset_x: 6,
+            offset_y: 8,
+            pixels: fg,
+        })
+        .unwrap();
+        let fg_id = doc.stack().active_layer_id;
+        doc.apply_layer_op(LayerOperation::SetProps {
+            id: fg_id,
+            name: None,
+            visible: None,
+            locked: None,
+            opacity: Some(0.5),
+            blend_mode: None,
+            offset_x: None,
+            offset_y: None,
+        })
+        .unwrap();
+
+        // Select [10, 10, 8, 8] partially inside the 16x16 layer at (6, 8)
+        doc.select_shape(
+            &SelectionShape::Rect {
+                x: 10.0,
+                y: 10.0,
+                width: 8.0,
+                height: 8.0,
+                feather: 0.0,
+                anti_alias: false,
+            },
+            SelectionBooleanOp::Replace,
+        );
+
+        let frames = build_editor_transform_frames(&doc, Some(fg_id)).unwrap();
+        assert_eq!((frames.offset_x, frames.offset_y), (10, 10));
+        assert_eq!((frames.layer_width, frames.layer_height), (8, 8));
+
+        // Base at (12, 12) (inside hole) shows only background [10, 20, 30, 255]
+        let hole_idx = (12 * 30 + 12) * 4;
+        assert_eq!(
+            &frames.base_rgba_excluding_active[hole_idx..hole_idx + 4],
+            &[10, 20, 30, 255]
+        );
+        // Base at (7, 9) (inside FG layer, outside hole) shows 50%-blended FG over BG
+        let keep_idx = (9 * 30 + 7) * 4;
+        assert!(frames.base_rgba_excluding_active[keep_idx] > 100);
+        // Extracted active frame at (2, 2) -> canvas (12, 12) has FG color with layer opacity 0.5 applied
+        let ex_idx = (2 * 8 + 2) * 4;
+        assert_eq!(
+            &frames.active_layer_rgba[ex_idx..ex_idx + 3],
+            &[220, 50, 40]
+        );
+        assert!((i16::from(frames.active_layer_rgba[ex_idx + 3]) - 128).abs() <= 1);
+    }
 }

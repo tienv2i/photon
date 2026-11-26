@@ -4,8 +4,12 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use photon_protocol::{Language, LayoutState, Theme, TranslateSettings};
+use photon_protocol::{AiSettings, Language, LayoutState, Theme, TranslateSettings};
 use serde::{Deserialize, Serialize};
+
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -15,6 +19,8 @@ pub struct Config {
     pub last_folder: Option<String>,
     pub layout: LayoutState,
     pub remember_last_folder: bool,
+    #[serde(default = "default_true")]
+    pub save_ui_state_on_exit: bool,
     pub hardware_acceleration: bool,
     pub favorites: Vec<String>,
     /// Set to `true` after the first-launch default Quick Access items have been
@@ -25,6 +31,8 @@ pub struct Config {
     pub translate: TranslateSettings,
     #[serde(default)]
     pub disabled_plugins: Vec<String>,
+    #[serde(default)]
+    pub ai: AiSettings,
 }
 
 impl Default for Config {
@@ -35,11 +43,13 @@ impl Default for Config {
             last_folder: None,
             layout: LayoutState::default(),
             remember_last_folder: true,
+            save_ui_state_on_exit: true,
             hardware_acceleration: true,
             favorites: Vec::new(),
             favorites_initialized: false,
             translate: TranslateSettings::default(),
             disabled_plugins: Vec::new(),
+            ai: AiSettings::default(),
         }
     }
 }
@@ -51,6 +61,7 @@ impl Config {
 
     pub fn sanitized(mut self) -> Self {
         self.layout = self.layout.sanitized();
+        self.ai = self.ai.clone().sanitized();
         self
     }
 
@@ -86,6 +97,23 @@ impl Config {
             (Some(bak), None) => Some(format!("layout reset (backup at {})", bak.display())),
             (None, None) => Some("layout reset to defaults".to_owned()),
             (_, Some(e)) => Some(format!("layout reset in memory, save failed: {e}")),
+        };
+        (cfg, note)
+    }
+
+    pub fn reset_settings_only(path: &Path) -> (Self, Option<String>) {
+        let backup = Self::backup_existing(path);
+        let (existing, _) = Self::load_or_create(path);
+        let mut cfg = Self::factory_default();
+        cfg.last_folder = existing.last_folder;
+        let mut preserved_layout = existing.layout;
+        preserved_layout.apply_settings_from(&cfg.layout);
+        cfg.layout = preserved_layout;
+        let err = cfg.save(path).err();
+        let note = match (backup, err) {
+            (Some(bak), None) => Some(format!("settings reset (backup at {})", bak.display())),
+            (None, None) => Some("settings reset to defaults".to_owned()),
+            (_, Some(e)) => Some(format!("settings reset in memory, save failed: {e}")),
         };
         (cfg, note)
     }
@@ -138,6 +166,108 @@ impl Config {
         }
         fs::rename(&tmp, path)?;
         Ok(())
+    }
+}
+
+/// Persisted window, folder, panel, and view UI state stored separately from `config.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiState {
+    pub last_folder: Option<String>,
+    pub layout: LayoutState,
+}
+
+impl UiState {
+    pub fn sanitized(mut self) -> Self {
+        self.layout = self.layout.sanitized();
+        self
+    }
+
+    pub fn load_or_migrate(path: &Path, legacy_config: &Config) -> (Self, Option<String>) {
+        match fs::read_to_string(path) {
+            Ok(text) => match serde_json::from_str::<Self>(&text) {
+                Ok(state) => (state.sanitized(), None),
+                Err(error) => {
+                    let backup = path.with_extension("json.corrupt");
+                    let _ = fs::copy(path, &backup);
+                    let state = Self::default().sanitized();
+                    let _ = state.save(path);
+                    (
+                        state,
+                        Some(format!(
+                            "ui_state corrupt ({error}); defaults restored, backup kept at {}",
+                            backup.display()
+                        )),
+                    )
+                }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let migrated = Self {
+                    last_folder: legacy_config.last_folder.clone(),
+                    layout: legacy_config.layout.clone(),
+                }
+                .sanitized();
+                let warn = migrated
+                    .save(path)
+                    .err()
+                    .map(|e| format!("cannot create initial ui_state: {e}"));
+                (migrated, warn)
+            }
+            Err(err) => (
+                Self::default().sanitized(),
+                Some(format!("cannot read ui_state {}: {err}", path.display())),
+            ),
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        let bytes =
+            serde_json::to_vec_pretty(self).map_err(|e| std::io::Error::other(e.to_string()))?;
+        {
+            let mut file = fs::File::create(&tmp)?;
+            file.write_all(&bytes)?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    pub fn reset_to_default(path: &Path) -> (Self, Option<String>) {
+        let backup = Config::backup_existing(path);
+        let state = Self::default().sanitized();
+        let err = state.save(path).err();
+        let note = match (backup, err) {
+            (Some(bak), None) => Some(format!(
+                "ui_state reset to defaults (backup at {})",
+                bak.display()
+            )),
+            (None, None) => Some("ui_state reset to defaults".to_owned()),
+            (_, Some(e)) => Some(format!("ui_state reset in memory, save failed: {e}")),
+        };
+        (state, note)
+    }
+
+    pub fn reset_layout_only(ui_path: &Path, config_path: &Path) -> (Self, Option<String>) {
+        let backup = Config::backup_existing(ui_path);
+        let (cfg, _) = Config::load_or_create(config_path);
+        let mut state = Self::default();
+        state.layout.apply_settings_from(&cfg.layout);
+        state = state.sanitized();
+        let err = state.save(ui_path).err();
+        let note = match (backup, err) {
+            (Some(bak), None) => Some(format!(
+                "ui_state layout reset (backup at {})",
+                bak.display()
+            )),
+            (None, None) => Some("ui_state layout reset to defaults".to_owned()),
+            (_, Some(e)) => Some(format!("ui_state layout reset in memory, save failed: {e}")),
+        };
+        (state, note)
     }
 }
 
@@ -237,6 +367,45 @@ mod tests {
         let (loaded, warn) = Config::load_or_create(&path);
         assert!(warn.is_none());
         assert_eq!(loaded.disabled_plugins, vec!["com.example.one"]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ui_state_migrates_from_legacy_config_and_saves_independently() {
+        let dir = std::env::temp_dir().join(format!("photon-ui-state-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let ui_path = dir.join("ui_state.json");
+
+        let legacy = Config {
+            last_folder: Some("/tmp/legacy".to_owned()),
+            layout: LayoutState {
+                window_width: 1600,
+                window_height: 900,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let (migrated, warn) = UiState::load_or_migrate(&ui_path, &legacy);
+        assert!(warn.is_none());
+        assert!(ui_path.is_file());
+        assert_eq!(migrated.last_folder.as_deref(), Some("/tmp/legacy"));
+        assert_eq!(migrated.layout.window_width, 1600);
+
+        let mut updated = migrated;
+        updated.layout.window_width = 1440;
+        updated.layout.viewer_viewport_background = Some([32, 34, 38]);
+        updated.save(&ui_path).unwrap();
+
+        let (reloaded, warn2) = UiState::load_or_migrate(&ui_path, &legacy);
+        assert!(warn2.is_none());
+        assert_eq!(reloaded.layout.window_width, 1440);
+        assert_eq!(
+            reloaded.layout.viewer_viewport_background,
+            Some([32, 34, 38])
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

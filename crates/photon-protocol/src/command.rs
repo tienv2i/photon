@@ -6,12 +6,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ApplyTarget, BatchOperation, BatchOutput, BatchSource, BlendMode, BrushSettings, CanvasAnchor,
-    ClientKind, DrawShapeKind, GradientColorMode, GradientKind, HealingMode, Language, LayerEffect,
-    LayerTransformSpec, LayoutState, LiquifyMode, LiveStrokeKind, MoveDirection, PROTOCOL_VERSION,
-    PluginParamValue, ResizeMode, SelectionBooleanOp, SelectionModifyOp, SelectionShape,
-    ShapeFillMode, Theme, TranslateSettings, TranslationBlock, VectorPathNode, Workspace,
-    default_brush_hardness, default_half_f32, default_one_f32, default_opaque_alpha,
+    AiDevice, AiMaskStroke, ApplyTarget, BatchOperation, BatchOutput, BatchSource, BlendMode,
+    BrushSettings, CanvasAnchor, ClientKind, DrawShapeKind, GradientColorMode, GradientKind,
+    GradientRepeat, GradientStop, HealingMode, Language, LayerEffect, LayerTransformSpec,
+    LayoutState, LiquifyMode, LiveStrokeKind, MoveDirection, PROTOCOL_VERSION, PluginParamValue,
+    ResizeMode, SelectionBooleanOp, SelectionModifyOp, SelectionShape, ShapeFillMode, Theme,
+    TranslateSettings, TranslationBlock, VectorPathNode, Workspace, default_brush_hardness,
+    default_half_f32, default_one_f32, default_opaque_alpha,
 };
 
 fn default_protocol() -> u32 {
@@ -20,6 +21,62 @@ fn default_protocol() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_ai_auto_unload_secs() -> u32 {
+    60
+}
+
+fn default_rembg_model_id() -> String {
+    "rmbg-1.4".to_owned()
+}
+
+fn default_gemini_size() -> String {
+    "auto".to_owned()
+}
+
+fn default_gemini_logo_value() -> f32 {
+    255.0
+}
+
+fn default_ai_detector_model() -> String {
+    "watermark-yolo26".to_owned()
+}
+
+fn default_ai_inpainter_model() -> String {
+    "migan-pipeline-v2".to_owned()
+}
+
+fn default_ai_inpaint_confidence() -> f32 {
+    0.45
+}
+
+fn default_ai_inpaint_padding() -> u32 {
+    8
+}
+
+fn default_region_dim() -> i32 {
+    64
+}
+
+fn default_refine_softness() -> f32 {
+    0.30
+}
+
+fn default_caption_model_id() -> String {
+    "wd-vit-tagger-v3".to_owned()
+}
+
+fn default_caption_general_threshold() -> f32 {
+    0.35
+}
+
+fn default_caption_character_threshold() -> f32 {
+    0.85
+}
+
+fn default_ocr_engine() -> String {
+    "tesseract".to_owned()
 }
 
 /// A command envelope. `id` is echoed in the response, recorded in the journal,
@@ -111,6 +168,8 @@ pub enum Command {
         language: Language,
         remember_last_folder: bool,
         hardware_acceleration: bool,
+        #[serde(default = "default_true")]
+        save_ui_state_on_exit: bool,
     },
     NewFolder {
         parent: String,
@@ -301,11 +360,17 @@ pub enum Command {
         #[serde(default)]
         bg_color: Option<[u8; 3]>,
         #[serde(default)]
+        stops: Vec<GradientStop>,
+        #[serde(default)]
         opacity: Option<f32>,
+        #[serde(default)]
+        repeat: GradientRepeat,
         #[serde(default)]
         reverse: bool,
         #[serde(default)]
         dither: bool,
+        #[serde(default)]
+        blend_mode: BlendMode,
     },
     EditorHealingStroke {
         points: Vec<[f64; 2]>,
@@ -521,6 +586,110 @@ pub enum Command {
         #[serde(default)]
         target: ApplyTarget,
     },
+    AiRefreshPlugins,
+    AiSetSettings {
+        device: AiDevice,
+        #[serde(default = "default_ai_auto_unload_secs")]
+        auto_unload_secs: u32,
+    },
+    AiDownloadModel {
+        model_id: String,
+    },
+    AiDeleteModel {
+        model_id: String,
+    },
+    AiSetCustomModel {
+        model_id: String,
+        path: String,
+    },
+    AiCancel,
+    QuickActionRun {
+        plugin_id: String,
+        action_id: String,
+        #[serde(default)]
+        paths: Vec<String>,
+    },
+    EditorAiRemoveBackground {
+        #[serde(default = "default_rembg_model_id")]
+        model_id: String,
+        #[serde(default)]
+        feather: u8,
+        #[serde(default)]
+        target: ApplyTarget,
+    },
+    EditorDewatermarkGemini {
+        #[serde(default = "default_gemini_size")]
+        size: String,
+        #[serde(default = "default_gemini_logo_value")]
+        logo_value: f32,
+        #[serde(default)]
+        force: bool,
+        #[serde(default)]
+        offset_x: i32,
+        #[serde(default)]
+        offset_y: i32,
+        #[serde(default)]
+        target: ApplyTarget,
+    },
+    EditorInpaintRegion {
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        #[serde(default)]
+        feather: u32,
+        #[serde(default)]
+        target: ApplyTarget,
+    },
+    EditorAiInpaint {
+        #[serde(default = "default_ai_detector_model")]
+        detector_model: String,
+        #[serde(default = "default_ai_inpainter_model")]
+        inpainter_model: String,
+        #[serde(default = "default_ai_inpaint_confidence")]
+        confidence: f32,
+        #[serde(default = "default_ai_inpaint_padding")]
+        mask_padding: u32,
+        #[serde(default)]
+        region_x: i32,
+        #[serde(default)]
+        region_y: i32,
+        #[serde(default = "default_region_dim")]
+        region_width: i32,
+        #[serde(default = "default_region_dim")]
+        region_height: i32,
+        #[serde(default)]
+        brush_strokes: Vec<AiMaskStroke>,
+        #[serde(default)]
+        target: ApplyTarget,
+    },
+    EditorRefineAlpha {
+        #[serde(default)]
+        erase_strokes: Vec<AiMaskStroke>,
+        #[serde(default)]
+        restore_strokes: Vec<AiMaskStroke>,
+        #[serde(default = "default_refine_softness")]
+        softness: f32,
+    },
+    EditorGenerateCaption {
+        #[serde(default = "default_caption_model_id")]
+        model_id: String,
+        #[serde(default = "default_caption_general_threshold")]
+        general_threshold: f32,
+        #[serde(default = "default_caption_character_threshold")]
+        character_threshold: f32,
+        #[serde(default = "default_true")]
+        replace_underscores: bool,
+        #[serde(default)]
+        prefix: String,
+        #[serde(default)]
+        suffix: String,
+        #[serde(default)]
+        exclude_tags: String,
+    },
+    EditorSaveCaption {
+        text: String,
+    },
     ViewerTranslate {
         path: String,
         #[serde(default)]
@@ -529,6 +698,8 @@ pub enum Command {
         target_lang: String,
         #[serde(default)]
         region: Option<[i32; 4]>,
+        #[serde(default = "default_ocr_engine")]
+        ocr_engine: String,
     },
     ViewerSaveTranslation {
         path: String,
@@ -552,6 +723,22 @@ pub enum Command {
         path: String,
     },
     EditorClose,
+    EditorSwitchTab {
+        tab_id: u64,
+    },
+    EditorCloseTab {
+        #[serde(default)]
+        tab_id: Option<u64>,
+    },
+    EditorReorderTab {
+        tab_id: u64,
+        new_index: usize,
+    },
+    FocusWindow,
+    SaveUiState {
+        #[serde(default)]
+        force: bool,
+    },
     CancelTask {
         task_id: String,
     },
@@ -668,6 +855,20 @@ impl Command {
             Self::PluginInstall { .. } => "plugin_install",
             Self::PluginUninstall { .. } => "plugin_uninstall",
             Self::PluginRun { .. } => "plugin_run",
+            Self::AiRefreshPlugins => "ai_refresh_plugins",
+            Self::AiSetSettings { .. } => "ai_set_settings",
+            Self::AiDownloadModel { .. } => "ai_download_model",
+            Self::AiDeleteModel { .. } => "ai_delete_model",
+            Self::AiSetCustomModel { .. } => "ai_set_custom_model",
+            Self::AiCancel => "ai_cancel",
+            Self::QuickActionRun { .. } => "quick_action_run",
+            Self::EditorAiRemoveBackground { .. } => "editor_ai_remove_background",
+            Self::EditorDewatermarkGemini { .. } => "editor_dewatermark_gemini",
+            Self::EditorInpaintRegion { .. } => "editor_inpaint_region",
+            Self::EditorAiInpaint { .. } => "editor_ai_inpaint",
+            Self::EditorRefineAlpha { .. } => "editor_refine_alpha",
+            Self::EditorGenerateCaption { .. } => "editor_generate_caption",
+            Self::EditorSaveCaption { .. } => "editor_save_caption",
             Self::ViewerTranslate { .. } => "viewer_translate",
             Self::ViewerSaveTranslation { .. } => "viewer_save_translation",
             Self::ViewerDeleteTranslation { .. } => "viewer_delete_translation",
@@ -678,6 +879,11 @@ impl Command {
             Self::EditorSave => "editor_save",
             Self::EditorSaveAs { .. } => "editor_save_as",
             Self::EditorClose => "editor_close",
+            Self::EditorSwitchTab { .. } => "editor_switch_tab",
+            Self::EditorCloseTab { .. } => "editor_close_tab",
+            Self::EditorReorderTab { .. } => "editor_reorder_tab",
+            Self::FocusWindow => "focus_window",
+            Self::SaveUiState { .. } => "save_ui_state",
             Self::CancelTask { .. } => "cancel_task",
             Self::ResetConfig { .. } => "reset_config",
             Self::DebugScreenshot { .. } => "debug_screenshot",
@@ -691,8 +897,13 @@ impl Command {
             self,
             Self::DebugScreenshot { .. }
                 | Self::DebugUiAction { .. }
+                | Self::FocusWindow
+                | Self::SaveUiState { .. }
                 | Self::CancelTask { .. }
                 | Self::BatchCancel
+                | Self::AiCancel
+                | Self::AiDownloadModel { .. }
+                | Self::AiDeleteModel { .. }
         )
     }
 }
@@ -962,5 +1173,45 @@ mod tests {
         }
         let schemas = protocol_schemas();
         assert!(schemas.get("command").is_some());
+    }
+
+    #[test]
+    fn gradient_command_multi_stop_roundtrip() {
+        let cmd = Command::EditorDrawGradient {
+            start: [10.0, 20.0],
+            end: [110.0, 20.0],
+            kind: crate::GradientKind::Spiral,
+            color_mode: crate::GradientColorMode::Custom,
+            fg_color: Some([255, 0, 0]),
+            bg_color: Some([0, 0, 255]),
+            stops: vec![
+                crate::GradientStop {
+                    pos: 0.0,
+                    color: [255, 0, 0],
+                    alpha: 1.0,
+                },
+                crate::GradientStop {
+                    pos: 0.5,
+                    color: [0, 255, 0],
+                    alpha: 0.5,
+                },
+                crate::GradientStop {
+                    pos: 1.0,
+                    color: [0, 0, 255],
+                    alpha: 1.0,
+                },
+            ],
+            opacity: Some(0.85),
+            repeat: crate::GradientRepeat::Alternating,
+            reverse: true,
+            dither: true,
+            blend_mode: crate::BlendMode::Multiply,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: Command = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            serde_json::to_value(&back).unwrap(),
+            serde_json::to_value(&cmd).unwrap()
+        );
     }
 }

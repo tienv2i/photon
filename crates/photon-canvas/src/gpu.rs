@@ -1,14 +1,18 @@
 //! WGSL shader sources, GPU texture management, and `wgpu` rendering pipeline for `ImageCanvasProgram`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use iced::Rectangle;
 use iced::wgpu;
 use iced::widget::shader::{Pipeline, Primitive, Viewport};
 use image::{DynamicImage, RgbaImage};
-use photon_protocol::{CanvasAntiAliasingMode, ColorAdjustments, ViewportDenoiseMode};
+use photon_protocol::{
+    BlendMode, CanvasAntiAliasingMode, ColorAdjustments, GradientKind, GradientRepeat,
+    ViewportDenoiseMode,
+};
 
-use crate::{CpuImageFrame, CpuMaskFrame, OverlayVertex, TransformPreview};
+use crate::{CpuImageFrame, CpuMaskFrame, GradientPreview, OverlayVertex, TransformPreview};
 
 /// Maximum GPU upload dimension clamp (bounded by `device.limits().max_texture_dimension_2d`).
 pub const MAX_GPU_TEXTURE_DIM: u32 = 16384;
@@ -47,6 +51,7 @@ pub struct ImageQuadPrimitive {
     pub aa_mode: CanvasAntiAliasingMode,
     pub denoise_mode: ViewportDenoiseMode,
     pub transform_preview: Option<TransformPreview>,
+    pub gradient_preview: Option<GradientPreview>,
 }
 
 #[repr(C)]
@@ -101,6 +106,11 @@ pub(crate) struct Uniforms {
     pub transform_has_base: f32,
     pub _pad2: f32,
     pub _pad3: [f32; 2],
+    pub gradient_line: [f32; 4],
+    pub gradient_params: [f32; 4],
+    pub gradient_meta: [f32; 4],
+    pub gradient_stop_colors: [[f32; 4]; 12],
+    pub gradient_stop_pos: [[f32; 4]; 3],
 }
 
 impl Uniforms {
@@ -117,16 +127,21 @@ impl Uniforms {
 
 struct CachedSimpleTexture {
     revision: u64,
+    width: u32,
+    height: u32,
+    rgba_ptr: usize,
     view: wgpu::TextureView,
 }
+
+type SimpleFrameKey = (String, u64, usize, u32, u32);
 
 struct CachedGpuTexture {
     revision: u64,
     image_view: wgpu::TextureView,
-    bound_base: Option<(String, u64)>,
-    bound_compare: Option<(String, u64)>,
-    bound_sel: Option<(String, u64)>,
-    bound_transform_layer: Option<(String, u64)>,
+    bound_base: Option<SimpleFrameKey>,
+    bound_compare: Option<SimpleFrameKey>,
+    bound_sel: Option<SimpleFrameKey>,
+    bound_transform_layer: Option<SimpleFrameKey>,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
@@ -209,6 +224,11 @@ struct Uniforms {
     transform_has_base: f32,
     _pad2: f32,
     _pad3: vec2<f32>,
+    gradient_line: vec4<f32>,
+    gradient_params: vec4<f32>,
+    gradient_meta: vec4<f32>,
+    gradient_stop_colors: array<vec4<f32>, 12>,
+    gradient_stop_pos: array<vec4<f32>, 3>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -369,7 +389,7 @@ fn apply_curve_lut(rgb: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
 }
 
-fn sample_transform_overlay(doc_px: vec2<f32>, base_texel: vec4<f32>) -> vec4<f32> {
+fn doc_px_to_transform_local(doc_px: vec2<f32>) -> vec2<f32> {
     let piv_local = u.transform_pivot * u.transform_layer_size;
     let piv_world = u.transform_layer_offset + piv_local + u.transform_translate;
     let w = doc_px - piv_world;
@@ -378,18 +398,101 @@ fn sample_transform_overlay(doc_px: vec2<f32>, base_texel: vec4<f32>) -> vec4<f3
     let u_rot = vec2<f32>(w.x * c + w.y * s, -w.x * s + w.y * c);
     let safe_sx = select(u.transform_scale.x, select(1e-5, -1e-5, u.transform_scale.x < 0.0), abs(u.transform_scale.x) < 1e-5);
     let safe_sy = select(u.transform_scale.y, select(1e-5, -1e-5, u.transform_scale.y < 0.0), abs(u.transform_scale.y) < 1e-5);
-    let local_px = u_rot / vec2<f32>(safe_sx, safe_sy) + piv_local;
-    let layer_uv = local_px / max(u.transform_layer_size, vec2<f32>(1.0));
-    if (layer_uv.x < 0.0 || layer_uv.x > 1.0 || layer_uv.y < 0.0 || layer_uv.y > 1.0) {
+    return u_rot / vec2<f32>(safe_sx, safe_sy) + piv_local;
+}
+
+fn fetch_transform_texel(ix: i32, iy: i32, tex_size_i: vec2<i32>) -> vec4<f32> {
+    if (ix < 0 || iy < 0 || ix >= tex_size_i.x || iy >= tex_size_i.y) {
+        return vec4<f32>(0.0);
+    }
+    return textureLoad(transform_layer_tex, vec2<i32>(ix, iy), 0);
+}
+
+fn sample_transform_layer(local_px: vec2<f32>) -> vec4<f32> {
+    let tex_size_u = textureDimensions(transform_layer_tex);
+    let tex_size_i = vec2<i32>(i32(tex_size_u.x), i32(tex_size_u.y));
+    let tex_size = max(vec2<f32>(f32(tex_size_i.x), f32(tex_size_i.y)), vec2<f32>(1.0));
+    let tex_px = local_px * (tex_size / max(u.transform_layer_size, vec2<f32>(1.0)));
+
+    if (u.aa_mode < 0.5) {
+        let ix = i32(floor(tex_px.x));
+        let iy = i32(floor(tex_px.y));
+        return fetch_transform_texel(ix, iy, tex_size_i);
+    }
+
+    let coord = tex_px - vec2<f32>(0.5);
+    if (coord.x <= -1.5 || coord.y <= -1.5 || coord.x >= tex_size.x + 0.5 || coord.y >= tex_size.y + 0.5) {
+        return vec4<f32>(0.0);
+    }
+    let base = vec2<i32>(floor(coord));
+    let f = coord - vec2<f32>(base);
+
+    var pr = vec3<f32>(0.0);
+    var pa = 0.0;
+    if (u.aa_mode < 1.5) {
+        let wx0 = 1.0 - f.x;
+        let wx1 = f.x;
+        let wy0 = 1.0 - f.y;
+        let wy1 = f.y;
+        let s00 = fetch_transform_texel(base.x, base.y, tex_size_i);
+        let s10 = fetch_transform_texel(base.x + 1, base.y, tex_size_i);
+        let s01 = fetch_transform_texel(base.x, base.y + 1, tex_size_i);
+        let s11 = fetch_transform_texel(base.x + 1, base.y + 1, tex_size_i);
+        let w00 = wx0 * wy0;
+        let w10 = wx1 * wy0;
+        let w01 = wx0 * wy1;
+        let w11 = wx1 * wy1;
+        pr = s00.rgb * (s00.a * w00) + s10.rgb * (s10.a * w10) + s01.rgb * (s01.a * w01) + s11.rgb * (s11.a * w11);
+        pa = s00.a * w00 + s10.a * w10 + s01.a * w01 + s11.a * w11;
+    } else {
+        for (var j: i32 = -1; j <= 2; j = j + 1) {
+            let wy = catmull_rom_weight(f32(j) - f.y);
+            for (var i: i32 = -1; i <= 2; i = i + 1) {
+                let wx = catmull_rom_weight(f32(i) - f.x);
+                let w = wx * wy;
+                let s = fetch_transform_texel(base.x + i, base.y + j, tex_size_i);
+                pr = pr + s.rgb * (s.a * w);
+                pa = pa + s.a * w;
+            }
+        }
+    }
+    if (pa <= 1e-6) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(
+        clamp(pr / pa, vec3<f32>(0.0), vec3<f32>(1.0)),
+        clamp(pa, 0.0, 1.0)
+    );
+}
+
+fn sample_transform_overlay(doc_px: vec2<f32>, base_texel: vec4<f32>) -> vec4<f32> {
+    let local_px = doc_px_to_transform_local(doc_px);
+    let layer_s = sample_transform_layer(local_px);
+    if (layer_s.a <= 1e-5) {
         return base_texel;
     }
-    let layer_s = sample_aa_tex(transform_layer_tex, layer_uv);
     let out_a = layer_s.a + base_texel.a * (1.0 - layer_s.a);
     if (out_a <= 1e-5) {
         return vec4<f32>(0.0);
     }
     let out_rgb = (layer_s.rgb * layer_s.a + base_texel.rgb * base_texel.a * (1.0 - layer_s.a)) / out_a;
     return vec4<f32>(out_rgb, out_a);
+}
+
+fn sample_sel_mask_at(uv: vec2<f32>) -> f32 {
+    if (u.transform_active > 0.5) {
+        let local_px = doc_px_to_transform_local(uv * u.image_size);
+        if (local_px.x < 0.0 || local_px.x >= u.transform_layer_size.x || local_px.y < 0.0 || local_px.y >= u.transform_layer_size.y) {
+            return 0.0;
+        }
+        let src_doc_px = u.transform_layer_offset + local_px;
+        if (src_doc_px.x < 0.0 || src_doc_px.x >= u.image_size.x || src_doc_px.y < 0.0 || src_doc_px.y >= u.image_size.y) {
+            return 0.0;
+        }
+        let src_uv = src_doc_px / max(u.image_size, vec2<f32>(1.0));
+        return textureSampleLevel(sel_mask_tex, sel_sampler, src_uv, 0.0).r;
+    }
+    return textureSampleLevel(sel_mask_tex, sel_sampler, uv, 0.0).r;
 }
 
 // Stage 1: Sample image content ONLY (AA + bilateral denoise + Free Transform + Color/Light + Curve LUT).
@@ -442,6 +545,58 @@ fn sample_processed_image(
 
 // Stage 2: Apply crisp pixel-exact overlays (divider, crop, quick mask, marching ants via Nearest sel_sampler,
 // selection marquee preview, and cursor ring) completely independent of Stage 1 denoise/AA.
+fn grad_stop_pos(idx: i32) -> f32 {
+    let v = u.gradient_stop_pos[idx / 4];
+    let c = idx & 3;
+    if (c == 0) { return v.x; }
+    if (c == 1) { return v.y; }
+    if (c == 2) { return v.z; }
+    return v.w;
+}
+
+fn sample_grad_ramp(t_in: f32, count: i32, rev: f32) -> vec4<f32> {
+    let t = clamp(select(t_in, 1.0 - t_in, rev > 0.5), 0.0, 1.0);
+    if (count <= 1) {
+        return u.gradient_stop_colors[0];
+    }
+    let p_first = grad_stop_pos(0);
+    if (t <= p_first) {
+        return u.gradient_stop_colors[0];
+    }
+    let last_idx = min(count, 12) - 1;
+    let p_last = grad_stop_pos(last_idx);
+    if (t >= p_last) {
+        return u.gradient_stop_colors[last_idx];
+    }
+    for (var i: i32 = 0; i < 11; i = i + 1) {
+        if (i >= last_idx) { break; }
+        let p0 = grad_stop_pos(i);
+        let p1 = grad_stop_pos(i + 1);
+        if (t >= p0 && t <= p1) {
+            let s0 = u.gradient_stop_colors[i];
+            let s1 = u.gradient_stop_colors[i + 1];
+            let f = clamp((t - p0) / max(p1 - p0, 1e-6), 0.0, 1.0);
+            let inv = 1.0 - f;
+            let a = s0.a * inv + s1.a * f;
+            let rgb = (s0.rgb * s0.a * inv + s1.rgb * s1.a * f) / max(a, 1e-5);
+            return vec4<f32>(rgb, a);
+        }
+    }
+    return u.gradient_stop_colors[last_idx];
+}
+
+fn apply_grad_blend_ch(sc: f32, dc: f32, kind: i32) -> f32 {
+    if (kind == 1) { return dc * sc; }
+    if (kind == 2) { return 1.0 - (1.0 - dc) * (1.0 - sc); }
+    if (kind == 3) {
+        return select(1.0 - 2.0 * (1.0 - dc) * (1.0 - sc), 2.0 * dc * sc, dc < 0.5);
+    }
+    if (kind == 4) { return min(dc, sc); }
+    if (kind == 5) { return max(dc, sc); }
+    if (kind == 6) { return abs(dc - sc); }
+    return sc;
+}
+
 fn apply_crisp_overlays(
     in_rgb: vec3<f32>,
     pixel: vec2<f32>,
@@ -451,6 +606,63 @@ fn apply_crisp_overlays(
     drawn_size: vec2<f32>,
 ) -> vec3<f32> {
     var out_rgb = in_rgb;
+
+    if (u.gradient_params.x > 0.5) {
+        let g0 = u.gradient_line.xy;
+        let g1 = u.gradient_line.zw;
+        let dxy = g1 - g0;
+        let len_sq = dot(dxy, dxy);
+        if (len_sq >= 1e-4) {
+            let len = sqrt(len_sq);
+            let doc_px = rot_uv * base_size - g0;
+            let unit = dxy / len;
+            let base_angle = atan2(dxy.y, dxy.x);
+            let tau = 6.2831853;
+            let shape = i32(round(u.gradient_params.y));
+            var raw_t = 0.0;
+            if (shape == 0) {
+                raw_t = dot(doc_px, dxy) / len_sq;
+            } else if (shape == 1) {
+                raw_t = abs(dot(doc_px, dxy) / len_sq);
+            } else if (shape == 2) {
+                raw_t = length(doc_px) / len;
+            } else if (shape == 3) {
+                let rx = abs(doc_px.x * unit.x + doc_px.y * unit.y);
+                let ry = abs(-doc_px.x * unit.y + doc_px.y * unit.x);
+                raw_t = max(rx, ry) / len;
+            } else if (shape == 4) {
+                let a = atan2(doc_px.y, doc_px.x) - base_angle;
+                raw_t = fract(a / tau);
+            } else {
+                let dist = length(doc_px) / len;
+                let a = fract((atan2(doc_px.y, doc_px.x) - base_angle) / tau);
+                raw_t = fract(dist + a);
+            }
+            let rep = i32(round(u.gradient_params.z));
+            var t = clamp(raw_t, 0.0, 1.0);
+            if (rep == 1) {
+                t = fract(raw_t);
+            } else if (rep == 2) {
+                let m = raw_t - 2.0 * floor(raw_t * 0.5);
+                t = select(2.0 - m, m, m <= 1.0);
+            }
+            let ramp = sample_grad_ramp(t, i32(round(u.gradient_meta.x)), u.gradient_meta.y);
+            var sel_w = 1.0;
+            if (u.has_selection > 0.5) {
+                sel_w = sample_sel_mask_at(img_uv);
+            }
+            let sa = clamp(ramp.a * u.gradient_params.w * sel_w, 0.0, 1.0);
+            if (sa > 1e-4) {
+                let bkind = i32(round(u.gradient_meta.z));
+                let blended = vec3<f32>(
+                    apply_grad_blend_ch(ramp.r, out_rgb.r, bkind),
+                    apply_grad_blend_ch(ramp.g, out_rgb.g, bkind),
+                    apply_grad_blend_ch(ramp.b, out_rgb.b, bkind),
+                );
+                out_rgb = mix(out_rgb, blended, sa);
+            }
+        }
+    }
 
     // Mode 1 (Split): draggable vertical divider line
     if (u.compare_mode > 0.5 && u.compare_mode < 1.5) {
@@ -484,17 +696,17 @@ fn apply_crisp_overlays(
     }
 
     if (u.has_selection > 0.5 || u.quick_mask_active > 0.5) {
-        let sel_m = textureSampleLevel(sel_mask_tex, sel_sampler, img_uv, 0.0).r;
+        let sel_m = sample_sel_mask_at(img_uv);
         if (u.quick_mask_active > 0.5) {
             let unmasked = 1.0 - sel_m;
             out_rgb = mix(out_rgb, vec3<f32>(0.92, 0.14, 0.16), unmasked * 0.45);
         }
         if (u.has_selection > 0.5) {
             let step_uv = 1.0 / max(drawn_size, vec2<f32>(1.0));
-            let ml = textureSampleLevel(sel_mask_tex, sel_sampler, img_uv - vec2<f32>(step_uv.x, 0.0), 0.0).r;
-            let mr = textureSampleLevel(sel_mask_tex, sel_sampler, img_uv + vec2<f32>(step_uv.x, 0.0), 0.0).r;
-            let mu = textureSampleLevel(sel_mask_tex, sel_sampler, img_uv - vec2<f32>(0.0, step_uv.y), 0.0).r;
-            let md = textureSampleLevel(sel_mask_tex, sel_sampler, img_uv + vec2<f32>(0.0, step_uv.y), 0.0).r;
+            let ml = sample_sel_mask_at(img_uv - vec2<f32>(step_uv.x, 0.0));
+            let mr = sample_sel_mask_at(img_uv + vec2<f32>(step_uv.x, 0.0));
+            let mu = sample_sel_mask_at(img_uv - vec2<f32>(0.0, step_uv.y));
+            let md = sample_sel_mask_at(img_uv + vec2<f32>(0.0, step_uv.y));
             let min_n = min(min(ml, mr), min(mu, md));
             let max_n = max(max(ml, mr), max(mu, md));
             if (sel_m >= 0.5 && min_n < 0.5 || sel_m < 0.5 && max_n >= 0.5) {
@@ -1046,6 +1258,16 @@ impl Pipeline for ImageShaderPipeline {
     }
 }
 
+fn simple_frame_key(frame: &CpuImageFrame) -> SimpleFrameKey {
+    (
+        frame.key.clone(),
+        frame.revision,
+        Arc::as_ptr(&frame.rgba) as usize,
+        frame.width,
+        frame.height,
+    )
+}
+
 fn ensure_simple_rgba_texture(
     map: &mut HashMap<String, CachedSimpleTexture>,
     device: &wgpu::Device,
@@ -1053,9 +1275,13 @@ fn ensure_simple_rgba_texture(
     frame: &CpuImageFrame,
     max_dim: u32,
 ) {
-    let needs = map
-        .get(&frame.key)
-        .is_none_or(|t| t.revision != frame.revision);
+    let rgba_ptr = Arc::as_ptr(&frame.rgba) as usize;
+    let needs = map.get(&frame.key).is_none_or(|t| {
+        t.revision != frame.revision
+            || t.width != frame.width
+            || t.height != frame.height
+            || t.rgba_ptr != rgba_ptr
+    });
     if needs {
         let (w, h, bytes) = fit_within_gpu_limit(frame.width, frame.height, &frame.rgba, max_dim);
         let (_, view) = create_rgba_texture(device, queue, w, h, &bytes, "photon_simple_texture");
@@ -1063,6 +1289,9 @@ fn ensure_simple_rgba_texture(
             frame.key.clone(),
             CachedSimpleTexture {
                 revision: frame.revision,
+                width: frame.width,
+                height: frame.height,
+                rgba_ptr,
                 view,
             },
         );
@@ -1126,7 +1355,7 @@ impl Primitive for ImageQuadPrimitive {
             self.pair_frame.as_ref()
         };
 
-        let secondary_key_rev = secondary_ref.map(|c| (c.key.clone(), c.revision));
+        let secondary_key_rev = secondary_ref.map(simple_frame_key);
         if let Some(sec) = secondary_ref {
             ensure_simple_rgba_texture(&mut pipeline.compare_textures, device, queue, sec, max_dim);
             if self.compare_mode > 0 {
@@ -1143,15 +1372,23 @@ impl Primitive for ImageQuadPrimitive {
             .map(|t| &t.view)
             .unwrap_or(&pipeline.placeholder_view);
 
-        let sel_key_rev = self
-            .selection_mask
-            .as_ref()
-            .map(|m| (m.key.clone(), m.revision));
+        let sel_key_rev = self.selection_mask.as_ref().map(|m| {
+            (
+                m.key.clone(),
+                m.revision,
+                Arc::as_ptr(&m.alpha) as usize,
+                m.width,
+                m.height,
+            )
+        });
         if let Some(sel) = &self.selection_mask {
-            let needs_sel = pipeline
-                .sel_mask_textures
-                .get(&sel.key)
-                .is_none_or(|t| t.revision != sel.revision);
+            let alpha_ptr = Arc::as_ptr(&sel.alpha) as usize;
+            let needs_sel = pipeline.sel_mask_textures.get(&sel.key).is_none_or(|t| {
+                t.revision != sel.revision
+                    || t.width != sel.width
+                    || t.height != sel.height
+                    || t.rgba_ptr != alpha_ptr
+            });
             if needs_sel {
                 let mut rgba = Vec::with_capacity(sel.alpha.len() * 4);
                 for &a in sel.alpha.iter() {
@@ -1164,6 +1401,9 @@ impl Primitive for ImageQuadPrimitive {
                     sel.key.clone(),
                     CachedSimpleTexture {
                         revision: sel.revision,
+                        width: sel.width,
+                        height: sel.height,
+                        rgba_ptr: alpha_ptr,
                         view,
                     },
                 );
@@ -1185,8 +1425,8 @@ impl Primitive for ImageQuadPrimitive {
         let mut transform_scale = [1.0f32; 2];
         let mut transform_pivot = [0.5f32; 2];
         let mut transform_cos_sin = [1.0f32, 0.0f32];
-        let mut base_override_key_rev: Option<(String, u64)> = None;
-        let mut transform_layer_key_rev: Option<(String, u64)> = None;
+        let mut base_override_key_rev: Option<SimpleFrameKey> = None;
+        let mut transform_layer_key_rev: Option<SimpleFrameKey> = None;
 
         if let Some(tp) = &self.transform_preview {
             transform_active = 1.0;
@@ -1197,7 +1437,7 @@ impl Primitive for ImageQuadPrimitive {
                 &tp.layer_frame,
                 max_dim,
             );
-            transform_layer_key_rev = Some((tp.layer_frame.key.clone(), tp.layer_frame.revision));
+            transform_layer_key_rev = Some(simple_frame_key(&tp.layer_frame));
             if let Some(base) = &tp.base_frame {
                 transform_has_base = 1.0;
                 ensure_simple_rgba_texture(
@@ -1207,7 +1447,7 @@ impl Primitive for ImageQuadPrimitive {
                     base,
                     max_dim,
                 );
-                base_override_key_rev = Some((base.key.clone(), base.revision));
+                base_override_key_rev = Some(simple_frame_key(base));
             }
             transform_layer_offset = [tp.layer_offset[0] as f32, tp.layer_offset[1] as f32];
             transform_layer_size = [
@@ -1356,6 +1596,77 @@ impl Primitive for ImageQuadPrimitive {
             ViewportDenoiseMode::Strong => 3.0,
         };
 
+        let (
+            gradient_line,
+            gradient_params,
+            gradient_meta,
+            gradient_stop_colors,
+            gradient_stop_pos,
+        ) = if let Some(gp) = &self.gradient_preview
+            && let (Some(sa), Some(sb)) = (gp.start, gp.end)
+        {
+            let dx = sb[0] - sa[0];
+            let dy = sb[1] - sa[1];
+            let active = if (dx * dx + dy * dy) >= 1.0 { 1.0 } else { 0.0 };
+            let shape_idx = match gp.kind {
+                GradientKind::Linear => 0.0,
+                GradientKind::Bilinear | GradientKind::Reflected => 1.0,
+                GradientKind::Radial => 2.0,
+                GradientKind::Square => 3.0,
+                GradientKind::Conical => 4.0,
+                GradientKind::Spiral => 5.0,
+            };
+            let rep_idx = match gp.repeat {
+                GradientRepeat::None => 0.0,
+                GradientRepeat::Forwards => 1.0,
+                GradientRepeat::Alternating => 2.0,
+            };
+            let blend_idx = match gp.blend_mode {
+                BlendMode::Normal => 0.0,
+                BlendMode::Multiply => 1.0,
+                BlendMode::Screen => 2.0,
+                BlendMode::Overlay => 3.0,
+                BlendMode::Darken => 4.0,
+                BlendMode::Lighten => 5.0,
+                BlendMode::Difference => 6.0,
+            };
+            let mut sorted = gp.stops.clone();
+            sorted.sort_by(|a, b| a.pos.total_cmp(&b.pos));
+            if sorted.is_empty() {
+                sorted.push(photon_protocol::GradientStop {
+                    pos: 0.0,
+                    color: [0, 0, 0],
+                    alpha: 1.0,
+                });
+            }
+            let count = sorted.len().min(12);
+            let mut cols = [[0.0_f32; 4]; 12];
+            let mut pos_vecs = [[0.0_f32; 4]; 3];
+            for (idx, s) in sorted.iter().take(12).enumerate() {
+                cols[idx] = [
+                    f32::from(s.color[0]) / 255.0,
+                    f32::from(s.color[1]) / 255.0,
+                    f32::from(s.color[2]) / 255.0,
+                    (s.alpha as f32).clamp(0.0, 1.0),
+                ];
+                pos_vecs[idx / 4][idx % 4] = (s.pos as f32).clamp(0.0, 1.0);
+            }
+            (
+                [sa[0], sa[1], sb[0], sb[1]],
+                [active, shape_idx, rep_idx, gp.opacity.clamp(0.0, 1.0)],
+                [
+                    count as f32,
+                    if gp.reverse { 1.0 } else { 0.0 },
+                    blend_idx,
+                    0.0,
+                ],
+                cols,
+                pos_vecs,
+            )
+        } else {
+            ([0.0; 4], [0.0; 4], [0.0; 4], [[0.0; 4]; 12], [[0.0; 4]; 3])
+        };
+
         let uniforms = Uniforms {
             viewport_size: self.bounds_size,
             image_size: img_size,
@@ -1406,6 +1717,11 @@ impl Primitive for ImageQuadPrimitive {
             transform_has_base,
             _pad2: 0.0,
             _pad3: [0.0; 2],
+            gradient_line,
+            gradient_params,
+            gradient_meta,
+            gradient_stop_colors,
+            gradient_stop_pos,
         };
 
         let target_buf = self

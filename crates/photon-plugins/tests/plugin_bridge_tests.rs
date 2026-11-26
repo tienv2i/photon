@@ -705,3 +705,167 @@ assert saw_shutdown
         other => panic!("expected PluginReportedError, got {other:?}"),
     }
 }
+
+#[test]
+fn registry_exports_viewer_actions_quick_actions_and_model_statuses() {
+    use photon_plugins::{AiWorkerEvent, run_jsonl_inference_streaming};
+    use photon_protocol::{AiDevice, AiSettings};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let tmp = TestTempDir::new("models-and-streaming");
+    let data_dir = tmp.path().join("data");
+    let plugins_dir = data_dir.join("plugins");
+    let models_dir = data_dir.join("models");
+    let plugin_dir = plugins_dir.join("photon.ocr.mock");
+    fs::create_dir_all(plugin_dir.join("bin")).unwrap();
+    fs::create_dir_all(&models_dir).unwrap();
+
+    let worker = r#"
+import json, sys, time
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get("op") == "shutdown":
+        break
+    if msg.get("op") == "run":
+        if msg["params"].get("sleep"):
+            time.sleep(5)
+        print(json.dumps({"id": msg["id"], "event": "progress", "percent": 42, "stage": "OCR"}), flush=True)
+        print(json.dumps({
+            "id": msg["id"],
+            "event": "done",
+            "meta": {
+                "device": "cpu",
+                "clipboardText": "hello world",
+                "translation": {
+                    "path": msg["input"],
+                    "sourceLang": "eng",
+                    "targetLang": "vi",
+                    "originalText": "hello",
+                    "translatedText": "xin chao",
+                    "blocks": [{"x": 1, "y": 2, "w": 30, "h": 12, "original": "hello", "translated": "xin chao"}]
+                }
+            }
+        }), flush=True)
+"#;
+    fs::write(plugin_dir.join("bin/worker.py"), worker).unwrap();
+    fs::write(
+        plugin_dir.join("manifest.json"),
+        r#"{
+            "apiVersion": 1,
+            "id": "photon.ocr.mock",
+            "name": "Mock Viewer OCR",
+            "version": "1.0.0",
+            "entry": { "command": "bin/worker.py", "args": [], "protocol": "jsonl-stdio" },
+            "models": [
+                {
+                    "id": "mock-ocr-pack",
+                    "name": "Mock OCR Pack",
+                    "tier": "ocr",
+                    "file": "mock.traineddata",
+                    "sizeBytes": 128,
+                    "sha256": "",
+                    "url": "https://example.invalid/mock.traineddata"
+                }
+            ],
+            "capabilities": [
+                { "action": "viewer.translate", "workspace": "viewer", "label": "Translate", "output": "translation" }
+            ],
+            "quickActions": [
+                { "id": "mock-qa", "label": "Copy OCR", "action": "viewer.translate", "workspaces": ["viewer"], "params": {} }
+            ]
+        }"#,
+    )
+    .unwrap();
+
+    let reg = PluginRegistry::discover(&plugins_dir).unwrap();
+    let infos = reg.plugin_infos(&[]);
+    assert_eq!(infos.len(), 1);
+    assert!(infos[0].available);
+    assert_eq!(infos[0].viewer_actions, vec!["viewer.translate"]);
+    assert_eq!(infos[0].quick_actions.len(), 1);
+    assert_eq!(infos[0].models.len(), 1);
+
+    let qa = reg.quick_actions(&[]);
+    assert_eq!(qa.len(), 1);
+    assert_eq!(qa[0].plugin_id, "photon.ocr.mock");
+    assert!(reg.find_by_action("viewer.translate", &[]).is_some());
+    assert!(
+        reg.find_by_action("viewer.translate", &["photon.ocr.mock".to_owned()])
+            .is_none()
+    );
+
+    let custom_file = tmp.path().join("custom.onnx");
+    fs::write(&custom_file, b"onnx").unwrap();
+    let mut settings = AiSettings::default();
+    settings
+        .custom_model_paths
+        .insert("rmbg-1.4".to_owned(), custom_file.display().to_string());
+    let statuses = reg.model_statuses(&models_dir, &settings);
+    let rmbg = statuses.iter().find(|m| m.id == "rmbg-1.4").unwrap();
+    assert!(rmbg.installed);
+    assert_eq!(
+        rmbg.effective_path.as_deref(),
+        Some(custom_file.to_str().unwrap())
+    );
+    let ocr_pack = statuses.iter().find(|m| m.id == "mock-ocr-pack").unwrap();
+    assert!(!ocr_pack.installed);
+
+    let loaded = reg.get("photon.ocr.mock").unwrap();
+    let img = tmp.path().join("in.png");
+    fs::write(&img, b"fake").unwrap();
+    let mut events = Vec::new();
+    run_jsonl_inference_streaming(
+        loaded,
+        "viewer.translate",
+        "",
+        Path::new(""),
+        AiDevice::Cpu,
+        &models_dir,
+        &img,
+        Path::new(""),
+        serde_json::json!({}),
+        Arc::new(AtomicBool::new(false)),
+        |ev| events.push(ev),
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AiWorkerEvent::Progress { percent: 42, stage } if stage == "OCR"))
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AiWorkerEvent::InferenceDone {
+            clipboard_text: Some(txt),
+            translation: Some(tr),
+            ..
+        } if txt == "hello world" && tr.translated_text == "xin chao"
+    )));
+
+    // Cancellation interrupts sleeping worker.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_bg = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(80));
+        cancel_bg.store(true, Ordering::SeqCst);
+    });
+    let mut cancel_events = Vec::new();
+    run_jsonl_inference_streaming(
+        loaded,
+        "viewer.translate",
+        "",
+        Path::new(""),
+        AiDevice::Cpu,
+        &models_dir,
+        &img,
+        Path::new(""),
+        serde_json::json!({ "sleep": true }),
+        cancel,
+        |ev| cancel_events.push(ev),
+    );
+    assert!(
+        cancel_events
+            .iter()
+            .any(|e| matches!(e, AiWorkerEvent::Cancelled))
+    );
+}

@@ -9,8 +9,10 @@ photon edit /path/to/a.jpg     # Open image directly in Editor
 photon /path/to/a.jpg          # Alias for `view`
 photon --headless              # Run Core + Local IPC without GUI window
 photon --safe-mode             # Factory defaults in memory + software renderer (tiny-skia)
-photon --reset-layout          # Reset layout preferences (backups config.json)
-photon --reset-config          # Reset all settings (backups config.json)
+photon --reset-layout          # Reset UI state (ui_state.json; preserves config.json Settings)
+photon --reset-settings        # Reset Settings (config.json; preserves UI layout)
+photon --reset-config          # Reset both Settings & UI state (alias: --reset-all; backs up .bak)
+photon --reset-layout --exit   # Apply reset and exit immediately without launching GUI
 photon --lang <en|vi|system>   # Override initial UI language
 photon --new-window [path...]  # Open standalone window instead of forwarding to running instance
 ```
@@ -38,6 +40,9 @@ photonctl query meta
 photonctl query clipboard        # Inspect EditorPixelClipboard dimensions, offsets & PNG bytes
 photonctl schema
 photonctl events --limit 20
+photonctl reset layout           # Reset ui_state.json (online via IPC if running, or offline)
+photonctl reset settings         # Reset config.json Settings (online or offline)
+photonctl reset all --offline    # Offline reset of both config.json & ui_state.json with .bak backups
 
 # Agent Debugging & Reproducibility
 photonctl debug logs --last 100

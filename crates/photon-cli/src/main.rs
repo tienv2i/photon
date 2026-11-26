@@ -12,7 +12,7 @@ use photon_protocol::{
     ClientKind, Command, Envelope, EventKind, PROTOCOL_VERSION, Query, Workspace, protocol_schemas,
 };
 use photon_storage::logging::read_log_lines;
-use photon_storage::{AppPaths, Journal};
+use photon_storage::{AppPaths, Config, Journal, UiState};
 
 #[derive(Parser)]
 #[command(
@@ -88,6 +88,21 @@ enum Sub {
     },
     /// Run MCP (Model Context Protocol) JSON-RPC server over stdio
     Mcp,
+    /// Reset layout, settings, or both (online via IPC when running, or offline)
+    Reset {
+        #[arg(value_enum)]
+        target: ResetTargetArg,
+        /// Force offline file reset without contacting a running instance
+        #[arg(long)]
+        offline: bool,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ResetTargetArg {
+    Layout,
+    Settings,
+    All,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -230,6 +245,45 @@ async fn run(cli: Cli, paths: &AppPaths, socket: &Path) -> Result<(), String> {
         }
         Sub::Debug { cmd } => run_debug(cmd, paths, socket, cli.json).await,
         Sub::Mcp => mcp::serve_stdio(socket.to_path_buf()).await,
+        Sub::Reset { target, offline } => {
+            let (reset_layout, reset_settings) = match target {
+                ResetTargetArg::Layout => (true, false),
+                ResetTargetArg::Settings => (false, true),
+                ResetTargetArg::All => (true, true),
+            };
+            if !offline && socket.exists() {
+                let env = Envelope::new(
+                    format!("cli-{}", std::process::id()),
+                    ClientKind::Cli,
+                    Command::ResetConfig {
+                        reset_layout,
+                        reset_settings,
+                    },
+                );
+                if let Ok(resp) = send_once(socket, &IpcRequest::Dispatch { envelope: env }).await {
+                    return print_ipc_response(&resp, cli.json);
+                }
+            }
+            let mut notes = Vec::new();
+            if reset_settings {
+                let (_, note) = Config::reset_settings_only(&paths.config_file());
+                if let Some(n) = note {
+                    notes.push(n);
+                }
+            }
+            if reset_layout {
+                let (_, note) =
+                    UiState::reset_layout_only(&paths.ui_state_file(), &paths.config_file());
+                if let Some(n) = note {
+                    notes.push(n);
+                }
+            }
+            print_json(
+                &serde_json::json!({ "ok": true, "offline": true, "notes": notes }),
+                cli.json,
+            );
+            Ok(())
+        }
     }
 }
 

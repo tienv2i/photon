@@ -299,6 +299,8 @@ pub struct LayoutState {
     pub manga_cover_separate: bool,
     pub manga_page_gap: u16,
     pub webtoon_fit_mode: WebtoonFitMode,
+    #[serde(default)]
+    pub viewer_viewport_background: Option<[u8; 3]>,
     pub panels: BTreeMap<String, bool>,
 }
 
@@ -330,6 +332,7 @@ impl Default for LayoutState {
             manga_cover_separate: true,
             manga_page_gap: 8,
             webtoon_fit_mode: WebtoonFitMode::Auto,
+            viewer_viewport_background: None,
             panels: LAYOUT_PANEL_KEYS
                 .iter()
                 .map(|key| ((*key).to_owned(), default_panel_visible(key)))
@@ -379,6 +382,39 @@ impl LayoutState {
     pub fn with_panel(mut self, key: &str, visible: bool) -> Self {
         self.panels.insert(key.to_owned(), visible);
         self
+    }
+
+    /// Returns true if Settings-configured default fields match between `self` and `other`.
+    pub fn settings_fields_eq(&self, other: &Self) -> bool {
+        self.app_launch_window_mode == other.app_launch_window_mode
+            && self.system_open_window_mode == other.system_open_window_mode
+            && self.viewer_view_mode == other.viewer_view_mode
+            && self.canvas_anti_aliasing == other.canvas_anti_aliasing
+            && self.viewport_denoise == other.viewport_denoise
+            && self.manga_rtl == other.manga_rtl
+            && self.manga_cover_separate == other.manga_cover_separate
+            && self.manga_page_gap == other.manga_page_gap
+            && self.webtoon_fit_mode == other.webtoon_fit_mode
+    }
+
+    /// Copies Settings-configured default fields from `settings` into `self`.
+    pub fn apply_settings_from(&mut self, settings: &Self) {
+        self.app_launch_window_mode = settings.app_launch_window_mode;
+        self.system_open_window_mode = settings.system_open_window_mode;
+        self.viewer_view_mode = settings.viewer_view_mode;
+        self.canvas_anti_aliasing = settings.canvas_anti_aliasing;
+        self.viewport_denoise = settings.viewport_denoise;
+        self.manga_rtl = settings.manga_rtl;
+        self.manga_cover_separate = settings.manga_cover_separate;
+        self.manga_page_gap = settings.manga_page_gap;
+        self.webtoon_fit_mode = settings.webtoon_fit_mode;
+    }
+
+    /// Resets session UI state to defaults while preserving Settings-configured defaults.
+    pub fn reset_ui_state_preserving_settings(&self) -> Self {
+        let mut reset = Self::default();
+        reset.apply_settings_from(self);
+        reset
     }
 }
 

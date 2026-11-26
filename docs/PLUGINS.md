@@ -107,14 +107,20 @@ All 9 ported standalone crates under `plugins/` carry `license = "MIT"` and buil
 # Build all 9 standalone plugin crates in release mode
 just build-plugins
 
-# Build and install into ~/.local/share/photon/plugins (production profile)
+# Build and install all 9 plugins into ~/.local/share/photon/plugins (production profile)
 just install-plugins
 
-# Build and install into ~/.local/share/photon-dev/plugins (dev profile)
+# Build and install all 9 plugins into ~/.local/share/photon-dev/plugins (dev profile)
 just install-plugins dev
+
+# Build and install a single plugin (rembg | upscale | utils | ocr | translate | ai-ocr | dewatermark | caption | ai-inpaint)
+just install-plugin rembg
+just install-plugin rembg dev
 ```
 
-You can also install any plugin folder through the UI via **Plugins → Manage Plugins… → Install Plugin…** (`Command::PluginInstall`), or refresh discovery with **Reload Plugins** (`Command::PluginRefresh`).
+`install-plugin` / `install-plugins` install each plugin's `manifest.json`, release binary, any `assets/` directory (such as `dewatermark` alpha maps), and any `libonnxruntime*.so*` / `onnxruntime*.dll` shared libraries alongside the plugin executable.
+
+You can also install any plugin folder through the UI via **Settings → Plugins → Install Plugin…** (`Command::PluginInstall`), refresh discovery with **Reload Plugins** (`Command::PluginRefresh` / `Command::AiRefreshPlugins`), or download/manage on-demand `.onnx` weights and OCR `.traineddata` packs (`Command::AiDownloadModel`, `Command::AiDeleteModel`, `Command::AiSetCustomModel`).
 
 ## Third-Party Runtime & Model Notes
 

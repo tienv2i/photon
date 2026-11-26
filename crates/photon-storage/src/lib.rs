@@ -6,7 +6,7 @@ pub mod journal;
 pub mod logging;
 pub mod paths;
 
-pub use config::Config;
+pub use config::{Config, UiState};
 pub use identity::{AppIdentity, Profile};
 pub use journal::{Journal, JournalRecord};
 pub use paths::AppPaths;

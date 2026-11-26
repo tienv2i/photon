@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use photon_protocol::{
-    ProtocolError, TranslateProvider, TranslateSettings, TranslationBlock, TranslationResult,
-    UiText,
+    ProtocolError, SavedTranslation, TranslateProvider, TranslateSettings, TranslationBlock,
+    TranslationResult, UiText,
 };
 
 /// Parse Tesseract TSV output into line-grouped [`TranslationBlock`]s in document coordinates.
@@ -112,7 +112,13 @@ pub fn save_sidecar(result: &TranslationResult) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let json = serde_json::to_string_pretty(result).map_err(|e| e.to_string())?;
-    fs::write(&path, json).map_err(|e| e.to_string())
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    if let Err(err) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.to_string());
+    }
+    Ok(())
 }
 
 pub fn delete_sidecar(image_path: &Path) -> Result<bool, String> {
@@ -123,7 +129,52 @@ pub fn delete_sidecar(image_path: &Path) -> Result<bool, String> {
         return Ok(false);
     }
     fs::remove_file(&path).map_err(|e| e.to_string())?;
+    if let Some(trans_dir) = path.parent() {
+        let _ = fs::remove_dir(trans_dir);
+        if let Some(meta_dir) = trans_dir.parent() {
+            let _ = fs::remove_dir(meta_dir);
+        }
+    }
     Ok(true)
+}
+
+/// Load persisted translation bubbles as `SavedTranslation` if non-empty.
+pub fn load_saved_translation(image_path: &Path) -> Option<SavedTranslation> {
+    let loaded = load_sidecar(image_path)?;
+    if loaded.blocks.is_empty() {
+        return None;
+    }
+    Some(SavedTranslation {
+        path: image_path.to_string_lossy().into_owned(),
+        blocks: loaded.blocks,
+    })
+}
+
+/// Save (or remove if `blocks` is empty) translation bubbles to `<dir>/.photon/translation/<file>.json`.
+pub fn save_translation_blocks(
+    image_path: &Path,
+    source_lang: &str,
+    target_lang: &str,
+    blocks: Vec<TranslationBlock>,
+) -> Result<Option<SavedTranslation>, String> {
+    if blocks.is_empty() {
+        let _ = delete_sidecar(image_path)?;
+        return Ok(None);
+    }
+    let path_str = image_path.to_string_lossy().into_owned();
+    let result = TranslationResult {
+        path: path_str.clone(),
+        source_lang: source_lang.to_owned(),
+        target_lang: target_lang.to_owned(),
+        original_text: String::new(),
+        translated_text: String::new(),
+        blocks: blocks.clone(),
+    };
+    save_sidecar(&result)?;
+    Ok(Some(SavedTranslation {
+        path: path_str,
+        blocks,
+    }))
 }
 
 /// Run Tesseract OCR (optionally on cropped `region`) and translate if `target_lang` and

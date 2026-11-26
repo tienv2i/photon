@@ -141,7 +141,8 @@ fn sanitized_paths(command: &Command) -> Vec<String> {
         Command::OpenFiles { paths }
         | Command::Select { paths }
         | Command::Trash { paths }
-        | Command::DeletePermanently { paths } => paths.iter().map(|p| sanitize_path(p)).collect(),
+        | Command::DeletePermanently { paths }
+        | Command::QuickActionRun { paths, .. } => paths.iter().map(|p| sanitize_path(p)).collect(),
         Command::CopyTo { paths, destination } | Command::MoveTo { paths, destination } => {
             let mut out: Vec<String> = paths.iter().map(|p| sanitize_path(p)).collect();
             out.push(sanitize_path(destination));
@@ -155,7 +156,10 @@ fn sanitized_paths(command: &Command) -> Vec<String> {
         | Command::AddFavorite { path }
         | Command::RemoveFavorite { path }
         | Command::RenamePath { path, .. }
-        | Command::ViewerTranslate { path, .. } => vec![sanitize_path(path)],
+        | Command::ViewerTranslate { path, .. }
+        | Command::ViewerSaveTranslation { path, .. }
+        | Command::ViewerDeleteTranslation { path }
+        | Command::AiSetCustomModel { path, .. } => vec![sanitize_path(path)],
         Command::NewFolder { parent, .. } | Command::PasteImageBytes { folder: parent, .. } => {
             vec![sanitize_path(parent)]
         }

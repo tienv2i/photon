@@ -9,12 +9,12 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use photon_protocol::{
-    PluginCapability, PluginInfo, PluginManifest, PluginParamKind, PluginParamSpec,
-    PluginParamValue,
+    PluginCapability, PluginInfo, PluginManifest, PluginModelSpec, PluginParamKind,
+    PluginParamSpec, PluginParamValue, PluginQuickAction,
 };
 use serde::Deserialize;
 
-use crate::{DEFAULT_PLUGIN_TIMEOUT, PluginError};
+use crate::{DEFAULT_AI_PLUGIN_TIMEOUT, DEFAULT_PLUGIN_TIMEOUT, PluginError};
 
 /// Wire protocol spoken with the plugin subprocess.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,32 +28,9 @@ pub(crate) struct JsonlStdioMeta {
     pub default_editor_action: Option<String>,
     pub default_browser_action: Option<String>,
     pub capability_outputs: BTreeMap<String, String>,
-    pub models: Vec<JsonlModelSpec>,
-    pub quick_actions: Vec<JsonlQuickAction>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct JsonlModelSpec {
-    pub id: String,
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub tier: String,
-    pub file: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct JsonlQuickAction {
-    pub id: String,
-    #[serde(default)]
-    pub label: String,
-    pub action: String,
-    #[serde(default)]
-    pub workspaces: Vec<String>,
-    #[serde(default)]
-    pub params: serde_json::Value,
+    pub viewer_actions: Vec<String>,
+    pub models: Vec<PluginModelSpec>,
+    pub quick_actions: Vec<PluginQuickAction>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,11 +48,11 @@ struct RawJsonlManifest {
     #[serde(default)]
     permissions: RawJsonlPermissions,
     #[serde(default)]
-    models: Vec<JsonlModelSpec>,
+    models: Vec<PluginModelSpec>,
     #[serde(default)]
     capabilities: Vec<RawJsonlCapability>,
     #[serde(default)]
-    quick_actions: Vec<JsonlQuickAction>,
+    quick_actions: Vec<PluginQuickAction>,
     #[serde(default)]
     timeout_ms: Option<u64>,
 }
@@ -152,26 +129,73 @@ impl LoadedPlugin {
     /// Convert this loaded plugin into a `PluginInfo` snapshot for `UiStateMeta`.
     pub fn to_info(&self, disabled_plugins: &[String]) -> PluginInfo {
         let enabled = !disabled_plugins.iter().any(|id| id == &self.manifest.id);
-        PluginInfo::from_manifest(
+        let mut info = PluginInfo::from_manifest(
             &self.manifest,
             enabled,
             self.plugin_dir.display().to_string(),
             None,
-        )
+        );
+        info.available = self.entry_path.is_file();
+        info.viewer_actions = self.viewer_actions().to_vec();
+        info.quick_actions = self.quick_actions().to_vec();
+        info.models = self.models().to_vec();
+        info
     }
 
-    /// Configured execution timeout, falling back to `DEFAULT_PLUGIN_TIMEOUT`.
+    /// Configured execution timeout, falling back to the protocol default.
     pub fn timeout(&self) -> Duration {
         self.manifest
             .timeout_ms
             .filter(|&ms| ms > 0)
             .map(Duration::from_millis)
-            .unwrap_or(DEFAULT_PLUGIN_TIMEOUT)
+            .unwrap_or_else(|| {
+                if self.is_jsonl_stdio() {
+                    DEFAULT_AI_PLUGIN_TIMEOUT
+                } else {
+                    DEFAULT_PLUGIN_TIMEOUT
+                }
+            })
     }
 
     /// Whether this plugin uses the KogaView `jsonl-stdio` protocol.
     pub fn is_jsonl_stdio(&self) -> bool {
         matches!(self.protocol, PluginBridgeProtocol::JsonlStdioV1(_))
+    }
+
+    /// Declared downloadable/selectable AI models or language packs.
+    pub fn models(&self) -> &[PluginModelSpec] {
+        match &self.protocol {
+            PluginBridgeProtocol::PhotonNdjsonV1 => &[],
+            PluginBridgeProtocol::JsonlStdioV1(meta) => &meta.models,
+        }
+    }
+
+    /// Declared Browser/Viewer Quick Actions.
+    pub fn quick_actions(&self) -> &[PluginQuickAction] {
+        match &self.protocol {
+            PluginBridgeProtocol::PhotonNdjsonV1 => &[],
+            PluginBridgeProtocol::JsonlStdioV1(meta) => &meta.quick_actions,
+        }
+    }
+
+    /// Declared Viewer capability action IDs (e.g. `viewer.translate`, `viewer.ocr_copy`, `viewer.ai_ocr`).
+    pub fn viewer_actions(&self) -> &[String] {
+        match &self.protocol {
+            PluginBridgeProtocol::PhotonNdjsonV1 => &[],
+            PluginBridgeProtocol::JsonlStdioV1(meta) => &meta.viewer_actions,
+        }
+    }
+
+    /// Whether this plugin declares capability or quick-action support for `action`.
+    pub fn supports_action(&self, action: &str) -> bool {
+        match &self.protocol {
+            PluginBridgeProtocol::PhotonNdjsonV1 => false,
+            PluginBridgeProtocol::JsonlStdioV1(meta) => {
+                meta.capability_outputs.contains_key(action)
+                    || meta.viewer_actions.iter().any(|a| a == action)
+                    || meta.quick_actions.iter().any(|qa| qa.action == action)
+            }
+        }
     }
 }
 
@@ -437,9 +461,11 @@ fn load_jsonl_manifest(
     let mut caps = Vec::new();
     let mut has_editor = false;
     let mut has_browser = false;
+    let mut has_viewer = false;
     let mut default_editor_action: Option<String> = None;
     let mut default_browser_action: Option<String> = None;
     let mut capability_outputs = BTreeMap::new();
+    let mut viewer_actions = Vec::new();
     let mut param_specs = Vec::new();
     let mut seen_param_keys = BTreeSet::new();
     let mut cap_labels = Vec::new();
@@ -449,6 +475,15 @@ fn load_jsonl_manifest(
         if !cap.label.trim().is_empty() {
             cap_labels.push(cap.label.trim().to_owned());
         }
+        if cap.workspace == "viewer"
+            || cap.action.starts_with("viewer.")
+            || cap.action.starts_with("caption.")
+        {
+            has_viewer = true;
+            if !viewer_actions.contains(&cap.action) {
+                viewer_actions.push(cap.action.clone());
+            }
+        }
         let is_image_output = matches!(cap.output.as_str(), "image" | "rgba_image");
         if cap.workspace == "editor" || is_image_output {
             has_editor = true;
@@ -456,7 +491,7 @@ fn load_jsonl_manifest(
                 default_editor_action = Some(cap.action.clone());
             }
         }
-        if matches!(cap.workspace.as_str(), "browser" | "viewer") {
+        if cap.workspace == "browser" {
             has_browser = true;
             if default_browser_action.is_none() {
                 default_browser_action = Some(cap.action.clone());
@@ -472,15 +507,14 @@ fn load_jsonl_manifest(
     }
 
     for qa in &raw.quick_actions {
-        if qa
-            .workspaces
-            .iter()
-            .any(|w| w == "browser" || w == "viewer")
-        {
+        if qa.workspaces.iter().any(|w| w == "browser") {
             has_browser = true;
             if default_browser_action.is_none() {
                 default_browser_action = Some(qa.action.clone());
             }
+        }
+        if qa.workspaces.iter().any(|w| w == "viewer") {
+            has_viewer = true;
         }
     }
 
@@ -489,6 +523,9 @@ fn load_jsonl_manifest(
     }
     if has_browser {
         caps.push(PluginCapability::BrowserAction);
+    }
+    if has_viewer {
+        caps.push(PluginCapability::ViewerAction);
     }
 
     if raw.capabilities.len() > 1 && seen_param_keys.insert("action".to_owned()) {
@@ -507,10 +544,14 @@ fn load_jsonl_manifest(
         });
     }
 
-    let runnable_models: Vec<&JsonlModelSpec> = raw
+    let runnable_models: Vec<&PluginModelSpec> = raw
         .models
         .iter()
-        .filter(|m| !m.file.ends_with(".csv") && !m.file.ends_with(".txt"))
+        .filter(|m| {
+            !m.file.ends_with(".csv")
+                && !m.file.ends_with(".txt")
+                && !m.file.ends_with(".traineddata")
+        })
         .collect();
     if runnable_models.len() > 1 && seen_param_keys.insert("modelId".to_owned()) {
         let options: Vec<String> = runnable_models.iter().map(|m| m.id.clone()).collect();
@@ -568,6 +609,7 @@ fn load_jsonl_manifest(
         default_editor_action,
         default_browser_action,
         capability_outputs,
+        viewer_actions,
         models: raw.models,
         quick_actions: raw.quick_actions,
     };
@@ -586,6 +628,7 @@ fn convert_jsonl_param(raw: &RawJsonlParamSpec) -> Option<PluginParamSpec> {
         "bool" => PluginParamKind::Bool,
         "select" => PluginParamKind::Select,
         "color" => PluginParamKind::Color,
+        "string" | "text" => PluginParamKind::String,
         _ => return None,
     };
 
@@ -619,7 +662,9 @@ fn convert_param_default(
         PluginParamKind::Bool => val.as_bool().map(PluginParamValue::Bool),
         PluginParamKind::Int => val.as_i64().map(PluginParamValue::Int),
         PluginParamKind::Float => val.as_f64().map(PluginParamValue::Float),
-        PluginParamKind::Select => val.as_str().map(|s| PluginParamValue::Select(s.to_owned())),
+        PluginParamKind::Select | PluginParamKind::String => {
+            val.as_str().map(|s| PluginParamValue::Select(s.to_owned()))
+        }
         PluginParamKind::Color => {
             let arr = val.as_array()?;
             if arr.len() != 3 {

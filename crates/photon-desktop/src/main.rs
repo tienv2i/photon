@@ -3,14 +3,19 @@
 mod app;
 mod inspector;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use photon_core::{Core, CoreRuntime};
-use photon_ipc::{IpcRequest, send_once, serve};
+use photon_ipc::{
+    IpcRequest, ViewerInstanceInfo, acquire_viewer_path_lock, find_live_viewer_for_path,
+    register_viewer_instance, send_once, serve, viewer_socket_path,
+};
 use photon_protocol::{ClientKind, Command, Envelope, Language};
 use photon_storage::logging::{initialize, log_shutdown, log_startup};
-use photon_storage::{AppIdentity, AppPaths, Config};
+use photon_storage::{AppIdentity, AppPaths, Config, UiState};
 
 #[derive(Parser)]
 #[command(
@@ -27,13 +32,21 @@ struct Cli {
     #[arg(long)]
     safe_mode: bool,
 
-    /// Reset persisted panel layout to defaults before starting
+    /// Reset persisted panel layout & UI state to defaults before starting
     #[arg(long)]
     reset_layout: bool,
 
-    /// Reset all settings to factory defaults before starting
+    /// Reset persisted settings to factory defaults before starting
     #[arg(long)]
+    reset_settings: bool,
+
+    /// Reset all settings and UI state to factory defaults before starting
+    #[arg(long, alias = "reset-all")]
     reset_config: bool,
+
+    /// Exit immediately after applying CLI reset flags without launching a GUI
+    #[arg(long)]
+    exit: bool,
 
     /// Override initial UI language (`en`, `vi`, or `system`)
     #[arg(long)]
@@ -42,6 +55,10 @@ struct Cli {
     /// Open in a standalone window instead of forwarding to an existing instance
     #[arg(long)]
     new_window: bool,
+
+    /// Internal flag for spawning an independent Viewer process
+    #[arg(long, hide = true)]
+    viewer_window: bool,
 
     #[command(subcommand)]
     sub: Option<Sub>,
@@ -69,24 +86,73 @@ fn main() {
         eprintln!("photon: structured logging unavailable ({err}); continuing");
     }
 
-    if cli.reset_config {
-        let _ = Config::reset_to_factory(&paths.config_file());
-    } else if cli.reset_layout {
-        let _ = Config::reset_layout_only(&paths.config_file());
+    let want_reset_settings = cli.reset_config || cli.reset_settings;
+    let want_reset_layout = cli.reset_config || cli.reset_layout;
+    if want_reset_settings || want_reset_layout {
+        let forwarded = !cli.headless
+            && try_forward_to_running(
+                &paths.socket_path,
+                Command::ResetConfig {
+                    reset_layout: want_reset_layout,
+                    reset_settings: want_reset_settings,
+                },
+            );
+        if !forwarded {
+            if want_reset_settings {
+                let _ = Config::reset_settings_only(&paths.config_file());
+            }
+            if want_reset_layout {
+                let _ = UiState::reset_layout_only(&paths.ui_state_file(), &paths.config_file());
+            }
+        }
+        if cli.exit {
+            return;
+        }
     }
 
-    let initial_cmd = resolve_initial_command(&cli);
+    let mut initial_cmd = resolve_initial_command(&cli);
+    let standalone_viewer = !cli.headless
+        && (cli.viewer_window || matches!(initial_cmd, Some(Command::OpenFiles { .. })));
     let opened_with_files = matches!(
         initial_cmd,
         Some(Command::OpenFiles { .. } | Command::EditorOpen { .. })
     );
 
-    // Single-instance coordination: forward open commands to an active instance unless `--new-window` or `--headless`.
-    if !cli.new_window
+    if standalone_viewer {
+        if let Some(Command::OpenFiles {
+            paths: ref raw_files,
+        }) = initial_cmd.clone()
+            && !cli.viewer_window
+            && !cli.new_window
+        {
+            let mut to_open = Vec::new();
+            for raw in raw_files {
+                let canon = canonicalize_path_str(raw);
+                let _lock = acquire_viewer_path_lock(&paths, &canon, Duration::from_secs(2));
+                if let Some(matched) = find_live_viewer_for_path(&paths, &canon) {
+                    let _ = try_forward_to_running(&matched.info.socket_path, Command::FocusWindow);
+                } else {
+                    to_open.push(raw.clone());
+                }
+            }
+            if to_open.is_empty() && !raw_files.is_empty() {
+                return;
+            }
+            if to_open.len() > 1 {
+                for extra in &to_open[1..] {
+                    spawn_viewer_window_child(extra, cli.safe_mode, cli.lang.as_deref());
+                }
+            }
+            if let Some(first) = to_open.into_iter().next() {
+                initial_cmd = Some(Command::OpenFiles { paths: vec![first] });
+            }
+        }
+    } else if !cli.new_window
         && !cli.headless
         && let Some(cmd) = initial_cmd.clone()
         && try_forward_to_running(&paths.socket_path, cmd)
     {
+        let _ = try_forward_to_running(&paths.socket_path, Command::FocusWindow);
         return;
     }
 
@@ -97,7 +163,11 @@ fn main() {
         .build()
         .expect("tokio runtime");
 
-    let mut core = Core::new(cli.headless, cli.safe_mode);
+    let mut core = if standalone_viewer {
+        Core::new_viewer_ephemeral(cli.headless, cli.safe_mode)
+    } else {
+        Core::new(cli.headless, cli.safe_mode)
+    };
     if let Some(lang_str) = cli.lang.as_deref() {
         let lang = match lang_str.to_ascii_lowercase().as_str() {
             "vi" => Some(Language::Vietnamese),
@@ -117,10 +187,21 @@ fn main() {
         let _ = core.dispatch(Envelope::new("boot-open", ClientKind::Cli, cmd));
     }
 
-    let socket_path = paths.socket_path.clone();
+    let pid = std::process::id();
+    let socket_path = if standalone_viewer {
+        viewer_socket_path(&paths, pid)
+    } else {
+        paths.socket_path.clone()
+    };
+    let initial_viewer_canon = core
+        .snapshot()
+        .meta
+        .viewer_path
+        .as_deref()
+        .map(canonicalize_path_str);
     let hw_accel = core.config.hardware_acceleration;
     let use_software_renderer = cli.safe_mode || !hw_accel;
-    let (handle, gpu_backend) = {
+    let (handle, gpu_backend, _viewer_reg_guard) = {
         let _guard = rt.enter();
         let handle = CoreRuntime::spawn(core);
         let ipc_handle = handle.clone();
@@ -130,6 +211,29 @@ fn main() {
                 tracing::error!(target: "photon::ipc", %err, "IPC server stopped");
             }
         });
+        let viewer_guard = if standalone_viewer {
+            let active_canonical_path = initial_viewer_canon.unwrap_or_default();
+            let open_canonical_paths = if active_canonical_path.as_os_str().is_empty() {
+                Vec::new()
+            } else {
+                vec![active_canonical_path.clone()]
+            };
+            let info = ViewerInstanceInfo {
+                pid,
+                socket_path: socket_path.clone(),
+                active_canonical_path,
+                open_canonical_paths,
+            };
+            match register_viewer_instance(&paths, &info) {
+                Ok(guard) => Some(guard),
+                Err(err) => {
+                    tracing::warn!(target: "photon::ipc", %err, "failed to register viewer instance");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let gpu_backend = if cli.headless {
             "headless"
         } else if use_software_renderer
@@ -139,7 +243,7 @@ fn main() {
         } else {
             "wgpu"
         };
-        (handle, gpu_backend.to_owned())
+        (handle, gpu_backend.to_owned(), viewer_guard)
     };
 
     if cli.headless {
@@ -165,7 +269,7 @@ fn main() {
         unsafe { std::env::set_var("ICED_BACKEND", "wgpu") };
     }
 
-    app::init_globals(handle, gpu_backend, opened_with_files);
+    app::init_globals(handle, gpu_backend, opened_with_files, standalone_viewer);
 
     if let Err(err) = iced::daemon(app::boot, app::update, app::view)
         .title(app::title)
@@ -212,7 +316,30 @@ fn resolve_initial_command(cli: &Cli) -> Option<Command> {
     }
 }
 
-fn try_forward_to_running(socket_path: &std::path::Path, command: Command) -> bool {
+fn canonicalize_path_str(raw: &str) -> PathBuf {
+    std::fs::canonicalize(raw).unwrap_or_else(|_| PathBuf::from(raw))
+}
+
+fn spawn_viewer_window_child(path: &str, safe_mode: bool, lang: Option<&str>) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--viewer-window");
+    if safe_mode {
+        cmd.arg("--safe-mode");
+    }
+    if let Some(l) = lang {
+        cmd.args(["--lang", l]);
+    }
+    cmd.arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _ = cmd.spawn();
+}
+
+fn try_forward_to_running(socket_path: &Path, command: Command) -> bool {
     if !socket_path.exists() {
         return false;
     }

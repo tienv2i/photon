@@ -81,6 +81,8 @@ pub struct BrowserViewState<'a> {
     pub browser_filter_regex: bool,
     pub browser_quick_access_open: bool,
     pub browser_quick_access_collapsed: bool,
+    pub quick_access_options_open: bool,
+    pub quick_access_editing: bool,
     pub browser_explorer_open: bool,
     pub browser_explorer_collapsed: bool,
     pub browser_preview_open: bool,
@@ -168,6 +170,9 @@ pub enum BrowserMessage {
     ToggleBrowserRightPanelVisible(BrowserRightPanel),
     BrowserRightSplitterDrag(f32),
     BrowserRightSplitterRelease(f32),
+    ToggleQuickAccessOptions,
+    ToggleQuickAccessEditing,
+    OpenInViewerWindow(String),
 }
 
 pub fn build_browser_toolbar<'a>(
@@ -432,7 +437,6 @@ fn build_browser_left_sidebar(
     let show_quick_access = state.browser_quick_access_open;
     let show_explorer = state.browser_explorer_open;
     let dragging_any = state.browser_left_panels.is_dragging();
-    let can_swap = show_quick_access && show_explorer;
     let explorer_fills = show_explorer && !state.browser_explorer_collapsed;
 
     let mut stacked = column![].spacing(8).width(Fill).height(Fill);
@@ -470,20 +474,25 @@ fn build_browser_left_sidebar(
             continue;
         }
 
-        let header = DraggablePanelHeaderSpec::new(title)
+        let mut header = DraggablePanelHeaderSpec::new(title)
             .icon(icon)
             .collapsed(collapsed)
             .dragging(state.browser_left_panels.is_dragging_panel(panel))
             .drag_tooltip(tr(lang, "tooltip-sidebar-panel-drag"))
-            .swap_tooltip(tr(lang, "tooltip-panel-drag-reorder"))
             .collapse_tooltip(tr(lang, "tooltip-panel-collapse"))
             .close_tooltip(tr(lang, "tooltip-panel-close"))
             .on_drag_start(BrowserMessage::BeginDragBrowserPanel(panel))
             .on_drag_hover(dragging_any.then_some(BrowserMessage::HoverBrowserPanelDrop(panel)))
             .on_drag_end(dragging_any.then_some(BrowserMessage::DropBrowserPanel(panel)))
-            .on_swap(can_swap.then_some(BrowserMessage::SwapBrowserLeftPanels))
             .on_toggle_collapse(BrowserMessage::ToggleBrowserLeftPanelCollapse(panel))
             .on_close(Some(BrowserMessage::CloseBrowserLeftPanel(panel)));
+
+        if panel == BrowserLeftPanel::QuickAccess {
+            header = header
+                .options_active(state.quick_access_options_open)
+                .options_tooltip(tr(lang, "tooltip-panel-options"))
+                .on_options(Some(BrowserMessage::ToggleQuickAccessOptions));
+        }
 
         stacked = stacked.push(sidebar_panel(
             PanelFrameSpec::new(header)
@@ -509,6 +518,32 @@ fn build_quick_access_body(state: BrowserViewState<'_>) -> Element<'_, BrowserMe
     let cursor_pt = state.last_cursor.unwrap_or(iced::Point::new(140.0, 220.0));
 
     let mut quick_col = column![].spacing(4).width(Fill);
+    if state.quick_access_options_open {
+        let edit_label = if state.quick_access_editing {
+            tr(lang, "action-done-editing")
+        } else {
+            tr(lang, "action-edit-quick-access")
+        };
+        let options_strip = container(
+            row![
+                button::labeled(
+                    edit_label,
+                    Some(Icon::Editor),
+                    ButtonVariant::Tab {
+                        active: state.quick_access_editing,
+                    },
+                    Some(BrowserMessage::ToggleQuickAccessEditing),
+                )
+                .width(Fill),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
+        )
+        .padding([2, 2])
+        .width(Fill);
+        quick_col = quick_col.push(options_strip);
+    }
+
     let fav_len = state.snapshot.meta.favorites.len();
     for (idx, fav_path) in state.snapshot.meta.favorites.iter().enumerate() {
         let label = Path::new(fav_path)
@@ -518,50 +553,52 @@ fn build_quick_access_body(state: BrowserViewState<'_>) -> Element<'_, BrowserMe
             .unwrap_or(fav_path.as_str())
             .to_owned();
         let active = current == Some(fav_path.as_str());
-        let row_btn = row![
-            button::list_row(
-                Icon::Star,
-                label,
-                None,
-                active,
-                Some(BrowserMessage::Dispatch(Command::OpenFolder {
-                    path: fav_path.clone(),
-                })),
-            ),
-            button::compact_icon_tipped(
-                Icon::ArrowUp,
-                ButtonVariant::Ghost,
-                (idx > 0).then(|| {
-                    BrowserMessage::Dispatch(Command::MoveFavorite {
-                        path: fav_path.clone(),
-                        direction: MoveDirection::Up,
-                    })
-                }),
-                tr(lang, "action-move-up"),
-            ),
-            button::compact_icon_tipped(
-                Icon::ArrowDown,
-                ButtonVariant::Ghost,
-                (idx + 1 < fav_len).then(|| {
-                    BrowserMessage::Dispatch(Command::MoveFavorite {
-                        path: fav_path.clone(),
-                        direction: MoveDirection::Down,
-                    })
-                }),
-                tr(lang, "action-move-down"),
-            ),
-            button::compact_icon_tipped(
-                Icon::Trash,
-                ButtonVariant::Ghost,
-                Some(BrowserMessage::Dispatch(Command::RemoveFavorite {
-                    path: fav_path.clone(),
-                })),
-                tr(lang, "action-unpin-quick-access"),
-            ),
-        ]
+        let mut row_btn = row![button::list_row(
+            Icon::Folder,
+            label,
+            None,
+            active,
+            Some(BrowserMessage::Dispatch(Command::OpenFolder {
+                path: fav_path.clone(),
+            })),
+        )]
         .spacing(1)
         .width(Fill)
         .align_y(Alignment::Center);
+
+        if state.quick_access_editing {
+            row_btn = row_btn
+                .push(button::compact_icon_tipped(
+                    Icon::ArrowUp,
+                    ButtonVariant::Ghost,
+                    (idx > 0).then(|| {
+                        BrowserMessage::Dispatch(Command::MoveFavorite {
+                            path: fav_path.clone(),
+                            direction: MoveDirection::Up,
+                        })
+                    }),
+                    tr(lang, "action-move-up"),
+                ))
+                .push(button::compact_icon_tipped(
+                    Icon::ArrowDown,
+                    ButtonVariant::Ghost,
+                    (idx + 1 < fav_len).then(|| {
+                        BrowserMessage::Dispatch(Command::MoveFavorite {
+                            path: fav_path.clone(),
+                            direction: MoveDirection::Down,
+                        })
+                    }),
+                    tr(lang, "action-move-down"),
+                ))
+                .push(button::compact_icon_tipped(
+                    Icon::Trash,
+                    ButtonVariant::Ghost,
+                    Some(BrowserMessage::Dispatch(Command::RemoveFavorite {
+                        path: fav_path.clone(),
+                    })),
+                    tr(lang, "action-unpin-quick-access"),
+                ));
+        }
 
         quick_col = quick_col.push(mouse_area(row_btn).on_right_press(
             BrowserMessage::OpenQuickAccessContextMenu {
@@ -1206,7 +1243,6 @@ fn build_browser_right_sidebar<'a>(
             .collapsed(collapsed)
             .dragging(state.browser_right_panels.is_dragging_panel(panel_kind))
             .drag_tooltip(tr(lang, "tooltip-sidebar-panel-drag"))
-            .swap_tooltip(tr(lang, "tooltip-panel-drag-reorder"))
             .collapse_tooltip(tr(lang, "tooltip-panel-collapse"))
             .close_tooltip(tr(lang, "tooltip-panel-close"))
             .on_drag_start(BrowserMessage::BeginDragBrowserRightPanel(panel_kind))
@@ -1214,7 +1250,6 @@ fn build_browser_right_sidebar<'a>(
                 dragging_any.then_some(BrowserMessage::HoverBrowserRightPanelDrop(panel_kind)),
             )
             .on_drag_end(dragging_any.then_some(BrowserMessage::DropBrowserRightPanel(panel_kind)))
-            .on_swap(can_swap.then_some(BrowserMessage::SwapBrowserRightPanels))
             .on_toggle_collapse(BrowserMessage::ToggleBrowserRightPanelCollapse(panel_kind))
             .on_close(Some(BrowserMessage::CloseBrowserRightPanel(panel_kind)));
 
@@ -1357,9 +1392,7 @@ fn build_browser_preview_body(state: BrowserViewState<'_>) -> Element<'_, Browse
                         tr(lang, "action-view"),
                         Some(Icon::Viewer),
                         ButtonVariant::Primary,
-                        Some(BrowserMessage::Dispatch(Command::ViewerOpen {
-                            path: sel.path.clone(),
-                        })),
+                        Some(BrowserMessage::OpenInViewerWindow(sel.path.clone())),
                     )
                     .width(Fill),
                     tr(lang, "action-view"),
@@ -1691,9 +1724,7 @@ pub fn build_browser_context_menu_entries<'a>(
         entries.push(MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-view"),
-                BrowserMessage::ContextMenuDispatch(Command::ViewerOpen {
-                    path: entry_path.to_owned(),
-                }),
+                BrowserMessage::OpenInViewerWindow(entry_path.to_owned()),
             )
             .icon(Icon::Viewer)
             .enabled(is_image),
@@ -1791,11 +1822,42 @@ pub fn build_browser_context_menu_entries<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-delete-permanently"),
-                BrowserMessage::BrowserConfirmDeletePermanently(paths),
+                BrowserMessage::BrowserConfirmDeletePermanently(paths.clone()),
             )
             .icon(Icon::Trash),
         ),
     ]);
+
+    let image_paths: Vec<String> = paths
+        .into_iter()
+        .filter(|p| {
+            state
+                .snapshot
+                .entries
+                .iter()
+                .any(|e| e.path == *p && e.is_image)
+        })
+        .collect();
+    if !image_paths.is_empty() {
+        let qas = workspace_quick_actions(&state.snapshot.meta, "browser");
+        if !qas.is_empty() {
+            entries.push(MenuEntry::Separator);
+            entries.push(MenuEntry::Header(tr(lang, "menu-quick-actions")));
+            for qa in qas {
+                entries.push(MenuEntry::Item(
+                    MenuItem::new(
+                        qa.label.clone(),
+                        BrowserMessage::ContextMenuDispatch(Command::QuickActionRun {
+                            plugin_id: qa.plugin_id.clone(),
+                            action_id: qa.id.clone(),
+                            paths: image_paths.clone(),
+                        }),
+                    )
+                    .icon(Icon::Plug),
+                ));
+            }
+        }
+    }
 
     menu_panel_entries(entries, 225.0)
 }
@@ -1915,6 +1977,20 @@ pub fn build_browser_plugins_menu_entries<'a>(
         .icon(Icon::Refresh),
     ));
     entries
+}
+
+/// Filter `meta.quick_actions` to available Quick Actions targeting `workspace` (e.g. `"browser"`).
+pub fn workspace_quick_actions<'a>(
+    meta: &'a photon_protocol::UiStateMeta,
+    workspace: &str,
+) -> Vec<&'a photon_protocol::AiQuickAction> {
+    meta.quick_actions
+        .iter()
+        .filter(|qa| {
+            qa.available
+                && (qa.workspaces.is_empty() || qa.workspaces.iter().any(|w| w == workspace))
+        })
+        .collect()
 }
 
 /// Reusable browser Window / Help menu entry builders for `app.rs::build_active_menu`.

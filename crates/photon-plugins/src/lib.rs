@@ -6,6 +6,7 @@
 
 mod bridge;
 mod manifest;
+mod models;
 mod registry;
 
 use std::path::PathBuf;
@@ -15,11 +16,16 @@ use photon_protocol::PluginCapability;
 use thiserror::Error;
 
 pub use bridge::{
-    BrowserPluginResult, EditorPluginResult, PluginOutputMode, run_browser_plugin,
-    run_browser_plugin_with_timeout, run_editor_plugin, run_editor_plugin_with_timeout,
+    BrowserPluginResult, EditorPluginResult, PluginOutputMode, commit_browser_image_output,
+    resolve_models_dir_for, run_browser_plugin, run_browser_plugin_with_timeout, run_editor_plugin,
+    run_editor_plugin_with_timeout, run_jsonl_inference_streaming,
 };
 pub use manifest::{
     LoadedPlugin, load_plugin_from_dir, resolve_safe_entry, validate_manifest, validate_plugin_id,
+};
+pub use models::{
+    AiWorkerEvent, REMBG_ACTION, REMBG_PLUGIN_ID, builtin_rembg_models, catalog_models,
+    delete_model_file, download_model, model_statuses,
 };
 pub use registry::{
     PluginDiscoveryError, PluginRegistry, install_from_dir, resolve_plugins_dir, uninstall,
@@ -31,8 +37,11 @@ pub const PLUGIN_BRIDGE_PROTOCOL: u32 = 1;
 /// Environment variable overriding the default plugins directory.
 pub const PLUGINS_DIR_ENV: &str = "PHOTON_PLUGINS_DIR";
 
-/// Default timeout enforced on plugin subprocess execution.
+/// Default timeout enforced on native NDJSON plugin subprocess execution.
 pub const DEFAULT_PLUGIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default timeout enforced on `jsonl-stdio` AI/OCR plugin execution when no `timeoutMs` is set.
+pub const DEFAULT_AI_PLUGIN_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Maximum allowed width or height (in pixels) for plugin output images.
 pub const MAX_PLUGIN_IMAGE_DIMENSION: u32 = 32_768;

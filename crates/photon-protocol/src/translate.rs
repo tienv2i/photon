@@ -77,3 +77,12 @@ pub struct TranslationResult {
     #[serde(default)]
     pub blocks: Vec<TranslationBlock>,
 }
+
+/// Persisted translation overlay loaded from `<dir>/.photon/translation/<file>.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedTranslation {
+    pub path: String,
+    #[serde(default)]
+    pub blocks: Vec<TranslationBlock>,
+}

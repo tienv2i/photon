@@ -5,6 +5,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Size, Theme};
 
+pub use photon_dialogs::frame::render_managed_dialog_with_header;
 pub use photon_dialogs::{
     ActiveGesture, CutoutStrips, DialogEvent, DialogManager, DialogStyle, DialogWindowState,
     DragOp, ManagedDialogSpec, OverlayMode, ResizeEdge, apply_overlay, clamp_dialog_rect,
@@ -89,6 +90,22 @@ where
     )
 }
 
+/// Managed dialog specification paired with an optional non-scrolling header strip
+/// (for example, a pinned tab bar above the scrollable body).
+pub struct HeaderedManagedDialogSpec<'a, Id, M> {
+    pub spec: ManagedDialogSpec<'a, Id, M>,
+    pub header_strip: Option<Element<'a, M>>,
+}
+
+impl<'a, Id, M> From<ManagedDialogSpec<'a, Id, M>> for HeaderedManagedDialogSpec<'a, Id, M> {
+    fn from(spec: ManagedDialogSpec<'a, Id, M>) -> Self {
+        Self {
+            spec,
+            header_strip: None,
+        }
+    }
+}
+
 /// Render an ordered stack of managed dialogs over `base` (`dialogs` rendered bottom-to-top).
 pub fn managed_dialog_stack<'a, Id, M>(
     base: impl Into<Element<'a, M>>,
@@ -104,6 +121,32 @@ where
     for spec in dialogs {
         if spec.open {
             layer = render_managed_dialog(layer, manager, viewport, spec);
+        }
+    }
+    layer
+}
+
+/// Render an ordered stack of managed dialogs with optional non-scrolling header strips.
+pub fn managed_dialog_stack_with_headers<'a, Id, M>(
+    base: impl Into<Element<'a, M>>,
+    manager: &DialogManager<Id>,
+    viewport: Size,
+    dialogs: Vec<HeaderedManagedDialogSpec<'a, Id, M>>,
+) -> Element<'a, M>
+where
+    Id: Ord + Clone + 'static,
+    M: Clone + 'a,
+{
+    let mut layer: Element<'a, M> = base.into();
+    for item in dialogs {
+        if item.spec.open {
+            layer = render_managed_dialog_with_header(
+                layer,
+                manager,
+                viewport,
+                item.spec,
+                item.header_strip,
+            );
         }
     }
     layer
@@ -519,5 +562,27 @@ mod tests {
         assert_ne!(dark.surface_bg, light.surface_bg);
         assert_ne!(dark.text_primary, light.text_primary);
         assert_eq!(dark.radius, RADIUS_LG);
+    }
+
+    #[test]
+    fn headered_managed_dialog_spec_defaults_header_strip_to_none() {
+        let spec = ManagedDialogSpec {
+            id: "settings",
+            open: true,
+            title: "Settings".to_owned(),
+            defaults: DialogWindowState::new(660.0, 580.0),
+            resizable: true,
+            draggable: true,
+            overlay: OverlayMode::default(),
+            body: text("body").into(),
+            footer: None,
+            close_button: None,
+            style: dialog_style_for_theme(&Theme::Dark),
+            on_event: Box::new(|_| ()),
+            on_close: (),
+            on_noop: (),
+        };
+        let headered: HeaderedManagedDialogSpec<'_, &'static str, ()> = spec.into();
+        assert!(headered.header_strip.is_none());
     }
 }

@@ -3638,6 +3638,7 @@ version = "0.1.0"
 dependencies = [
  "photon-core",
  "photon-protocol",
+ "photon-storage",
  "serde",
  "serde_json",
  "tokio",

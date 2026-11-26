@@ -5,9 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use photon_protocol::PluginInfo;
+use photon_protocol::{AiModelStatus, AiQuickAction, AiSettings, PluginInfo, PluginModelSpec};
 
 use crate::manifest::{LoadedPlugin, load_plugin_from_dir, validate_plugin_id};
+use crate::models;
 use crate::{PLUGINS_DIR_ENV, PluginError};
 
 static INSTALL_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -139,6 +140,52 @@ impl PluginRegistry {
             .values()
             .map(|plugin| plugin.to_info(disabled_plugins))
             .collect()
+    }
+
+    /// Collect all Quick Actions declared by enabled discovered plugins.
+    pub fn quick_actions(&self, disabled_plugins: &[String]) -> Vec<AiQuickAction> {
+        let mut out = Vec::new();
+        for plugin in self.plugins.values() {
+            if disabled_plugins.iter().any(|id| id == &plugin.manifest.id) {
+                continue;
+            }
+            let available = plugin.entry_path.is_file();
+            for qa in plugin.quick_actions() {
+                out.push(AiQuickAction {
+                    plugin_id: plugin.manifest.id.clone(),
+                    id: qa.id.clone(),
+                    label: qa.label.clone(),
+                    action: qa.action.clone(),
+                    workspaces: qa.workspaces.clone(),
+                    params: qa.params.clone(),
+                    available,
+                });
+            }
+        }
+        out
+    }
+
+    /// Find an enabled plugin supporting `action` (capability or quick action).
+    pub fn find_by_action(
+        &self,
+        action: &str,
+        disabled_plugins: &[String],
+    ) -> Option<&LoadedPlugin> {
+        self.plugins.values().find(|p| {
+            !disabled_plugins.iter().any(|id| id == &p.manifest.id)
+                && p.entry_path.is_file()
+                && p.supports_action(action)
+        })
+    }
+
+    /// Collect all cataloged models from built-in specs and discovered plugins.
+    pub fn catalog_models(&self) -> Vec<PluginModelSpec> {
+        models::catalog_models(self.plugins.values())
+    }
+
+    /// Resolve model statuses against `models_dir` and `AiSettings`.
+    pub fn model_statuses(&self, models_dir: &Path, settings: &AiSettings) -> Vec<AiModelStatus> {
+        models::model_statuses(models_dir, settings, self.plugins.values())
     }
 
     /// Validate and install a plugin from `source_dir` into this registry's directory and refresh.

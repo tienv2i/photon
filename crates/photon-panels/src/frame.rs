@@ -78,6 +78,24 @@ impl<'a, M> PanelFrameSpec<'a, M> {
         self.on_drop_release = msg;
         self
     }
+
+    /// Set the optional per-panel options toggle callback on the header.
+    pub fn on_options(mut self, msg: Option<M>) -> Self {
+        self.header.on_options = msg;
+        self
+    }
+
+    /// Set whether the panel's options toggle button is currently active.
+    pub fn options_active(mut self, active: bool) -> Self {
+        self.header.options_active = active;
+        self
+    }
+
+    /// Set the tooltip for the panel's options toggle button.
+    pub fn options_tooltip(mut self, tooltip: impl Into<String>) -> Self {
+        self.header.options_tooltip = Some(tooltip.into());
+        self
+    }
 }
 
 /// Render a unified collapsible, optional-closable, drag-reorderable sidebar panel section.

@@ -18,8 +18,8 @@ use iced::mouse;
 use iced::widget::shader::{self, Action};
 use iced::{Event, Rectangle};
 use photon_protocol::{
-    CanvasAntiAliasingMode, ColorAdjustments, DrawShapeKind, LayerTransformSpec, VectorPathNode,
-    ViewportDenoiseMode,
+    BlendMode, CanvasAntiAliasingMode, ColorAdjustments, DrawShapeKind, GradientKind,
+    GradientRepeat, GradientStop, LayerTransformSpec, VectorPathNode, ViewportDenoiseMode,
 };
 
 pub use gpu::{ImageQuadPrimitive, ImageShaderPipeline, MAX_GPU_TEXTURE_DIM};
@@ -108,6 +108,42 @@ impl CanvasTool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GradientDragMode {
+    New,
+    MoveStart,
+    MoveEnd,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GradientPreview {
+    pub start: Option<[f32; 2]>,
+    pub end: Option<[f32; 2]>,
+    pub kind: GradientKind,
+    pub repeat: GradientRepeat,
+    pub stops: Vec<GradientStop>,
+    pub opacity: f32,
+    pub reverse: bool,
+    pub blend_mode: BlendMode,
+    pub interactive: bool,
+}
+
+impl Default for GradientPreview {
+    fn default() -> Self {
+        Self {
+            start: None,
+            end: None,
+            kind: GradientKind::Linear,
+            repeat: GradientRepeat::None,
+            stops: Vec::new(),
+            opacity: 1.0,
+            reverse: false,
+            blend_mode: BlendMode::Normal,
+            interactive: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CanvasInteractionState {
     pub dragging: bool,
@@ -122,6 +158,7 @@ pub struct CanvasInteractionState {
     pub transform_anchor_px: Option<[f32; 2]>,
     pub transform_start_spec: Option<LayerTransformSpec>,
     pub transform_live_spec: Option<LayerTransformSpec>,
+    pub gradient_drag_mode: Option<GradientDragMode>,
     pub healing_source_px: Option<[f32; 2]>,
     pub modifiers: Modifiers,
     pub last_cursor: Option<iced::Point>,
@@ -221,6 +258,12 @@ pub enum CanvasEvent {
         start: [f32; 2],
         end: [f32; 2],
     },
+    GradientDraftUpdated {
+        start: [f32; 2],
+        end: [f32; 2],
+    },
+    GradientDraftApply,
+    GradientDraftCancel,
     TransformUpdated(LayerTransformSpec),
     TransformCommit,
     TransformCancel,
@@ -265,6 +308,7 @@ pub struct ImageCanvasProgram {
     pub denoise_mode: ViewportDenoiseMode,
     pub healing_source_px: Option<[f32; 2]>,
     pub transform_preview: Option<TransformPreview>,
+    pub gradient_preview: Option<GradientPreview>,
 }
 
 impl Default for ImageCanvasProgram {
@@ -301,6 +345,7 @@ impl Default for ImageCanvasProgram {
             denoise_mode: ViewportDenoiseMode::default(),
             healing_source_px: None,
             transform_preview: None,
+            gradient_preview: None,
         }
     }
 }
@@ -361,6 +406,56 @@ impl ImageCanvasProgram {
         Some(tp)
     }
 
+    fn effective_gradient_preview(
+        &self,
+        state: &CanvasInteractionState,
+    ) -> Option<GradientPreview> {
+        if self.tool != CanvasTool::Gradient {
+            return None;
+        }
+        let mut gp = self.gradient_preview.clone()?;
+        if state.drawing_shape
+            && let (Some(a), Some(b)) = (state.draw_anchor_px, state.draw_current_px)
+        {
+            gp.start = Some(a);
+            gp.end = Some(b);
+        }
+        Some(gp)
+    }
+
+    fn doc_px_to_screen(&self, doc_px: [f32; 2], bounds: Rectangle) -> Option<[f32; 2]> {
+        let (left, top, drawn_w, drawn_h, fw, fh) = self.fit_geometry(bounds)?;
+        Some([
+            bounds.x + left + (doc_px[0] / fw.max(1.0)) * drawn_w,
+            bounds.y + top + (doc_px[1] / fh.max(1.0)) * drawn_h,
+        ])
+    }
+
+    fn hit_test_gradient_handle(
+        &self,
+        pos: iced::Point,
+        bounds: Rectangle,
+    ) -> Option<GradientDragMode> {
+        let gp = self.gradient_preview.as_ref().filter(|g| g.interactive)?;
+        let (sa, sb) = (gp.start?, gp.end?);
+        let threshold_sq = 12.0 * 12.0;
+        if let Some([sx, sy]) = self.doc_px_to_screen(sa, bounds) {
+            let dx = pos.x - sx;
+            let dy = pos.y - sy;
+            if dx * dx + dy * dy <= threshold_sq {
+                return Some(GradientDragMode::MoveStart);
+            }
+        }
+        if let Some([ex, ey]) = self.doc_px_to_screen(sb, bounds) {
+            let dx = pos.x - ex;
+            let dy = pos.y - ey;
+            if dx * dx + dy * dy <= threshold_sq {
+                return Some(GradientDragMode::MoveEnd);
+            }
+        }
+        None
+    }
+
     fn fit_geometry(&self, bounds: Rectangle) -> Option<(f32, f32, f32, f32, f32, f32)> {
         let (doc_w, doc_h) = self.effective_doc_size()?;
         let vp_w = bounds.width.max(1.0);
@@ -406,6 +501,21 @@ impl ImageCanvasProgram {
         let rel_y = pos.y - bounds.y;
         let u = ((rel_x - left) / drawn_w).clamp(0.0, 1.0);
         let v = ((rel_y - top) / drawn_h).clamp(0.0, 1.0);
+        Some([f64::from(u * fw), f64::from(v * fh)])
+    }
+
+    /// Convert viewport screen coordinates into document pixel coordinates without clamping
+    /// to `[0..fw, 0..fh]`, so Transform handles/rotations outside canvas bounds work accurately.
+    pub fn screen_to_image_px_unclamped(
+        &self,
+        pos: iced::Point,
+        bounds: Rectangle,
+    ) -> Option<[f64; 2]> {
+        let (left, top, drawn_w, drawn_h, fw, fh) = self.fit_geometry(bounds)?;
+        let rel_x = pos.x - bounds.x;
+        let rel_y = pos.y - bounds.y;
+        let u = (rel_x - left) / drawn_w;
+        let v = (rel_y - top) / drawn_h;
         Some([f64::from(u * fw), f64::from(v * fh)])
     }
 
@@ -480,6 +590,21 @@ impl ImageCanvasProgram {
         let vp_h = bounds.height.max(1.0);
         [dx * 2.0 / vp_w, -dy * 2.0 / vp_h]
     }
+}
+
+fn snap_angle_15(anchor: [f32; 2], pt: [f32; 2]) -> [f32; 2] {
+    let dx = pt[0] - anchor[0];
+    let dy = pt[1] - anchor[1];
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-4 {
+        return pt;
+    }
+    let step = std::f32::consts::FRAC_PI_6 * 0.5; // 15 degrees
+    let snapped = (dy.atan2(dx) / step).round() * step;
+    [
+        anchor[0] + len * snapped.cos(),
+        anchor[1] + len * snapped.sin(),
+    ]
 }
 
 fn commit_polygon_selection(state: &mut CanvasInteractionState) -> Option<Action<CanvasEvent>> {
@@ -784,6 +909,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 state.sampling = false;
                 state.dragging_split = false;
                 state.drawing_shape = false;
+                state.gradient_drag_mode = None;
                 state.bezier_dragging_handle = false;
                 state.last_cursor = None;
                 state.stabilizer_pos_px = None;
@@ -825,6 +951,32 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                         state.transform_start_spec = None;
                         state.transform_live_spec = None;
                         return Some(Action::publish(CanvasEvent::TransformCancel).and_capture());
+                    }
+                    Key::Named(Named::Enter)
+                        if self.tool == CanvasTool::Gradient
+                            && self
+                                .gradient_preview
+                                .as_ref()
+                                .is_some_and(|g| g.start.is_some() && g.end.is_some()) =>
+                    {
+                        state.drawing_shape = false;
+                        state.gradient_drag_mode = None;
+                        return Some(
+                            Action::publish(CanvasEvent::GradientDraftApply).and_capture(),
+                        );
+                    }
+                    Key::Named(Named::Escape)
+                        if self.tool == CanvasTool::Gradient
+                            && self
+                                .gradient_preview
+                                .as_ref()
+                                .is_some_and(|g| g.start.is_some() && g.end.is_some()) =>
+                    {
+                        state.drawing_shape = false;
+                        state.gradient_drag_mode = None;
+                        return Some(
+                            Action::publish(CanvasEvent::GradientDraftCancel).and_capture(),
+                        );
                     }
                     Key::Named(Named::Enter)
                         if state.selecting
@@ -1166,7 +1318,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     CanvasTool::Transform => {
                         if let Some(eff_tp) = self.effective_transform_preview(state)
                             && let Some(pos) = cursor.position()
-                            && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
+                            && let Some([px, py]) = self.screen_to_image_px_unclamped(pos, bounds)
                             && let Some((_, _, drawn_w, _, fw, _)) = self.fit_geometry(bounds)
                         {
                             let doc_per_screen = (fw / drawn_w.max(1.0)).max(1e-4);
@@ -1311,10 +1463,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             );
                         }
                     }
-                    CanvasTool::DrawLine
-                    | CanvasTool::DrawRect
-                    | CanvasTool::DrawEllipse
-                    | CanvasTool::Gradient => {
+                    CanvasTool::DrawLine | CanvasTool::DrawRect | CanvasTool::DrawEllipse => {
                         if let Some(pos) = cursor.position()
                             && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
                         {
@@ -1323,6 +1472,28 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             state.draw_anchor_px = Some(pt);
                             state.draw_current_px = Some(pt);
                             return Some(Action::capture());
+                        }
+                    }
+                    CanvasTool::Gradient => {
+                        if let Some(pos) = cursor.position() {
+                            if let Some(mode) = self.hit_test_gradient_handle(pos, bounds)
+                                && let Some(gp) = &self.gradient_preview
+                                && let (Some(sa), Some(sb)) = (gp.start, gp.end)
+                            {
+                                state.drawing_shape = true;
+                                state.gradient_drag_mode = Some(mode);
+                                state.draw_anchor_px = Some(sa);
+                                state.draw_current_px = Some(sb);
+                                return Some(Action::capture());
+                            }
+                            if let Some([px, py]) = self.screen_to_image_px_unclamped(pos, bounds) {
+                                let pt = [px as f32, py as f32];
+                                state.drawing_shape = true;
+                                state.gradient_drag_mode = Some(GradientDragMode::New);
+                                state.draw_anchor_px = Some(pt);
+                                state.draw_current_px = Some(pt);
+                                return Some(Action::capture());
+                            }
                         }
                     }
                     CanvasTool::DrawPolygon | CanvasTool::DrawPolyline => {
@@ -1451,12 +1622,30 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     )
                 {
                     state.drawing_shape = false;
+                    let grad_mode = state.gradient_drag_mode.take();
                     let anchor = state.draw_anchor_px.take();
                     let cur = state.draw_current_px.take();
                     if let (Some(a), Some(b)) = (anchor, cur) {
                         let ev = match self.tool {
                             CanvasTool::Gradient => {
-                                CanvasEvent::DrawGradientCommit { start: a, end: b }
+                                let interactive = self
+                                    .gradient_preview
+                                    .as_ref()
+                                    .is_some_and(|g| g.interactive);
+                                if interactive {
+                                    let len_sq = (b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2);
+                                    if len_sq < 1.0 {
+                                        if grad_mode == Some(GradientDragMode::New) {
+                                            CanvasEvent::GradientDraftCancel
+                                        } else {
+                                            return Some(Action::request_redraw());
+                                        }
+                                    } else {
+                                        CanvasEvent::GradientDraftUpdated { start: a, end: b }
+                                    }
+                                } else {
+                                    CanvasEvent::DrawGradientCommit { start: a, end: b }
+                                }
                             }
                             CanvasTool::DrawLine => CanvasEvent::DrawShapeCommit {
                                 kind: DrawShapeKind::Line,
@@ -1577,7 +1766,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     state.transform_drag_mode,
                     state.transform_anchor_px,
                     state.transform_start_spec,
-                    self.screen_to_image_px(*position, bounds),
+                    self.screen_to_image_px_unclamped(*position, bounds),
                 ) {
                     let spec = apply_transform_drag(
                         tp,
@@ -1647,7 +1836,33 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 }
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) if state.drawing_shape => {
-                if let Some([px, py]) = self.screen_to_image_px(*position, bounds) {
+                if self.tool == CanvasTool::Gradient {
+                    if let Some([px, py]) = self.screen_to_image_px_unclamped(*position, bounds) {
+                        let raw_pt = [px as f32, py as f32];
+                        let snap = state.modifiers.shift();
+                        match state.gradient_drag_mode {
+                            Some(GradientDragMode::MoveStart) => {
+                                let fixed = state.draw_current_px.unwrap_or(raw_pt);
+                                let next = if snap {
+                                    snap_angle_15(fixed, raw_pt)
+                                } else {
+                                    raw_pt
+                                };
+                                state.draw_anchor_px = Some(next);
+                            }
+                            _ => {
+                                let fixed = state.draw_anchor_px.unwrap_or(raw_pt);
+                                let next = if snap {
+                                    snap_angle_15(fixed, raw_pt)
+                                } else {
+                                    raw_pt
+                                };
+                                state.draw_current_px = Some(next);
+                            }
+                        }
+                        return Some(Action::request_redraw());
+                    }
+                } else if let Some([px, py]) = self.screen_to_image_px(*position, bounds) {
                     let pt = [px as f32, py as f32];
                     if state.bezier_dragging_handle
                         && self.tool == CanvasTool::BezierPen
@@ -1748,6 +1963,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
         };
         let (overlay_lines, overlay_tris) = self.build_vector_overlay(state, cursor, bounds);
         let transform_preview = self.effective_transform_preview(state);
+        let gradient_preview = self.effective_gradient_preview(state);
 
         ImageQuadPrimitive {
             frame: self.frame.clone(),
@@ -1782,6 +1998,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
             aa_mode: self.aa_mode,
             denoise_mode: self.denoise_mode,
             transform_preview,
+            gradient_preview,
         }
     }
 
@@ -1826,7 +2043,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
             }
             if let Some(eff_tp) = self.effective_transform_preview(state)
                 && let Some(pos) = cursor.position()
-                && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
+                && let Some([px, py]) = self.screen_to_image_px_unclamped(pos, bounds)
                 && let Some((_, _, drawn_w, _, fw, _)) = self.fit_geometry(bounds)
             {
                 let doc_per_screen = (fw / drawn_w.max(1.0)).max(1e-4);
@@ -2228,32 +2445,24 @@ impl ImageCanvasProgram {
         let line_color = [0.95, 0.98, 1.0, 0.92];
         let rubber_color = [0.35, 0.90, 1.0, 0.95];
 
+        if self.tool == CanvasTool::Gradient
+            && let Some(gp) = self.effective_gradient_preview(state)
+            && let (Some(a), Some(b)) = (gp.start, gp.end)
+            && let (Some(na), Some(nb)) =
+                (self.doc_px_to_ndc(a, bounds), self.doc_px_to_ndc(b, bounds))
+        {
+            let dark = [0.05, 0.06, 0.08, 0.9];
+            self.push_overlay_line_ndc(&mut lines, &mut tris, na, nb, dark, 2.0, bounds);
+            self.push_overlay_line_ndc(&mut lines, &mut tris, na, nb, rubber_color, 1.2, bounds);
+            self.push_overlay_dot(&mut tris, a, 5.5, dark, bounds);
+            self.push_overlay_dot(&mut tris, a, 4.0, [0.2, 0.85, 1.0, 1.0], bounds);
+            self.push_overlay_dot(&mut tris, b, 5.5, dark, bounds);
+            self.push_overlay_dot(&mut tris, b, 4.0, [1.0, 1.0, 1.0, 0.98], bounds);
+        }
+
         if state.drawing_shape {
             match self.tool {
-                CanvasTool::Gradient => {
-                    if let (Some(a), Some(b)) = (state.draw_anchor_px, state.draw_current_px)
-                        && let (Some(na), Some(nb)) =
-                            (self.doc_px_to_ndc(a, bounds), self.doc_px_to_ndc(b, bounds))
-                    {
-                        let dark = [0.05, 0.06, 0.08, 0.9];
-                        self.push_overlay_line_ndc(
-                            &mut lines, &mut tris, na, nb, dark, 2.0, bounds,
-                        );
-                        self.push_overlay_line_ndc(
-                            &mut lines,
-                            &mut tris,
-                            na,
-                            nb,
-                            rubber_color,
-                            1.2,
-                            bounds,
-                        );
-                        self.push_overlay_dot(&mut tris, a, 5.2, dark, bounds);
-                        self.push_overlay_dot(&mut tris, a, 3.8, [0.2, 0.85, 1.0, 1.0], bounds);
-                        self.push_overlay_dot(&mut tris, b, 5.2, dark, bounds);
-                        self.push_overlay_dot(&mut tris, b, 3.8, [1.0, 1.0, 1.0, 0.98], bounds);
-                    }
-                }
+                CanvasTool::Gradient => {}
                 CanvasTool::DrawLine => {
                     if let (Some(a), Some(b)) = (state.draw_anchor_px, state.draw_current_px)
                         && let (Some(na), Some(nb)) =
@@ -2725,7 +2934,7 @@ mod tests {
     #[test]
     fn uniforms_16_byte_alignment_and_size() {
         use std::mem::{offset_of, size_of};
-        assert_eq!(size_of::<gpu::Uniforms>(), 304);
+        assert_eq!(size_of::<gpu::Uniforms>(), 592);
         assert_eq!(size_of::<gpu::Uniforms>() % 16, 0);
         // vec4<f32> fields must be 16-byte aligned
         assert_eq!(offset_of!(gpu::Uniforms, crop_rect) % 16, 0);
@@ -2733,6 +2942,11 @@ mod tests {
         assert_eq!(offset_of!(gpu::Uniforms, preview_fill) % 16, 0);
         assert_eq!(offset_of!(gpu::Uniforms, viewport_bg) % 16, 0);
         assert_eq!(offset_of!(gpu::Uniforms, sel_preview_rect) % 16, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, gradient_line) % 16, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, gradient_params) % 16, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, gradient_meta) % 16, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, gradient_stop_colors) % 16, 0);
+        assert_eq!(offset_of!(gpu::Uniforms, gradient_stop_pos) % 16, 0);
         // vec2<f32> fields must be 8-byte aligned
         assert_eq!(offset_of!(gpu::Uniforms, viewport_size) % 8, 0);
         assert_eq!(offset_of!(gpu::Uniforms, image_size) % 8, 0);
@@ -3146,5 +3360,157 @@ mod tests {
         )
         .and_then(|a| a.into_inner().0);
         assert!(matches!(esc_ev, Some(CanvasEvent::TransformCancel)));
+
+        // Unclamped Transform pointer handling: selection near top edge (offset [0, 0]) puts
+        // Rotate handle at y = -24 (outside [0..800, 0..600]); clicking & dragging must still hit Rotate.
+        let edge_tp = TransformPreview {
+            base_frame: Some(dummy_frame(800, 600)),
+            layer_frame: dummy_frame(100, 100),
+            layer_offset: [0, 0],
+            layer_size: [100, 100],
+            spec: LayerTransformSpec::default(),
+        };
+        let edge_prog = ImageCanvasProgram {
+            frame: Some(dummy_frame(800, 600)),
+            tool: CanvasTool::Transform,
+            transform_preview: Some(edge_tp.clone()),
+            zoom: 0.5,
+            ..Default::default()
+        };
+        let edge_bounds = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let (left, top, drawn_w, drawn_h, fw, fh) = edge_prog.fit_geometry(edge_bounds).unwrap();
+        let doc_per_screen = (fw / drawn_w.max(1.0)).max(1e-4);
+        let edge_handles = transform_handle_positions(&edge_tp, 24.0 * doc_per_screen);
+        let rot_doc = edge_handles[8].1;
+        assert!(rot_doc[1] < 0.0, "rotate handle should sit above y=0");
+        let rot_screen = iced::Point::new(
+            left + (rot_doc[0] / fw) * drawn_w,
+            top + (rot_doc[1] / fh) * drawn_h,
+        );
+        assert!(edge_bounds.contains(rot_screen));
+        let mut edge_st = CanvasInteractionState::default();
+        let _ = shader::Program::update(
+            &edge_prog,
+            &mut edge_st,
+            &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            edge_bounds,
+            mouse::Cursor::Available(rot_screen),
+        );
+        assert_eq!(edge_st.transform_drag_mode, Some(TransformDragMode::Rotate));
+        let drag_ev = shader::Program::update(
+            &edge_prog,
+            &mut edge_st,
+            &Event::Mouse(mouse::Event::CursorMoved {
+                position: iced::Point::new(rot_screen.x + 50.0, rot_screen.y),
+            }),
+            edge_bounds,
+            mouse::Cursor::Available(iced::Point::new(rot_screen.x + 50.0, rot_screen.y)),
+        )
+        .and_then(|a| a.into_inner().0);
+        assert!(matches!(
+            drag_ev,
+            Some(CanvasEvent::TransformUpdated(s)) if s.rotation_deg > 1.0
+        ));
+    }
+
+    #[test]
+    fn gradient_snap_angle_15_snaps_45_and_90_degrees() {
+        let s45 = snap_angle_15([100.0, 100.0], [200.0, 195.0]);
+        assert!((s45[0] - s45[1]).abs() < 1e-2, "expected 45 deg: {s45:?}");
+        let s90 = snap_angle_15([100.0, 100.0], [104.0, 200.0]);
+        assert!((s90[0] - 100.0).abs() < 1e-2, "expected 90 deg: {s90:?}");
+    }
+
+    #[test]
+    fn interactive_gradient_drag_handles_and_keys() {
+        let bounds = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let prog = ImageCanvasProgram {
+            frame: Some(dummy_frame(800, 600)),
+            tool: CanvasTool::Gradient,
+            gradient_preview: Some(GradientPreview {
+                start: Some([100.0, 100.0]),
+                end: Some([300.0, 100.0]),
+                interactive: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (left, top, drawn_w, drawn_h, fw, fh) = prog.fit_geometry(bounds).unwrap();
+        let to_screen = |doc: [f32; 2]| {
+            iced::Point::new(
+                left + (doc[0] / fw) * drawn_w,
+                top + (doc[1] / fh) * drawn_h,
+            )
+        };
+        let mut st = CanvasInteractionState::default();
+        let end_screen = to_screen([300.0, 100.0]);
+        let _ = shader::Program::update(
+            &prog,
+            &mut st,
+            &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(end_screen),
+        );
+        assert_eq!(st.gradient_drag_mode, Some(GradientDragMode::MoveEnd));
+        let moved_screen = to_screen([400.0, 200.0]);
+        let _ = shader::Program::update(
+            &prog,
+            &mut st,
+            &Event::Mouse(mouse::Event::CursorMoved {
+                position: moved_screen,
+            }),
+            bounds,
+            mouse::Cursor::Available(moved_screen),
+        );
+        let rel = shader::Program::update(
+            &prog,
+            &mut st,
+            &Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(moved_screen),
+        )
+        .and_then(|a| a.into_inner().0);
+        assert!(matches!(
+            rel,
+            Some(CanvasEvent::GradientDraftUpdated { .. })
+        ));
+
+        let enter_ev = shader::Program::update(
+            &prog,
+            &mut st,
+            &Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter),
+                modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter),
+                physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::Enter),
+                location: iced::keyboard::Location::Standard,
+                modifiers: Modifiers::empty(),
+                text: None,
+                repeat: false,
+            }),
+            bounds,
+            mouse::Cursor::Available(moved_screen),
+        )
+        .and_then(|a| a.into_inner().0);
+        assert!(matches!(enter_ev, Some(CanvasEvent::GradientDraftApply)));
+
+        let esc_ev = shader::Program::update(
+            &prog,
+            &mut st,
+            &Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                physical_key: iced::keyboard::key::Physical::Code(
+                    iced::keyboard::key::Code::Escape,
+                ),
+                location: iced::keyboard::Location::Standard,
+                modifiers: Modifiers::empty(),
+                text: None,
+                repeat: false,
+            }),
+            bounds,
+            mouse::Cursor::Available(moved_screen),
+        )
+        .and_then(|a| a.into_inner().0);
+        assert!(matches!(esc_ev, Some(CanvasEvent::GradientDraftCancel)));
     }
 }

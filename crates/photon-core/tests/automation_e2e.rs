@@ -405,9 +405,12 @@ fn fill_gradient_shape_healing_denoise_and_transform_e2e() {
                 color_mode: GradientColorMode::FgToBg,
                 fg_color: Some([255, 0, 0]),
                 bg_color: Some([0, 0, 255]),
+                stops: Vec::new(),
                 opacity: Some(1.0),
+                repeat: photon_protocol::GradientRepeat::None,
                 reverse: true,
                 dither: true,
+                blend_mode: photon_protocol::BlendMode::Normal,
             },
         ))
         .ok
@@ -1094,4 +1097,101 @@ fn layout_state_new_fields_deserialize_with_defaults() {
         CanvasAntiAliasingMode::HighQuality
     );
     assert_eq!(parsed.viewport_denoise, ViewportDenoiseMode::Medium);
+}
+
+#[tokio::test]
+async fn async_ai_runtime_streams_progress_and_commits_quick_action() {
+    use photon_core::CoreRuntime;
+    use photon_protocol::EventKind;
+
+    let dir = std::env::temp_dir().join(format!("photon-async-ai-e2e-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let photos = dir.join("photos");
+    let sandbox = dir.join("sandbox");
+    let plugins_dir = sandbox.join("data/plugins");
+    fs::create_dir_all(&photos).unwrap();
+    fs::create_dir_all(plugins_dir.join("photon.async.qa/bin")).unwrap();
+
+    let img_path = photos.join("sample.png");
+    RgbaImage::from_pixel(8, 8, Rgba([50, 100, 150, 255]))
+        .save(&img_path)
+        .unwrap();
+
+    let worker = r#"#!/usr/bin/env python3
+import json, shutil, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get("op") == "shutdown":
+        break
+    if msg.get("op") == "run":
+        print(json.dumps({"id": msg["id"], "event": "progress", "percent": 55, "stage": "Working"}), flush=True)
+        shutil.copyfile(msg["input"], msg["output"])
+        print(json.dumps({"id": msg["id"], "event": "done", "meta": {"device": "cpu"}}), flush=True)
+"#;
+    let py = plugins_dir.join("photon.async.qa/bin/worker.py");
+    fs::write(&py, worker).unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        plugins_dir.join("photon.async.qa/manifest.json"),
+        r#"{
+            "apiVersion": 1,
+            "id": "photon.async.qa",
+            "name": "Async QA",
+            "version": "1.0.0",
+            "entry": { "command": "bin/worker.py", "args": [], "protocol": "jsonl-stdio" },
+            "capabilities": [{ "action": "editor.mock", "workspace": "editor", "label": "Mock", "output": "rgba_image" }],
+            "quickActions": [{ "id": "qa-run", "label": "Mock QA", "action": "editor.mock", "workspaces": ["browser"], "params": {} }]
+        }"#,
+    )
+    .unwrap();
+
+    let core = Core::for_sandbox(&sandbox);
+    let handle = CoreRuntime::spawn(core);
+    let mut events = handle.subscribe_events();
+
+    let resp = handle
+        .dispatch(Envelope::new(
+            "async-1",
+            ClientKind::Gui,
+            Command::QuickActionRun {
+                plugin_id: "photon.async.qa".into(),
+                action_id: "qa-run".into(),
+                paths: vec![img_path.to_string_lossy().into_owned()],
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(resp.ok, "dispatch failed: {:?}", resp.error);
+
+    let mut saw_started = false;
+    let mut saw_progress = false;
+    let mut saw_finished = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline && !saw_finished {
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+            .await
+            .expect("timed out waiting for AI task event")
+            .unwrap();
+        match ev.kind {
+            EventKind::TaskStarted { .. } => saw_started = true,
+            EventKind::TaskProgress { percent: 55, .. } => saw_progress = true,
+            EventKind::TaskFinished { ok: true, .. } => saw_finished = true,
+            _ => {}
+        }
+    }
+
+    assert!(saw_started);
+    assert!(saw_progress);
+    assert!(saw_finished);
+    assert!(photos.join("sample.png~").is_file());
+    let snap = handle.latest_snapshot();
+    assert!(
+        snap.meta
+            .ai_task
+            .as_ref()
+            .is_some_and(|t| !t.running && t.percent == 100)
+    );
+
+    let _ = fs::remove_dir_all(&dir);
 }

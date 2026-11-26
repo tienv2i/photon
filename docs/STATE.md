@@ -13,16 +13,12 @@ Verified snapshot of the `/home/huynhat/Projects/photon` workspace.
 
 ## Verified Checks (Current Tree)
 
-All workspace checks below were executed after the final Rust edits (board #40/#41) and plugin builds (board #30):
+All workspace checks below were executed after the final Rust edits:
 
 | Check | Command | Result |
 |---|---|---|
 | Formatting | `just fmt-check` (`cargo fmt --all -- --check`) | Passed |
-| Lints (strict) | `cargo clippy --workspace --all-targets -- -D warnings` | Passed (0 warnings) |
-| Workspace tests | `just test` (`cargo test --workspace`) | **133 passed, 0 failed** (`photon-browser`: 5, `photon-canvas`: 11, `photon-cli`: 1, `photon-core`: 18 unit + 7 `automation_e2e`, `photon-desktop`: 5, `photon-dialogs`: 11, `photon-editor`: 5, `photon-i18n`: 3, `photon-image`: 23, `photon-panels`: 11, `photon-plugins`: 11, `photon-protocol`: 9, `photon-storage`: 6, `photon-ui`: 16, `photon-viewer`: 1) |
-| Release build | `cargo build --release --workspace` | Passed (`target/release/photon` + `target/release/photonctl`) |
-| Standalone plugins | `cargo build --release` + `{"op":"shutdown"}` smoke test (9 crates) | **9/9 built, 9/9 exited 0** (static `ort` linking verified via `ldd`) |
-| Live GUI & Headless (Tier 3) | `photon` (`wgpu` & `--safe-mode` `tiny-skia`) + `photon --headless` + `photonctl` | Passed (`Manage Plugins…` with 9 plugins, `Curves…`, `Denoise…`, Selection + AA/Denoise, `HealingBrush`/`Gradient`/`PaintBucket`, `Transform` OBB, `.ora` save/reopen, headless `photon.utils` & `photon.rmbg.onnx`) |
+| Workspace tests | `just test` (`cargo test --workspace`) | **167 passed, 0 failed** (`photon-browser`: 5, `photon-canvas`: 13, `photon-cli`: 1, `photon-core`: 21 unit + 8 `automation_e2e`, `photon-desktop`: 6, `photon-dialogs`: 11, `photon-editor`: 5, `photon-i18n`: 3, `photon-image`: 29, `photon-ipc`: 4, `photon-panels`: 13, `photon-plugins`: 12, `photon-protocol`: 10, `photon-storage`: 8, `photon-ui`: 17, `photon-viewer`: 1) |
 
 ## Implemented Feature Milestones
 
@@ -43,7 +39,10 @@ All workspace checks below were executed after the final Rust edits (board #40/#
    - Browser `Ctrl+C`/`Ctrl+V` (`Command::PasteImageBytes`, `stem (copy).ext`) and Editor selection/layer-aware `Cut`/`Copy`/`Copy Merged`/`Paste`/`Paste Into Selection` (`EditorPixelClipboard`, `arboard` + Wayland/X11 CLI fallback, `Query::EditorClipboardPng`).
    - Pure-Rust `.ora` multi-layer read/write (`crates/photon-image/src/ora.rs`), `.psd` multi-layer import, `.svg`/`.svgz`, `.jxl`, Camera RAW (`rawler`), `.avif`, `.exr`, `.hdr`, `.ico`, `.cur`, `.pam`, `.dds`, `.ff`, `.apng`, optional `.heic`/`.heif` CLI fallback, and expanded `SaveFormat`.
 9. **Free Canvas Navigation (`>4096px` GPU Alignment) & Live 60fps Free Transform (`Ctrl+T`)**:
-   - Tool-safe free pan (Middle-mouse & `Space+Drag` across all tools, `Unfocused` flag reset), dynamic zoom range (`min_zoom = 0.02`, `max_zoom = (32.0 / fit_scale).max(32.0)`), Editor canvas scrollbars + `-`/`%`/`+`/`Fit`/`1:1` controls, `MAX_GPU_TEXTURE_DIM = max_texture_dimension_2d.min(16384)` with exact `doc_size` coordinate alignment, and live GPU `TransformPreview` (`@binding(7)`) + OBB handles committing via `Command::EditorTransformLayer`.
+   - Tool-safe free pan (Middle-mouse & `Space+Drag` across all tools, `Unfocused` flag reset), dynamic zoom range (`min_zoom = 0.02`, `max_zoom = (32.0 / fit_scale).max(32.0)`), Editor canvas scrollbars + `-`/`%`/`+`/`Fit`/`1:1` controls, `MAX_GPU_TEXTURE_DIM = max_texture_dimension_2d.min(16384)` with exact `doc_size` coordinate alignment, and live GPU `TransformPreview` (`@binding(7)`) + OBB handles committing via `Command::EditorTransformLayer`, plus selection-aware Transform fixes (`SimpleFrameKey`, premultiplied sampling, live transformed marching ants, unclamped handles).
+10. **Multi-Stop Gradient, Multi-Tab Editor, Independent Viewers & Separated Persistence**:
+    - KogaView multi-stop Gradient engine (6 shapes, 3 repeat modes, 7 blend modes, 8 presets, interactive stop editor, live `wgpu` preview), selection-clipped live Brush/Eraser strokes.
+    - Image Size & Canvas Size moved from tool rail into Image menu & popups; Multi-tab Editor (`document_tab_bar`, per-tab view cache, dirty-close prompt); Independent multi-image Viewer processes (`photon-ipc::viewer_registry` canonical-path deduplication & focus); Quick Access folder icons + hidden-by-default Edit toggle; auto-closing `Workspace & View` menu with Viewer Canvas Backdrop; `config.json` vs `ui_state.json` separation with `save_ui_state_on_exit`, `Ctrl+Q`/`Ctrl+Close` force-save, `photonctl reset <layout|settings|all>`, and Safe Mode disk reset.
 
 ## Verification Scope Notes
 

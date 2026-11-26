@@ -8,15 +8,18 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use image::{GrayImage, ImageFormat, ImageReader, RgbaImage};
-use photon_protocol::{PluginCapability, PluginParamSpec, PluginParamValue};
+use photon_protocol::{
+    AiDevice, PluginCapability, PluginParamSpec, PluginParamValue, TranslationResult,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::{JsonlStdioMeta, LoadedPlugin, PluginBridgeProtocol};
-use crate::{MAX_PLUGIN_IMAGE_DIMENSION, PLUGIN_BRIDGE_PROTOCOL, PluginError};
+use crate::{AiWorkerEvent, MAX_PLUGIN_IMAGE_DIMENSION, PLUGIN_BRIDGE_PROTOCOL, PluginError};
 
 static TEMP_DIR_SEQ: AtomicU64 = AtomicU64::new(1);
 const MAX_STDERR_BYTES: u64 = 16 * 1024;
@@ -437,19 +440,20 @@ fn resolve_jsonl_action(
     default_action.map(str::to_owned)
 }
 
-fn resolve_models_dir(
-    plugin: &LoadedPlugin,
-    params: &BTreeMap<String, PluginParamValue>,
+/// Resolve the models directory for AI/OCR plugins.
+pub fn resolve_models_dir_for(
+    plugin: Option<&LoadedPlugin>,
+    override_dir: Option<&Path>,
 ) -> PathBuf {
-    if let Some(PluginParamValue::Select(dir)) = params.get("modelsDir")
-        && !dir.trim().is_empty()
+    if let Some(dir) = override_dir
+        && !dir.as_os_str().is_empty()
     {
-        return PathBuf::from(dir);
+        return dir.to_path_buf();
     }
     if let Some(env_dir) = std::env::var_os(MODELS_DIR_ENV).filter(|s| !s.is_empty()) {
         return PathBuf::from(env_dir);
     }
-    if let Some(data_dir) = plugin.plugin_dir.parent().and_then(|p| p.parent()) {
+    if let Some(data_dir) = plugin.and_then(|p| p.plugin_dir.parent().and_then(|d| d.parent())) {
         let sibling_models = data_dir.join("models");
         if sibling_models.is_dir() {
             return sibling_models;
@@ -468,13 +472,24 @@ fn resolve_models_dir(
             return candidate;
         }
     }
-    if let Some(data_dir) = plugin.plugin_dir.parent().and_then(|p| p.parent()) {
+    if let Some(data_dir) = plugin.and_then(|p| p.plugin_dir.parent().and_then(|d| d.parent())) {
         return data_dir.join("models");
     }
     data_home.join("photon/models")
 }
 
-fn commit_browser_image_output(
+fn resolve_models_dir(
+    plugin: &LoadedPlugin,
+    params: &BTreeMap<String, PluginParamValue>,
+) -> PathBuf {
+    let param_dir = match params.get("modelsDir") {
+        Some(PluginParamValue::Select(dir)) if !dir.trim().is_empty() => Some(Path::new(dir)),
+        _ => None,
+    };
+    resolve_models_dir_for(Some(plugin), param_dir)
+}
+
+pub fn commit_browser_image_output(
     plugin_id: &str,
     action: &str,
     input_path: &Path,
@@ -626,6 +641,271 @@ fn decode_validated_output_png(id: &str, output_path: &Path) -> Result<RgbaImage
         })?;
 
     Ok(img.to_rgba8())
+}
+
+/// Spawn a `jsonl-stdio` plugin for one asynchronous inference/OCR/caption job,
+/// streaming `AiWorkerEvent` progress, honoring cancellation, and sending `shutdown`
+/// so RAM/VRAM is released cleanly.
+#[allow(clippy::too_many_arguments)]
+pub fn run_jsonl_inference_streaming(
+    plugin: &LoadedPlugin,
+    action: &str,
+    model_id: &str,
+    model_path: &Path,
+    device: AiDevice,
+    models_dir: &Path,
+    input_path: &Path,
+    output_path: &Path,
+    mut params: serde_json::Value,
+    cancel: Arc<AtomicBool>,
+    mut on_event: impl FnMut(AiWorkerEvent),
+) {
+    if !plugin.entry_path.is_file() {
+        on_event(AiWorkerEvent::Failed {
+            message: format!(
+                "plugin '{}' binary not found at {}",
+                plugin.manifest.id,
+                plugin.entry_path.display()
+            ),
+        });
+        return;
+    }
+
+    if let Some(obj) = params.as_object_mut()
+        && !models_dir.as_os_str().is_empty()
+    {
+        obj.entry("modelsDir".to_owned())
+            .or_insert_with(|| serde_json::Value::String(models_dir.display().to_string()));
+    }
+
+    let expanded_args: Vec<String> = plugin
+        .manifest
+        .args
+        .iter()
+        .map(|arg| arg.replace("${device}", device.as_str()))
+        .collect();
+
+    let mut cmd = build_plugin_command(&plugin.entry_path, &expanded_args);
+    cmd.current_dir(&plugin.plugin_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    if let Some(bin_dir) = plugin.entry_path.parent() {
+        let existing = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+        let combined = if existing.is_empty() {
+            bin_dir.display().to_string()
+        } else {
+            format!("{}:{existing}", bin_dir.display())
+        };
+        cmd.env("LD_LIBRARY_PATH", combined);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            on_event(AiWorkerEvent::Failed {
+                message: format!("failed to launch plugin '{}': {error}", plugin.manifest.id),
+            });
+            return;
+        }
+    };
+
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        on_event(AiWorkerEvent::Failed {
+            message: "plugin stdin unavailable".to_owned(),
+        });
+        return;
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        on_event(AiWorkerEvent::Failed {
+            message: "plugin stdout unavailable".to_owned(),
+        });
+        return;
+    };
+
+    let req = serde_json::json!({
+        "id": "req-1",
+        "op": "run",
+        "action": action,
+        "modelId": model_id,
+        "modelPath": model_path.display().to_string(),
+        "device": device.as_str(),
+        "input": input_path.display().to_string(),
+        "output": output_path.display().to_string(),
+        "params": params,
+    });
+    if let Err(error) = writeln!(stdin, "{req}") {
+        let _ = child.kill();
+        let _ = child.wait();
+        on_event(AiWorkerEvent::Failed {
+            message: format!("failed to send request to plugin: {error}"),
+        });
+        return;
+    }
+    let _ = stdin.flush();
+
+    let child_pid = child.id();
+    let cancel_watch = Arc::clone(&cancel);
+    let done_flag = Arc::new(AtomicBool::new(false));
+    let done_watch = Arc::clone(&done_flag);
+    std::thread::spawn(move || {
+        while !done_watch.load(Ordering::SeqCst) {
+            if cancel_watch.load(Ordering::SeqCst) {
+                #[cfg(unix)]
+                {
+                    let _ = Command::new("kill")
+                        .arg("-TERM")
+                        .arg(child_pid.to_string())
+                        .status();
+                }
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(80));
+        }
+    });
+
+    let stderr_pipe = child.stderr.take();
+    let stderr_handle = std::thread::spawn(move || -> String {
+        let Some(pipe) = stderr_pipe else {
+            return String::new();
+        };
+        let mut buf = Vec::new();
+        let _ = pipe.take(MAX_STDERR_BYTES).read_to_end(&mut buf);
+        String::from_utf8_lossy(&buf).trim().to_owned()
+    });
+
+    let reader = BufReader::new(stdout);
+    let mut completed = false;
+    let mut failed_msg: Option<String> = None;
+    let mut device_used = device.as_str().to_owned();
+    let mut clipboard_text: Option<String> = None;
+    let mut translation: Option<TranslationResult> = None;
+    let mut caption_text: Option<String> = None;
+    let mut saved_path: Option<String> = None;
+
+    for line in reader.lines() {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        let Ok(line) = line else {
+            break;
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        match msg
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+        {
+            "progress" => {
+                let percent = msg
+                    .get("percent")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as u8;
+                let stage = msg
+                    .get("stage")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("Processing…")
+                    .to_owned();
+                on_event(AiWorkerEvent::Progress {
+                    percent: percent.min(99),
+                    stage,
+                });
+            }
+            "done" => {
+                if let Some(meta) = msg.get("meta") {
+                    if let Some(dev) = meta.get("device").and_then(serde_json::Value::as_str) {
+                        device_used = dev.to_owned();
+                    }
+                    if let Some(text) = meta
+                        .get("clipboardText")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        clipboard_text = Some(text.to_owned());
+                    }
+                    if let Some(cap) = meta.get("captionText").and_then(serde_json::Value::as_str) {
+                        caption_text = Some(cap.to_owned());
+                    }
+                    if let Some(saved) = meta.get("savedPath").and_then(serde_json::Value::as_str) {
+                        saved_path = Some(saved.to_owned());
+                    }
+                    if let Some(tr_val) = meta.get("translation")
+                        && let Ok(parsed) =
+                            serde_json::from_value::<TranslationResult>(tr_val.clone())
+                    {
+                        translation = Some(parsed);
+                    }
+                }
+                completed = true;
+                break;
+            }
+            "error" => {
+                let message = msg
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("plugin reported an error")
+                    .to_owned();
+                failed_msg = Some(message);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let _ = writeln!(stdin, "{{\"op\":\"shutdown\"}}");
+    drop(stdin);
+    done_flag.store(true, Ordering::SeqCst);
+
+    if cancel.load(Ordering::SeqCst) {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = stderr_handle.join();
+        on_event(AiWorkerEvent::Cancelled);
+        return;
+    }
+
+    let _ = child.wait();
+    let stderr_text = stderr_handle.join().unwrap_or_default();
+
+    if let Some(message) = failed_msg {
+        on_event(AiWorkerEvent::Failed { message });
+    } else if completed
+        && (output_path.is_file()
+            || clipboard_text.is_some()
+            || translation.is_some()
+            || caption_text.is_some()
+            || saved_path.is_some())
+    {
+        on_event(AiWorkerEvent::InferenceDone {
+            model_id: model_id.to_owned(),
+            output_path: output_path.to_path_buf(),
+            device_used,
+            clipboard_text,
+            translation,
+            caption_text,
+            saved_path,
+        });
+    } else {
+        let detail = stderr_text
+            .lines()
+            .last()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("plugin exited without producing an output")
+            .trim()
+            .to_owned();
+        on_event(AiWorkerEvent::Failed { message: detail });
+    }
 }
 
 fn run_jsonl_stdio_job(

@@ -15,18 +15,21 @@ use photon_plugins::{
     run_editor_plugin,
 };
 use photon_protocol::{
-    ApplyTarget, BatchSource, BatchState, ColorAdjustments, ColorBalanceAdjustment, Command,
-    CommandResponse, CommandStatus, Crumb, CurvesAdjustment, EditorSelectionSummary, EditorState,
-    Entry, HsvAdjustment, IMAGE_EXTENSIONS, LayoutState, PluginCapability, PluginParamValue,
-    ProtocolError, Query, RuntimeStatus, SelectionInfo, TaskRunStatus, TaskSnapshot, UiStateMeta,
-    UiStateSnapshot, UiText, UiTreeSnapshot, Workspace, protocol_schemas,
+    AiTaskState, ApplyTarget, BatchSource, BatchState, ColorAdjustments, ColorBalanceAdjustment,
+    Command, CommandResponse, CommandStatus, Crumb, CurvesAdjustment, EditorSelectionSummary,
+    EditorState, EditorTabSummary, Entry, HsvAdjustment, IMAGE_EXTENSIONS, PluginCapability,
+    PluginParamValue, ProtocolError, Query, RuntimeStatus, SavedTranslation, SelectionInfo,
+    TaskRunStatus, TaskSnapshot, TranslationResult, UiStateMeta, UiStateSnapshot, UiText,
+    UiTreeSnapshot, Workspace, protocol_schemas,
 };
 use photon_storage::journal::now_ms;
 use photon_storage::logging::current_boot_id;
-use photon_storage::{AppIdentity, AppPaths, Config, Journal};
+use photon_storage::{AppIdentity, AppPaths, Config, Journal, UiState};
 
+use crate::ai::{self, PendingAiJob};
 use crate::batch::BatchPlan;
 use crate::file_ops;
+use crate::translate;
 
 /// In-memory Editor pixel clipboard backing Cut/Copy/Paste and `Query::EditorClipboardPng`.
 #[derive(Debug, Clone)]
@@ -39,15 +42,24 @@ pub struct EditorPixelClipboard {
     pub png: Arc<Vec<u8>>,
 }
 
+pub(crate) struct EditorTabSlot {
+    pub(crate) id: u64,
+    pub(crate) doc: Option<EditorDocument>,
+    pub(crate) caption: Option<String>,
+}
+
 pub struct Core {
     pub identity: AppIdentity,
     pub paths: AppPaths,
     pub config: Config,
+    pub ui_state: UiState,
+    pub(crate) ui_state_dirty: bool,
     pub journal: Journal,
     pub headless: bool,
     pub safe_mode: bool,
-    started_at: Instant,
-    revision: u64,
+    pub viewer_ephemeral: bool,
+    pub(crate) started_at: Instant,
+    pub(crate) revision: u64,
     listing_epoch: u64,
     tree_revision: u64,
     workspace: Workspace,
@@ -56,18 +68,35 @@ pub struct Core {
     entries: Vec<Entry>,
     selection: Vec<String>,
     selection_info: Option<SelectionInfo>,
-    viewer_images: Vec<String>,
-    viewer_index: Option<usize>,
-    editor: Option<EditorDocument>,
+    pub(crate) viewer_images: Vec<String>,
+    pub(crate) viewer_index: Option<usize>,
+    pub(crate) editor: Option<EditorDocument>,
+    editor_tabs: Vec<EditorTabSlot>,
+    active_editor_tab_id: Option<u64>,
+    next_editor_tab_id: u64,
+    focus_request_seq: u64,
     next_original_revision: u64,
     pixel_clipboard: Option<EditorPixelClipboard>,
-    plugin_registry: PluginRegistry,
+    pub(crate) plugin_registry: PluginRegistry,
+    pub(crate) ai_task: Option<AiTaskState>,
+    pub(crate) ai_cancel: Option<Arc<AtomicBool>>,
+    pub(crate) pending_ai: Option<PendingAiJob>,
+    pub(crate) ai_generation: u64,
+    pub(crate) ai_temp_input: Option<PathBuf>,
+    pub(crate) ai_temp_output: Option<PathBuf>,
+    pub(crate) ai_quick_action_target: Option<(String, String, PathBuf)>,
+    pub(crate) ai_apply_target: ApplyTarget,
+    pub(crate) ai_plugin_label: Option<String>,
+    pub(crate) ai_active_task_id: Option<String>,
+    pub(crate) latest_translation: Option<TranslationResult>,
+    pub(crate) viewer_saved_translation: Option<SavedTranslation>,
+    pub(crate) editor_caption: Option<String>,
     batch: Option<BatchState>,
     batch_cancel: Option<Arc<AtomicBool>>,
     pending_batch: Option<(BatchPlan, Arc<AtomicBool>)>,
-    next_job_seq: u64,
-    status: UiText,
-    tasks: Vec<TaskSnapshot>,
+    pub(crate) next_job_seq: u64,
+    pub(crate) status: UiText,
+    pub(crate) tasks: Vec<TaskSnapshot>,
     ui_tree: Option<UiTreeSnapshot>,
     idempotency_cache: HashMap<String, CommandResponse>,
     idempotency_order: VecDeque<String>,
@@ -78,6 +107,12 @@ impl Core {
         let identity = AppIdentity::current();
         let paths = AppPaths::for_identity(&identity);
         Self::with_paths(identity, paths, headless, safe_mode)
+    }
+
+    pub fn new_viewer_ephemeral(headless: bool, safe_mode: bool) -> Self {
+        let identity = AppIdentity::current();
+        let paths = AppPaths::for_identity(&identity);
+        Self::with_paths_mode(identity, paths, headless, safe_mode, true)
     }
 
     pub fn for_sandbox(sandbox_root: &Path) -> Self {
@@ -93,19 +128,43 @@ impl Core {
         headless: bool,
         safe_mode: bool,
     ) -> Self {
+        Self::with_paths_mode(identity, paths, headless, safe_mode, false)
+    }
+
+    fn with_paths_mode(
+        identity: AppIdentity,
+        paths: AppPaths,
+        headless: bool,
+        safe_mode: bool,
+        viewer_ephemeral: bool,
+    ) -> Self {
         let _ = paths.ensure_runtime_dirs();
-        let config = if safe_mode {
+        let (mut config, ui_state) = if safe_mode {
             let mut cfg = Config::factory_default();
             cfg.hardware_acceleration = false;
             cfg.remember_last_folder = false;
-            cfg
+            (cfg, UiState::default())
         } else {
             let (cfg, warn) = Config::load_or_create(&paths.config_file());
             if let Some(warning) = warn {
                 tracing::warn!(target: "photon::config", %warning, "config warning");
             }
-            cfg
+            let ui = if viewer_ephemeral {
+                UiState::default()
+            } else {
+                let (ui, ui_warn) = UiState::load_or_migrate(&paths.ui_state_file(), &cfg);
+                if let Some(warning) = ui_warn {
+                    tracing::warn!(target: "photon::config", %warning, "ui_state warning");
+                }
+                ui
+            };
+            (cfg, ui)
         };
+        if !viewer_ephemeral && !safe_mode {
+            let mut merged_layout = ui_state.layout.clone();
+            merged_layout.apply_settings_from(&config.layout);
+            config.layout = merged_layout;
+        }
         let journal = Journal::new(&paths.journal_dir, current_boot_id());
         let plugins_dir = resolve_plugins_dir(paths.data_dir.join("plugins"));
         let plugin_registry = match PluginRegistry::discover(&plugins_dir) {
@@ -135,9 +194,12 @@ impl Core {
             identity,
             paths,
             config,
+            ui_state,
+            ui_state_dirty: false,
             journal,
             headless,
             safe_mode,
+            viewer_ephemeral,
             started_at: Instant::now(),
             revision: 1,
             listing_epoch: 1,
@@ -151,9 +213,26 @@ impl Core {
             viewer_images: Vec::new(),
             viewer_index: None,
             editor: None,
+            editor_tabs: Vec::new(),
+            active_editor_tab_id: None,
+            next_editor_tab_id: 1,
+            focus_request_seq: 0,
             next_original_revision: 1,
             pixel_clipboard: None,
             plugin_registry,
+            ai_task: None,
+            ai_cancel: None,
+            pending_ai: None,
+            ai_generation: 0,
+            ai_temp_input: None,
+            ai_temp_output: None,
+            ai_quick_action_target: None,
+            ai_apply_target: ApplyTarget::WholeImage,
+            ai_plugin_label: None,
+            ai_active_task_id: None,
+            latest_translation: None,
+            viewer_saved_translation: None,
+            editor_caption: None,
             batch: None,
             batch_cancel: None,
             pending_batch: None,
@@ -182,14 +261,15 @@ impl Core {
                 }
             }
             core.config.favorites_initialized = true;
-            if !safe_mode {
+            if !safe_mode && !viewer_ephemeral {
                 core.persist_config();
             }
         }
 
         if !safe_mode
+            && !viewer_ephemeral
             && core.config.remember_last_folder
-            && let Some(folder) = core.config.last_folder.clone()
+            && let Some(folder) = core.ui_state.last_folder.clone()
         {
             let path = PathBuf::from(folder);
             if path.is_dir() && core.open_folder(&path).is_ok() {
@@ -308,6 +388,34 @@ impl Core {
             .and_then(|idx| self.viewer_images.get(idx))
             .cloned();
 
+        let editor_tabs: Vec<EditorTabSummary> = self
+            .editor_tabs
+            .iter()
+            .filter_map(|slot| {
+                let is_active = Some(slot.id) == self.active_editor_tab_id;
+                let doc = if is_active {
+                    self.editor.as_ref().or(slot.doc.as_ref())
+                } else {
+                    slot.doc.as_ref()
+                }?;
+                let (w, h) = doc.dimensions();
+                Some(EditorTabSummary {
+                    id: slot.id,
+                    path: doc.source_path.to_string_lossy().into_owned(),
+                    name: doc
+                        .source_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    width: w,
+                    height: h,
+                    modified: doc.modified(),
+                    active: is_active,
+                })
+            })
+            .collect();
+
         UiStateMeta {
             revision: self.revision,
             listing_epoch: self.listing_epoch,
@@ -322,6 +430,7 @@ impl Core {
             selection_info: self.selection_info.clone(),
             layout: self.config.layout.clone(),
             remember_last_folder: self.config.remember_last_folder,
+            save_ui_state_on_exit: self.config.save_ui_state_on_exit,
             hardware_acceleration: self.config.hardware_acceleration,
             viewer_index: self.viewer_index,
             viewer_path,
@@ -329,6 +438,7 @@ impl Core {
             editor: self.editor.as_ref().map(|doc| {
                 let (w, h) = doc.dimensions();
                 EditorState {
+                    id: self.active_editor_tab_id.unwrap_or(0),
                     path: doc.source_path.to_string_lossy().into_owned(),
                     name: doc
                         .source_path
@@ -361,6 +471,9 @@ impl Core {
                     },
                 }
             }),
+            editor_tabs,
+            active_editor_tab_id: self.active_editor_tab_id,
+            focus_request_seq: self.focus_request_seq,
             status: self.status.clone(),
             safe_mode: self.safe_mode,
             active_tasks: self
@@ -371,11 +484,21 @@ impl Core {
                 .collect(),
             favorites: self.config.favorites.clone(),
             batch: self.batch.clone(),
-            translation: None,
+            translation: self.latest_translation.clone(),
+            viewer_saved_translation: self.viewer_saved_translation.clone(),
             translate_settings: self.config.translate.clone(),
             plugins: self
                 .plugin_registry
                 .plugin_infos(&self.config.disabled_plugins),
+            ai_settings: self.config.ai.clone(),
+            ai_models: self
+                .plugin_registry
+                .model_statuses(&self.effective_models_dir(), &self.config.ai),
+            quick_actions: self
+                .plugin_registry
+                .quick_actions(&self.config.disabled_plugins),
+            ai_task: self.ai_task.clone(),
+            editor_caption: self.editor_caption.clone(),
             has_pixel_clipboard: self.pixel_clipboard.is_some(),
         }
     }
@@ -663,6 +786,7 @@ impl Core {
                     self.listing_epoch += 1;
                 }
                 self.workspace = Workspace::Viewer;
+                self.sync_viewer_saved_translation();
                 self.sync_session_prefs();
                 let text = self.current_viewer_status();
                 Ok((Some(text), None))
@@ -696,12 +820,16 @@ impl Core {
                 }
                 Workspace::Editor => {
                     if self.editor.is_none() {
-                        let path = self
-                            .viewer_index
-                            .and_then(|i| self.viewer_images.get(i))
-                            .cloned()
-                            .ok_or_else(no_doc_err)?;
-                        self.open_editor_path(Path::new(&path))?;
+                        if let Some(first_id) = self.editor_tabs.first().map(|s| s.id) {
+                            let _ = self.activate_editor_tab(first_id);
+                        } else {
+                            let path = self
+                                .viewer_index
+                                .and_then(|i| self.viewer_images.get(i))
+                                .cloned()
+                                .ok_or_else(no_doc_err)?;
+                            self.open_editor_path(Path::new(&path))?;
+                        }
                     }
                     self.workspace = Workspace::Editor;
                     self.sync_session_prefs();
@@ -755,7 +883,11 @@ impl Core {
                     self.config.layout.browser_sort_field,
                     self.config.layout.browser_sort_order,
                 );
-                self.config.layout = layout.clone().sanitized();
+                let next_layout = layout.clone().sanitized();
+                let settings_changed = !self.config.layout.settings_fields_eq(&next_layout);
+                self.config.layout = next_layout.clone();
+                self.ui_state.layout = next_layout;
+                self.ui_state_dirty = true;
                 if prev_sort
                     != (
                         self.config.layout.browser_sort_field,
@@ -770,7 +902,9 @@ impl Core {
                     );
                     self.listing_epoch += 1;
                 }
-                self.persist_config();
+                if settings_changed {
+                    self.persist_config();
+                }
                 Ok((Some(UiText::new("layout_saved")), None))
             }
             Command::ToggleLeftPanel => {
@@ -781,7 +915,8 @@ impl Core {
                 };
                 let cur = self.config.layout.panel(key);
                 self.config.layout = self.config.layout.clone().with_panel(key, !cur);
-                self.persist_config();
+                self.ui_state.layout = self.config.layout.clone();
+                self.ui_state_dirty = true;
                 Ok((None, None))
             }
             Command::ToggleRightPanel { workspace } => {
@@ -793,7 +928,8 @@ impl Core {
                 };
                 let cur = self.config.layout.panel(key);
                 self.config.layout = self.config.layout.clone().with_panel(key, !cur);
-                self.persist_config();
+                self.ui_state.layout = self.config.layout.clone();
+                self.ui_state_dirty = true;
                 Ok((None, None))
             }
             Command::SetSettings {
@@ -801,11 +937,13 @@ impl Core {
                 language,
                 remember_last_folder,
                 hardware_acceleration,
+                save_ui_state_on_exit,
             } => {
                 self.config.theme = *theme;
                 self.config.language = *language;
                 self.config.remember_last_folder = *remember_last_folder;
                 self.config.hardware_acceleration = *hardware_acceleration;
+                self.config.save_ui_state_on_exit = *save_ui_state_on_exit;
                 self.persist_config();
                 Ok((Some(UiText::new("settings_saved")), None))
             }
@@ -844,6 +982,7 @@ impl Core {
                     self.listing_epoch += 1;
                 }
                 self.workspace = Workspace::Viewer;
+                self.sync_viewer_saved_translation();
                 self.sync_session_prefs();
                 Ok((Some(self.current_viewer_status()), None))
             }
@@ -1076,9 +1215,12 @@ impl Core {
                 color_mode,
                 fg_color,
                 bg_color,
+                stops,
                 opacity,
+                repeat,
                 reverse,
                 dither,
+                blend_mode,
             } => self.apply_editor_op(
                 EditOp::DrawGradient {
                     start: *start,
@@ -1087,9 +1229,12 @@ impl Core {
                     color_mode: *color_mode,
                     fg_color: fg_color.unwrap_or([0, 0, 0]),
                     bg_color: bg_color.unwrap_or([255, 255, 255]),
+                    stops: stops.clone(),
                     opacity: opacity.unwrap_or(1.0),
+                    repeat: *repeat,
                     reverse: *reverse,
                     dither: *dither,
+                    blend_mode: *blend_mode,
                 },
                 ApplyTarget::ActiveLayer,
             ),
@@ -1511,18 +1656,117 @@ impl Core {
                 filename_hint,
                 png_bytes,
             } => self.paste_image_bytes(Path::new(folder), filename_hint, png_bytes),
-            Command::PluginRefresh => self.plugin_refresh(),
+            Command::PluginRefresh | Command::AiRefreshPlugins => self.plugin_refresh(),
             Command::PluginSetEnabled { id, enabled } => self.plugin_set_enabled(id, *enabled),
             Command::PluginInstall { source_dir } => self.plugin_install(Path::new(source_dir)),
             Command::PluginUninstall { id } => self.plugin_uninstall(id),
             Command::PluginRun { id, params, target } => self.plugin_run(id, params, *target),
-            Command::ViewerTranslate { .. }
-            | Command::ViewerSaveTranslation { .. }
-            | Command::ViewerDeleteTranslation { .. }
-            | Command::SetTranslateSettings { .. } => Err(ProtocolError::line(
-                "feature_disabled",
-                UiText::new("ai_feature_disabled"),
-            )),
+            Command::AiSetSettings {
+                device,
+                auto_unload_secs,
+            } => self.ai_set_settings(*device, *auto_unload_secs),
+            Command::AiDownloadModel { model_id } => self.ai_download_model(model_id),
+            Command::AiDeleteModel { model_id } => self.ai_delete_model(model_id),
+            Command::AiSetCustomModel { model_id, path } => {
+                self.ai_set_custom_model(model_id, path)
+            }
+            Command::AiCancel => self.ai_cancel(),
+            Command::QuickActionRun {
+                plugin_id,
+                action_id,
+                paths,
+            } => self.quick_action_run(plugin_id, action_id, paths.clone()),
+            Command::EditorAiRemoveBackground {
+                model_id,
+                feather,
+                target,
+            } => self.editor_ai_remove_background(model_id, *feather, *target),
+            Command::EditorDewatermarkGemini {
+                size,
+                logo_value,
+                force,
+                offset_x,
+                offset_y,
+                target,
+            } => self.editor_dewatermark_gemini(
+                size,
+                *logo_value,
+                *force,
+                *offset_x,
+                *offset_y,
+                *target,
+            ),
+            Command::EditorInpaintRegion {
+                x,
+                y,
+                width,
+                height,
+                feather,
+                target,
+            } => self.editor_inpaint_region(*x, *y, *width, *height, *feather, *target),
+            Command::EditorAiInpaint {
+                detector_model,
+                inpainter_model,
+                confidence,
+                mask_padding,
+                region_x,
+                region_y,
+                region_width,
+                region_height,
+                brush_strokes,
+                target,
+            } => self.editor_ai_inpaint(
+                detector_model,
+                inpainter_model,
+                *confidence,
+                *mask_padding,
+                *region_x,
+                *region_y,
+                *region_width,
+                *region_height,
+                brush_strokes,
+                *target,
+            ),
+            Command::EditorRefineAlpha {
+                erase_strokes,
+                restore_strokes,
+                softness,
+            } => self.editor_refine_alpha(erase_strokes, restore_strokes, *softness),
+            Command::EditorGenerateCaption {
+                model_id,
+                general_threshold,
+                character_threshold,
+                replace_underscores,
+                prefix,
+                suffix,
+                exclude_tags,
+            } => self.editor_generate_caption(
+                model_id,
+                *general_threshold,
+                *character_threshold,
+                *replace_underscores,
+                prefix,
+                suffix,
+                exclude_tags,
+            ),
+            Command::EditorSaveCaption { text } => self.editor_save_caption(text),
+            Command::ViewerTranslate {
+                path,
+                source_lang,
+                target_lang,
+                region,
+                ocr_engine,
+            } => self.viewer_translate(path, source_lang, target_lang, *region, ocr_engine),
+            Command::ViewerSaveTranslation {
+                path,
+                blocks,
+                source_lang,
+                target_lang,
+            } => self.viewer_save_translation(path, source_lang, target_lang, blocks.clone()),
+            Command::ViewerDeleteTranslation { path } => self.viewer_delete_translation(path),
+            Command::SetTranslateSettings { settings } => {
+                self.set_translate_settings(settings.clone())
+            }
             Command::EditorUndo => {
                 let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
                 match doc.undo() {
@@ -1583,18 +1827,39 @@ impl Core {
                 ))
             }
             Command::EditorClose => {
-                self.editor = None;
-                if self.workspace == Workspace::Editor {
-                    self.workspace = if self.viewer_images.is_empty() {
-                        Workspace::Browser
-                    } else {
-                        Workspace::Viewer
-                    };
-                    self.sync_session_prefs();
+                let text = self.close_editor_tab(None)?;
+                Ok((Some(text), None))
+            }
+            Command::EditorSwitchTab { tab_id } => {
+                if !self.activate_editor_tab(*tab_id) {
+                    return Err(ProtocolError::new(
+                        "not_found",
+                        format!("unknown editor tab {tab_id}"),
+                    ));
                 }
-                Ok((Some(UiText::new("editor_closed")), None))
+                self.workspace = Workspace::Editor;
+                Ok((None, None))
+            }
+            Command::EditorCloseTab { tab_id } => {
+                let text = self.close_editor_tab(*tab_id)?;
+                Ok((Some(text), None))
+            }
+            Command::EditorReorderTab { tab_id, new_index } => {
+                self.reorder_editor_tab(*tab_id, *new_index)?;
+                Ok((None, None))
+            }
+            Command::FocusWindow => {
+                self.focus_request_seq += 1;
+                Ok((None, None))
+            }
+            Command::SaveUiState { force } => {
+                self.persist_ui_state(*force);
+                Ok((None, None))
             }
             Command::CancelTask { task_id } => {
+                if self.ai_active_task_id.as_deref() == Some(task_id.as_str()) {
+                    return self.ai_cancel();
+                }
                 if let Some(task) = self.tasks.iter_mut().find(|t| t.task_id == *task_id) {
                     task.status = TaskRunStatus::Cancelled;
                     Ok((
@@ -1616,16 +1881,32 @@ impl Core {
                 reset_settings,
             } => {
                 if *reset_layout {
-                    self.config.layout = LayoutState::default();
-                }
-                if *reset_settings {
-                    let layout = self.config.layout.clone();
-                    self.config = Config::factory_default();
-                    if !*reset_layout {
-                        self.config.layout = layout;
+                    self.config.layout = self.config.layout.reset_ui_state_preserving_settings();
+                    self.ui_state = UiState {
+                        last_folder: None,
+                        layout: self.config.layout.clone(),
+                    };
+                    self.ui_state_dirty = false;
+                    if !self.viewer_ephemeral {
+                        let ui_path = self.paths.ui_state_file();
+                        let _ = Config::backup_existing(&ui_path);
+                        let _ = self.ui_state.save(&ui_path);
                     }
                 }
-                self.persist_config();
+                if *reset_settings {
+                    let preserved_ui = self.config.layout.clone();
+                    self.config = Config::factory_default();
+                    if !*reset_layout {
+                        let mut merged = preserved_ui;
+                        merged.apply_settings_from(&self.config.layout);
+                        self.config.layout = merged;
+                    }
+                    if !self.viewer_ephemeral {
+                        let cfg_path = self.paths.config_file();
+                        let _ = Config::backup_existing(&cfg_path);
+                        let _ = self.config.save(&cfg_path);
+                    }
+                }
                 Ok((Some(UiText::new("config_reset_done")), None))
             }
             Command::DebugScreenshot { output_path } => {
@@ -1649,20 +1930,38 @@ impl Core {
     }
 
     fn sync_session_prefs(&mut self) {
-        if self.safe_mode || !self.config.remember_last_folder {
+        if self.safe_mode || self.viewer_ephemeral || !self.config.remember_last_folder {
             return;
         }
-        self.config.last_folder = self
+        self.ui_state.last_folder = self
             .current_folder
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned());
-        self.persist_config();
+        self.ui_state_dirty = true;
     }
 
-    fn persist_config(&self) {
-        if !self.safe_mode {
+    pub(crate) fn persist_config(&self) {
+        if !self.safe_mode && !self.viewer_ephemeral {
             let _ = self.config.save(&self.paths.config_file());
         }
+    }
+
+    pub fn persist_ui_state(&mut self, force: bool) {
+        if self.safe_mode || self.viewer_ephemeral {
+            return;
+        }
+        if !force && (!self.config.save_ui_state_on_exit || !self.ui_state_dirty) {
+            return;
+        }
+        self.ui_state.layout = self.config.layout.clone();
+        if self.config.remember_last_folder {
+            self.ui_state.last_folder = self
+                .current_folder
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned());
+        }
+        let _ = self.ui_state.save(&self.paths.ui_state_file());
+        self.ui_state_dirty = false;
     }
 
     fn open_folder(&mut self, dir: &Path) -> Result<UiText, ProtocolError> {
@@ -1723,6 +2022,7 @@ impl Core {
         self.selection.clear();
         self.selection_info = None;
         self.listing_epoch += 1;
+        self.sync_viewer_saved_translation();
 
         Ok(UiText::with(
             "folder_contents",
@@ -1733,7 +2033,116 @@ impl Core {
         ))
     }
 
+    fn park_active_editor_tab(&mut self) {
+        if let Some(active_id) = self.active_editor_tab_id
+            && let Some(slot) = self.editor_tabs.iter_mut().find(|s| s.id == active_id)
+        {
+            slot.doc = self.editor.take();
+            slot.caption = self.editor_caption.take();
+        }
+    }
+
+    fn activate_editor_tab(&mut self, tab_id: u64) -> bool {
+        if self.active_editor_tab_id == Some(tab_id) {
+            return self.editor.is_some();
+        }
+        if !self.editor_tabs.iter().any(|s| s.id == tab_id) {
+            return false;
+        }
+        self.park_active_editor_tab();
+        if let Some(slot) = self.editor_tabs.iter_mut().find(|s| s.id == tab_id) {
+            self.editor = slot.doc.take();
+            self.editor_caption = slot.caption.take();
+            self.active_editor_tab_id = Some(tab_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn close_editor_tab(&mut self, target_id: Option<u64>) -> Result<UiText, ProtocolError> {
+        let id = target_id
+            .or(self.active_editor_tab_id)
+            .ok_or_else(no_doc_err)?;
+        let Some(pos) = self.editor_tabs.iter().position(|s| s.id == id) else {
+            return Err(ProtocolError::new(
+                "not_found",
+                format!("unknown editor tab {id}"),
+            ));
+        };
+        let closing_active = Some(id) == self.active_editor_tab_id;
+        self.editor_tabs.remove(pos);
+        if closing_active {
+            self.editor = None;
+            self.editor_caption = None;
+            if self.editor_tabs.is_empty() {
+                self.active_editor_tab_id = None;
+                if self.workspace == Workspace::Editor {
+                    self.workspace = if self.viewer_images.is_empty() {
+                        Workspace::Browser
+                    } else {
+                        Workspace::Viewer
+                    };
+                    self.sync_session_prefs();
+                }
+            } else {
+                let next_idx = pos.min(self.editor_tabs.len() - 1);
+                let next_id = self.editor_tabs[next_idx].id;
+                self.active_editor_tab_id = Some(next_id);
+                self.editor = self.editor_tabs[next_idx].doc.take();
+                self.editor_caption = self.editor_tabs[next_idx].caption.take();
+            }
+        }
+        Ok(UiText::new("editor_closed"))
+    }
+
+    fn reorder_editor_tab(&mut self, tab_id: u64, new_index: usize) -> Result<(), ProtocolError> {
+        let Some(old_idx) = self.editor_tabs.iter().position(|s| s.id == tab_id) else {
+            return Err(ProtocolError::new(
+                "not_found",
+                format!("unknown editor tab {tab_id}"),
+            ));
+        };
+        let target_idx = new_index.min(self.editor_tabs.len().saturating_sub(1));
+        if old_idx != target_idx {
+            let item = self.editor_tabs.remove(old_idx);
+            self.editor_tabs.insert(target_idx, item);
+        }
+        Ok(())
+    }
+
     fn open_editor_path(&mut self, path: &Path) -> Result<UiText, ProtocolError> {
+        let target_canon = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let existing_id = self.editor_tabs.iter().find_map(|slot| {
+            let doc = if Some(slot.id) == self.active_editor_tab_id {
+                self.editor.as_ref().or(slot.doc.as_ref())
+            } else {
+                slot.doc.as_ref()
+            }?;
+            let slot_canon =
+                fs::canonicalize(&doc.source_path).unwrap_or_else(|_| doc.source_path.clone());
+            (slot_canon == target_canon).then_some(slot.id)
+        });
+        if let Some(tab_id) = existing_id {
+            self.activate_editor_tab(tab_id);
+            let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+            let (w, h) = doc.dimensions();
+            let name = doc
+                .source_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            return Ok(UiText::with(
+                "editor_opened",
+                [
+                    ("name", name),
+                    ("width", w.to_string()),
+                    ("height", h.to_string()),
+                ],
+            ));
+        }
+
         let mut doc = EditorDocument::open(path.to_path_buf())
             .map_err(|e| ProtocolError::new("decode_error", e.to_string()))?;
         doc.original_revision = self.next_original_revision;
@@ -1744,7 +2153,17 @@ impl Core {
             .and_then(|n| n.to_str())
             .unwrap_or_default()
             .to_owned();
+        self.park_active_editor_tab();
+        let tab_id = self.next_editor_tab_id;
+        self.next_editor_tab_id += 1;
+        self.editor_tabs.push(EditorTabSlot {
+            id: tab_id,
+            doc: None,
+            caption: None,
+        });
+        self.active_editor_tab_id = Some(tab_id);
         self.editor = Some(doc);
+        self.editor_caption = ai::load_caption_for_image(path);
         Ok(UiText::with(
             "editor_opened",
             [
@@ -1803,11 +2222,19 @@ impl Core {
         let next = (cur + delta).rem_euclid(len) as usize;
         self.viewer_index = Some(next);
         self.workspace = Workspace::Viewer;
+        self.sync_viewer_saved_translation();
         self.sync_session_prefs();
         Ok((Some(self.current_viewer_status()), None))
     }
 
-    fn refresh_after_file_op(&mut self) {
+    pub(crate) fn sync_viewer_saved_translation(&mut self) {
+        self.viewer_saved_translation = self
+            .viewer_index
+            .and_then(|idx| self.viewer_images.get(idx))
+            .and_then(|p| translate::load_saved_translation(Path::new(p)));
+    }
+
+    pub(crate) fn refresh_after_file_op(&mut self) {
         self.tree_revision += 1;
         if let Some(dir) = self.current_folder.clone() {
             let _ = self.open_folder(&dir);
@@ -2477,7 +2904,7 @@ fn extract_editor_clipboard(
     })
 }
 
-fn commit_active_layer_pixels(
+pub(crate) fn commit_active_layer_pixels(
     doc: &mut EditorDocument,
     next: RgbaImage,
 ) -> Result<(), ProtocolError> {
@@ -2603,7 +3030,7 @@ fn plugin_exec_err(plugin_name: &str, err: PluginError) -> ProtocolError {
     )
 }
 
-fn map_plugin_err(err: PluginError) -> ProtocolError {
+pub(crate) fn map_plugin_err(err: PluginError) -> ProtocolError {
     match err {
         PluginError::NotFound { id } => ProtocolError::with_line(
             "plugin_not_found",
@@ -2625,11 +3052,11 @@ fn map_plugin_err(err: PluginError) -> ProtocolError {
     }
 }
 
-fn no_doc_err() -> ProtocolError {
+pub(crate) fn no_doc_err() -> ProtocolError {
     ProtocolError::line("no_document", UiText::new("needs_a_document"))
 }
 
-fn map_image_err(e: ImageError) -> ProtocolError {
+pub(crate) fn map_image_err(e: ImageError) -> ProtocolError {
     match e {
         ImageError::Coded { code, ui } => ProtocolError::line(code, ui),
         other => ProtocolError::new("invalid_edit", other.to_string()),
@@ -2688,6 +3115,12 @@ fn build_breadcrumbs(path: &Path) -> Vec<Crumb> {
         });
     }
     out
+}
+
+impl Drop for Core {
+    fn drop(&mut self) {
+        self.persist_ui_state(false);
+    }
 }
 
 #[cfg(test)]
@@ -3339,45 +3772,277 @@ mod tests {
     }
 
     #[test]
-    fn translate_commands_are_cleanly_disabled() {
-        let dir = std::env::temp_dir().join(format!("photon-no-ai-test-{}", std::process::id()));
+    fn translate_settings_and_sidecar_and_ai_plugins_work() {
+        let dir = std::env::temp_dir().join(format!("photon-ai-core-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let img = dir.join("pic.png");
-        RgbaImage::from_pixel(8, 8, Rgba([10, 20, 30, 255]))
+        RgbaImage::from_pixel(12, 12, Rgba([10, 20, 30, 255]))
             .save(&img)
             .unwrap();
         let img_str = img.to_string_lossy().into_owned();
 
-        let mut core = Core::for_sandbox(&dir.join("sandbox"));
-        let cmds = [
+        let sandbox = dir.join("sandbox");
+        let plugins_dir = sandbox.join("data/plugins");
+        let models_dir = sandbox.join("data/models");
+        fs::create_dir_all(plugins_dir.join("photon.mock.ai/bin")).unwrap();
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(models_dir.join("rmbg-1.4.onnx"), b"weights").unwrap();
+
+        let worker = r#"
+import json, shutil, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get("op") == "shutdown":
+        break
+    if msg.get("op") == "run":
+        act = msg["action"]
+        if act == "viewer.translate":
+            print(json.dumps({
+                "id": msg["id"],
+                "event": "done",
+                "meta": {
+                    "device": "cpu",
+                    "translation": {
+                        "path": msg["input"],
+                        "sourceLang": "jpn",
+                        "targetLang": "en",
+                        "originalText": "こんにちは",
+                        "translatedText": "Hello",
+                        "blocks": [{"x": 1, "y": 2, "w": 8, "h": 6, "original": "こんにちは", "translated": "Hello"}]
+                    }
+                }
+            }), flush=True)
+        elif act == "editor.caption":
+            print(json.dumps({
+                "id": msg["id"],
+                "event": "done",
+                "meta": { "captionText": "1girl, solo, smile" }
+            }), flush=True)
+        else:
+            shutil.copyfile(msg["input"], msg["output"])
+            print(json.dumps({"id": msg["id"], "event": "done", "meta": {"device": "cpu"}}), flush=True)
+"#;
+        fs::write(plugins_dir.join("photon.mock.ai/bin/worker.py"), worker).unwrap();
+        fs::write(
+            plugins_dir.join("photon.mock.ai/manifest.json"),
+            r#"{
+                "apiVersion": 1,
+                "id": "photon.mock.ai",
+                "name": "Mock AI Suite",
+                "version": "1.0.0",
+                "entry": { "command": "bin/worker.py", "args": [], "protocol": "jsonl-stdio" },
+                "capabilities": [
+                    { "action": "editor.remove_background", "workspace": "editor", "label": "Remove BG", "output": "rgba_image" },
+                    { "action": "editor.caption", "workspace": "editor", "label": "Caption", "output": "text" },
+                    { "action": "viewer.translate", "workspace": "viewer", "label": "Translate", "output": "translation" }
+                ],
+                "quickActions": [
+                    { "id": "qa-rembg", "label": "Quick Remove BG", "action": "editor.remove_background", "workspaces": ["browser", "viewer"], "params": { "modelId": "rmbg-1.4" } }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut core = Core::for_sandbox(&sandbox);
+        assert_eq!(core.meta().quick_actions.len(), 1);
+        assert!(
+            core.meta()
+                .ai_models
+                .iter()
+                .find(|m| m.id == "rmbg-1.4")
+                .is_some_and(|m| m.installed)
+        );
+
+        // 1. SetTranslateSettings persists
+        let mut tset = photon_protocol::TranslateSettings::default();
+        tset.provider = photon_protocol::TranslateProvider::GoogleWeb;
+        let resp = core.dispatch(Envelope::new(
+            "ts-1",
+            ClientKind::Cli,
+            Command::SetTranslateSettings {
+                settings: tset.clone(),
+            },
+        ));
+        assert!(resp.ok);
+        assert_eq!(core.meta().translate_settings, tset);
+
+        // 2. AiSetSettings persists
+        let resp = core.dispatch(Envelope::new(
+            "ai-set",
+            ClientKind::Cli,
+            Command::AiSetSettings {
+                device: photon_protocol::AiDevice::Auto,
+                auto_unload_secs: 120,
+            },
+        ));
+        assert!(resp.ok);
+        assert_eq!(
+            core.meta().ai_settings.device,
+            photon_protocol::AiDevice::Auto
+        );
+        assert_eq!(core.meta().ai_settings.auto_unload_secs, 120);
+
+        // 3. ViewerTranslate routes to plugin & ViewerSaveTranslation / DeleteTranslation persist sidecar
+        let resp = core.dispatch(Envelope::new(
+            "tr-1",
+            ClientKind::Cli,
             Command::ViewerTranslate {
                 path: img_str.clone(),
-                source_lang: "eng".into(),
-                target_lang: "vi".into(),
+                source_lang: "jpn".into(),
+                target_lang: "en".into(),
                 region: None,
+                ocr_engine: "tesseract".into(),
             },
-            Command::ViewerSaveTranslation {
-                path: img_str.clone(),
-                blocks: vec![],
-                source_lang: "eng".into(),
-                target_lang: "vi".into(),
-            },
-            Command::ViewerDeleteTranslation { path: img_str },
-            Command::SetTranslateSettings {
-                settings: photon_protocol::TranslateSettings::default(),
-            },
-        ];
+        ));
+        assert!(resp.ok);
+        assert!(core.run_pending_ai_blocking());
+        assert_eq!(
+            core.meta()
+                .translation
+                .as_ref()
+                .map(|t| t.translated_text.as_str()),
+            Some("Hello")
+        );
 
-        for (idx, cmd) in cmds.into_iter().enumerate() {
-            let resp = core.dispatch(Envelope::new(format!("tr-{idx}"), ClientKind::Cli, cmd));
-            assert!(!resp.ok);
-            let err = resp.error.expect("expected ProtocolError");
-            assert_eq!(err.code, "feature_disabled");
-            assert_eq!(err.ui, Some(UiText::new("ai_feature_disabled")));
-        }
-        assert!(core.meta().active_tasks.is_empty());
-        assert!(core.meta().translation.is_none());
+        let block = photon_protocol::TranslationBlock {
+            x: 1,
+            y: 2,
+            w: 8,
+            h: 6,
+            original: "こんにちは".into(),
+            translated: "Hello".into(),
+        };
+        assert!(
+            core.dispatch(Envelope::new(
+                "tr-save",
+                ClientKind::Cli,
+                Command::ViewerSaveTranslation {
+                    path: img_str.clone(),
+                    blocks: vec![block],
+                    source_lang: "jpn".into(),
+                    target_lang: "en".into(),
+                },
+            ))
+            .ok
+        );
+        assert!(
+            core.dispatch(Envelope::new(
+                "vo-1",
+                ClientKind::Cli,
+                Command::ViewerOpen {
+                    path: img_str.clone(),
+                },
+            ))
+            .ok
+        );
+        assert_eq!(
+            core.meta()
+                .viewer_saved_translation
+                .as_ref()
+                .map(|s| s.blocks.len()),
+            Some(1)
+        );
+        assert!(
+            core.dispatch(Envelope::new(
+                "tr-del",
+                ClientKind::Cli,
+                Command::ViewerDeleteTranslation {
+                    path: img_str.clone(),
+                },
+            ))
+            .ok
+        );
+        assert!(core.meta().viewer_saved_translation.is_none());
+
+        // 4. QuickActionRun backs up original and succeeds
+        assert!(
+            core.dispatch(Envelope::new(
+                "qa-1",
+                ClientKind::Cli,
+                Command::QuickActionRun {
+                    plugin_id: "photon.mock.ai".into(),
+                    action_id: "qa-rembg".into(),
+                    paths: vec![img_str.clone()],
+                },
+            ))
+            .ok
+        );
+        assert!(core.run_pending_ai_blocking());
+        assert!(dir.join("pic.png~").is_file());
+
+        // 5. Editor: RemoveBG + RefineAlpha + GenerateCaption + SaveCaption
+        assert!(
+            core.dispatch(Envelope::new(
+                "ed-1",
+                ClientKind::Cli,
+                Command::EditorOpen { path: img_str },
+            ))
+            .ok
+        );
+        assert!(
+            core.dispatch(Envelope::new(
+                "ed-rembg",
+                ClientKind::Cli,
+                Command::EditorAiRemoveBackground {
+                    model_id: "rmbg-1.4".into(),
+                    feather: 2,
+                    target: ApplyTarget::ActiveLayer,
+                },
+            ))
+            .ok
+        );
+        assert!(core.run_pending_ai_blocking());
+        assert!(
+            core.dispatch(Envelope::new(
+                "ed-ref",
+                ClientKind::Cli,
+                Command::EditorRefineAlpha {
+                    erase_strokes: vec![photon_protocol::AiMaskStroke {
+                        radius: 2.0,
+                        points: vec![[4.0, 4.0]],
+                    }],
+                    restore_strokes: vec![],
+                    softness: 0.5,
+                },
+            ))
+            .ok
+        );
+        assert!(
+            core.dispatch(Envelope::new(
+                "ed-cap",
+                ClientKind::Cli,
+                Command::EditorGenerateCaption {
+                    model_id: "wd-vit-tagger-v3".into(),
+                    general_threshold: 0.35,
+                    character_threshold: 0.85,
+                    replace_underscores: true,
+                    prefix: String::new(),
+                    suffix: String::new(),
+                    exclude_tags: String::new(),
+                },
+            ))
+            .ok
+        );
+        assert!(core.run_pending_ai_blocking());
+        assert_eq!(
+            core.meta().editor_caption.as_deref(),
+            Some("1girl, solo, smile")
+        );
+        assert!(
+            core.dispatch(Envelope::new(
+                "ed-capsave",
+                ClientKind::Cli,
+                Command::EditorSaveCaption {
+                    text: "1girl, solo, smile, outdoors".into(),
+                },
+            ))
+            .ok
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("pic.txt")).unwrap(),
+            "1girl, solo, smile, outdoors"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -3619,6 +4284,227 @@ mod tests {
             core.config.favorites[0], first,
             "first item must remain at position 0 when already at top"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_tab_editor_opens_dedups_switches_reorders_and_closes() {
+        let dir = std::env::temp_dir().join(format!("photon-multitab-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let p1 = dir.join("one.png");
+        let p2 = dir.join("two.png");
+        let p3 = dir.join("three.png");
+        image::RgbaImage::from_pixel(10, 10, image::Rgba([255, 0, 0, 255]))
+            .save(&p1)
+            .unwrap();
+        image::RgbaImage::from_pixel(20, 12, image::Rgba([0, 255, 0, 255]))
+            .save(&p2)
+            .unwrap();
+        image::RgbaImage::from_pixel(30, 16, image::Rgba([0, 0, 255, 255]))
+            .save(&p3)
+            .unwrap();
+
+        let mut core = Core::for_sandbox(&dir);
+        for p in [&p1, &p2, &p3] {
+            let r = core.dispatch(photon_protocol::Envelope::new(
+                "open",
+                photon_protocol::ClientKind::Cli,
+                Command::EditorOpen {
+                    path: p.to_string_lossy().into_owned(),
+                },
+            ));
+            assert!(r.ok);
+        }
+
+        let meta = core.meta();
+        assert_eq!(meta.editor_tabs.len(), 3);
+        let id1 = meta.editor_tabs[0].id;
+        let id2 = meta.editor_tabs[1].id;
+        let id3 = meta.editor_tabs[2].id;
+        assert_eq!(meta.active_editor_tab_id, Some(id3));
+        assert_eq!(meta.editor.as_ref().unwrap().id, id3);
+
+        // Mutate tab 3, then re-open p1 (should deduplicate & switch to tab 1).
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "rot",
+                photon_protocol::ClientKind::Cli,
+                Command::EditorRotate {
+                    degrees: 90,
+                    target: ApplyTarget::WholeImage,
+                },
+            ))
+            .ok
+        );
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "reopen1",
+                photon_protocol::ClientKind::Cli,
+                Command::EditorOpen {
+                    path: p1.to_string_lossy().into_owned(),
+                },
+            ))
+            .ok
+        );
+        let meta = core.meta();
+        assert_eq!(meta.editor_tabs.len(), 3);
+        assert_eq!(meta.active_editor_tab_id, Some(id1));
+        assert!(!meta.editor_tabs[0].modified);
+        assert!(meta.editor_tabs[2].modified);
+
+        // Reorder tab 3 to index 0, then close inactive tab 2.
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "reord",
+                photon_protocol::ClientKind::Cli,
+                Command::EditorReorderTab {
+                    tab_id: id3,
+                    new_index: 0,
+                },
+            ))
+            .ok
+        );
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "close2",
+                photon_protocol::ClientKind::Cli,
+                Command::EditorCloseTab { tab_id: Some(id2) },
+            ))
+            .ok
+        );
+        let meta = core.meta();
+        assert_eq!(
+            meta.editor_tabs.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![id3, id1]
+        );
+        assert_eq!(meta.active_editor_tab_id, Some(id1));
+
+        // Close active tab 1 -> switches to remaining tab 3 and stays in Editor.
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "close1",
+                photon_protocol::ClientKind::Cli,
+                Command::EditorClose,
+            ))
+            .ok
+        );
+        assert_eq!(core.workspace(), Workspace::Editor);
+        assert_eq!(core.meta().active_editor_tab_id, Some(id3));
+        assert!(core.meta().editor.as_ref().unwrap().modified);
+
+        // Close last tab -> leaves Editor workspace.
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "close3",
+                photon_protocol::ClientKind::Cli,
+                Command::EditorCloseTab { tab_id: None },
+            ))
+            .ok
+        );
+        assert!(core.meta().editor_tabs.is_empty());
+        assert!(core.meta().editor.is_none());
+        assert_eq!(core.workspace(), Workspace::Browser);
+
+        // FocusWindow increments focus_request_seq.
+        let prev_seq = core.meta().focus_request_seq;
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "focus",
+                photon_protocol::ClientKind::Cli,
+                Command::FocusWindow,
+            ))
+            .ok
+        );
+        assert_eq!(core.meta().focus_request_seq, prev_seq + 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ui_state_separation_defers_disk_write_and_respects_save_on_exit_and_force() {
+        let dir =
+            std::env::temp_dir().join(format!("photon-ui-save-policy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut core = Core::for_sandbox(&dir);
+        let ui_path = core.paths.ui_state_file();
+
+        // SetLayout marks ui_state_dirty without flushing ui_state.json immediately.
+        let mut next_layout = core.config.layout.clone();
+        next_layout.window_width = 1680;
+        next_layout.viewer_viewport_background = Some([40, 42, 48]);
+        next_layout.app_launch_window_mode = photon_protocol::AppLaunchWindowMode::Maximized;
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "layout1",
+                photon_protocol::ClientKind::Cli,
+                Command::SetLayout {
+                    layout: next_layout.clone(),
+                },
+            ))
+            .ok
+        );
+        assert!(core.ui_state_dirty);
+
+        // Disable save_ui_state_on_exit -> non-forced persist_ui_state(false) skips writing 1680.
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "settings1",
+                photon_protocol::ClientKind::Cli,
+                Command::SetSettings {
+                    theme: core.config.theme,
+                    language: core.config.language,
+                    remember_last_folder: core.config.remember_last_folder,
+                    hardware_acceleration: core.config.hardware_acceleration,
+                    save_ui_state_on_exit: false,
+                },
+            ))
+            .ok
+        );
+        core.persist_ui_state(false);
+        assert!(core.ui_state_dirty);
+        let (on_disk_before, _) = UiState::load_or_migrate(&ui_path, &core.config);
+        assert_ne!(on_disk_before.layout.window_width, 1680);
+
+        // Explicit force save writes ui_state.json even when save_ui_state_on_exit is false.
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "save-force",
+                photon_protocol::ClientKind::Cli,
+                Command::SaveUiState { force: true },
+            ))
+            .ok
+        );
+        assert!(!core.ui_state_dirty);
+        let (on_disk_after, _) = UiState::load_or_migrate(&ui_path, &core.config);
+        assert_eq!(on_disk_after.layout.window_width, 1680);
+        assert_eq!(
+            on_disk_after.layout.viewer_viewport_background,
+            Some([40, 42, 48])
+        );
+
+        // ResetConfig (layout only) resets window_width & backdrop, but preserves Settings defaults.
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "reset-layout",
+                photon_protocol::ClientKind::Cli,
+                Command::ResetConfig {
+                    reset_layout: true,
+                    reset_settings: false,
+                },
+            ))
+            .ok
+        );
+        assert_eq!(core.config.layout.window_width, 1240);
+        assert_eq!(core.config.layout.viewer_viewport_background, None);
+        assert_eq!(
+            core.config.layout.app_launch_window_mode,
+            photon_protocol::AppLaunchWindowMode::Maximized
+        );
+        assert!(!core.config.save_ui_state_on_exit);
 
         let _ = fs::remove_dir_all(&dir);
     }

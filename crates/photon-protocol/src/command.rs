@@ -758,6 +758,17 @@ pub enum Command {
         #[serde(default)]
         tab_id: Option<u64>,
     },
+    EditorCloseTabs {
+        tab_ids: Vec<u64>,
+    },
+    EditorDuplicateDocument {
+        #[serde(default)]
+        tab_id: Option<u64>,
+    },
+    EditorNewFromClipboard {
+        #[serde(default)]
+        png_bytes: Option<Vec<u8>>,
+    },
     EditorReorderTab {
         tab_id: u64,
         new_index: usize,
@@ -916,6 +927,9 @@ impl Command {
             Self::EditorClose => "editor_close",
             Self::EditorSwitchTab { .. } => "editor_switch_tab",
             Self::EditorCloseTab { .. } => "editor_close_tab",
+            Self::EditorCloseTabs { .. } => "editor_close_tabs",
+            Self::EditorDuplicateDocument { .. } => "editor_duplicate_document",
+            Self::EditorNewFromClipboard { .. } => "editor_new_from_clipboard",
             Self::EditorReorderTab { .. } => "editor_reorder_tab",
             Self::FocusWindow => "focus_window",
             Self::SaveUiState { .. } => "save_ui_state",
@@ -1183,6 +1197,9 @@ mod tests {
                 png_bytes: None,
                 into_selection: false,
             },
+            Command::EditorCloseTabs { tab_ids: vec![1] },
+            Command::EditorDuplicateDocument { tab_id: None },
+            Command::EditorNewFromClipboard { png_bytes: None },
             Command::PasteImageBytes {
                 folder: "/tmp".into(),
                 filename_hint: "paste.png".into(),

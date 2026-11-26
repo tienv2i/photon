@@ -16,8 +16,10 @@ pub mod table;
 pub mod theme;
 pub mod toolbar;
 pub mod tooltip;
+pub mod typography;
 
 pub use curve_editor::{CurveGraphEvent, CurveGraphProgram, curve_graph, curve_graph_sized};
 pub use icons::Icon;
 pub use theme::{PaletteTokens, UiMode};
 pub use tooltip::{TooltipPosition, with_optional_tooltip, with_tooltip, with_tooltip_pos};
+pub use typography::{active_display_font, active_font_scale, scaled_size, set_active_typography};

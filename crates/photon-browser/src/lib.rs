@@ -10,7 +10,7 @@ use std::path::Path;
 
 use iced::widget::{
     Id, column, container, image as iced_image, mouse_area, progress_bar, responsive, row, rule,
-    scrollable, text, text_input,
+    scrollable, text_input,
 };
 use iced::{Alignment, ContentFit, Element, Fill, Length, Padding};
 use photon_i18n::tr;
@@ -36,6 +36,7 @@ use photon_ui::theme::{
 };
 use photon_ui::toolbar::toolbar;
 use photon_ui::tooltip::{TooltipPosition, with_tooltip, with_tooltip_pos};
+use photon_ui::typography::text;
 use regex_automata::meta::Regex;
 use regex_automata::util::syntax::Config as RegexSyntaxConfig;
 
@@ -2378,13 +2379,17 @@ pub fn build_browser_plugins_menu_entries<'a>(
             MenuItem::new(tr(lang, "menu-plugins-no-enabled"), BrowserMessage::Noop).enabled(false),
         ));
     } else {
+        let browser_qas = workspace_quick_actions(&state.snapshot.meta, "browser");
         for plugin in enabled_plugins {
+            let has_submenu =
+                !plugin.params.is_empty() || browser_qas.iter().any(|qa| qa.plugin_id == plugin.id);
             entries.push(MenuEntry::Item(
                 MenuItem::new(
                     normalize_plugin_display_name(&plugin.name),
                     BrowserMessage::RunPlugin(plugin.id.clone()),
                 )
-                .icon(Icon::Plug),
+                .icon(Icon::Plug)
+                .submenu(has_submenu),
             ));
         }
     }

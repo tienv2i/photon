@@ -236,16 +236,6 @@ pub fn build_ui_tree(
                 value: None,
             });
             widgets.push(SemanticWidgetNode {
-                id: "browser.menu.file.edit".to_owned(),
-                role: "menu_item".to_owned(),
-                label: tr(lang, "menu-file-edit"),
-                workspace: ws,
-                enabled: has_selected_image,
-                visible: true,
-                bounds: None,
-                value: None,
-            });
-            widgets.push(SemanticWidgetNode {
                 id: "browser.menu.edit".to_owned(),
                 role: "menu_button".to_owned(),
                 label: tr(lang, "menu-edit"),
@@ -925,6 +915,7 @@ pub fn build_ui_tree(
             let has_doc = ed.is_some();
             let can_undo = ed.is_some_and(|e| e.can_undo);
             let can_redo = ed.is_some_and(|e| e.can_redo);
+            let has_selection = ed.is_some_and(|e| e.selection.has_selection);
             let modified = ed.is_some_and(|e| e.modified);
             let layer_count = ed.map(|e| e.layers.len()).unwrap_or(0);
             let active_layer_id = ed.map(|e| e.active_layer_id).unwrap_or(0);
@@ -1280,19 +1271,182 @@ pub fn build_ui_tree(
                 value: Some(format!("{layer_count} layers")),
             });
             widgets.push(SemanticWidgetNode {
-                id: "editor.menu.file.open_viewer".to_owned(),
-                role: "menu_item".to_owned(),
-                label: tr(lang, "menu-file-open-viewer"),
+                id: "editor.menu.file".to_owned(),
+                role: "menu_button".to_owned(),
+                label: tr(lang, "menu-file"),
                 workspace: ws,
                 enabled: true,
                 visible: true,
                 bounds: None,
                 value: None,
             });
+            for (id, label_key, enabled) in [
+                ("editor.menu.file.new", "action-editor-new", true),
+                (
+                    "editor.menu.file.new_from_clipboard",
+                    "action-new-from-clipboard",
+                    true,
+                ),
+                ("editor.menu.file.save", "action-save", has_doc),
+                ("editor.menu.file.save_as", "action-save-as", has_doc),
+                ("editor.menu.file.export", "action-export", has_doc),
+                (
+                    "editor.menu.file.open_viewer",
+                    "menu-file-open-viewer",
+                    true,
+                ),
+                (
+                    "editor.menu.file.open_browser",
+                    "menu-file-open-browser",
+                    true,
+                ),
+                ("editor.menu.file.close", "action-close", has_doc),
+            ] {
+                widgets.push(SemanticWidgetNode {
+                    id: id.to_owned(),
+                    role: "menu_item".to_owned(),
+                    label: tr(lang, label_key),
+                    workspace: ws,
+                    enabled,
+                    visible: true,
+                    bounds: None,
+                    value: None,
+                });
+            }
             widgets.push(SemanticWidgetNode {
-                id: "editor.menu.file.open_browser".to_owned(),
-                role: "menu_item".to_owned(),
-                label: tr(lang, "menu-file-open-browser"),
+                id: "editor.menu.edit".to_owned(),
+                role: "menu_button".to_owned(),
+                label: tr(lang, "menu-edit"),
+                workspace: ws,
+                enabled: true,
+                visible: true,
+                bounds: None,
+                value: None,
+            });
+            for (id, label_key, enabled) in [
+                ("editor.menu.edit.undo", "action-undo", can_undo),
+                ("editor.menu.edit.redo", "action-redo", can_redo),
+                ("editor.menu.edit.cut", "action-cut", has_doc),
+                ("editor.menu.edit.copy", "action-copy", has_doc),
+                (
+                    "editor.menu.edit.copy_merged",
+                    "action-copy-merged",
+                    has_doc,
+                ),
+                ("editor.menu.edit.paste", "action-paste", has_doc),
+                (
+                    "editor.menu.edit.paste_into_selection",
+                    "action-paste-into-selection",
+                    has_selection,
+                ),
+                ("editor.menu.edit.transform", "action-transform", has_doc),
+            ] {
+                widgets.push(SemanticWidgetNode {
+                    id: id.to_owned(),
+                    role: "menu_item".to_owned(),
+                    label: tr(lang, label_key),
+                    workspace: ws,
+                    enabled,
+                    visible: true,
+                    bounds: None,
+                    value: None,
+                });
+            }
+            widgets.push(SemanticWidgetNode {
+                id: "editor.menu.image".to_owned(),
+                role: "menu_button".to_owned(),
+                label: tr(lang, "menu-image"),
+                workspace: ws,
+                enabled: has_doc,
+                visible: true,
+                bounds: None,
+                value: None,
+            });
+            for (id, label_key, enabled) in [
+                (
+                    "editor.menu.image.duplicate",
+                    "action-duplicate-image",
+                    has_doc,
+                ),
+                (
+                    "editor.menu.image.rotate_left",
+                    "action-rotate-left",
+                    has_doc,
+                ),
+                (
+                    "editor.menu.image.rotate_right",
+                    "action-rotate-right",
+                    has_doc,
+                ),
+                ("editor.menu.image.flip_h", "action-flip-h", has_doc),
+                ("editor.menu.image.flip_v", "action-flip-v", has_doc),
+                ("editor.menu.image.crop", "action-crop", has_doc),
+                ("editor.menu.image.resize", "action-image-size", has_doc),
+                (
+                    "editor.menu.image.canvas_size",
+                    "action-canvas-size-dialog",
+                    has_doc,
+                ),
+            ] {
+                widgets.push(SemanticWidgetNode {
+                    id: id.to_owned(),
+                    role: "menu_item".to_owned(),
+                    label: tr(lang, label_key),
+                    workspace: ws,
+                    enabled,
+                    visible: true,
+                    bounds: None,
+                    value: None,
+                });
+            }
+            widgets.push(SemanticWidgetNode {
+                id: "editor.menu.layer".to_owned(),
+                role: "menu_button".to_owned(),
+                label: tr(lang, "menu-layer"),
+                workspace: ws,
+                enabled: has_doc,
+                visible: true,
+                bounds: None,
+                value: None,
+            });
+            for (id, label_key, enabled) in [
+                ("editor.menu.layer.new", "action-layer-add", has_doc),
+                (
+                    "editor.menu.layer.duplicate",
+                    "action-layer-duplicate",
+                    has_doc,
+                ),
+                (
+                    "editor.menu.layer.merge_down",
+                    "action-layer-merge-down",
+                    has_doc && layer_count > 1,
+                ),
+                (
+                    "editor.menu.layer.delete",
+                    "action-layer-delete",
+                    has_doc && layer_count > 1,
+                ),
+                (
+                    "editor.menu.layer.flatten",
+                    "action-layer-flatten",
+                    has_doc && layer_count > 1,
+                ),
+            ] {
+                widgets.push(SemanticWidgetNode {
+                    id: id.to_owned(),
+                    role: "menu_item".to_owned(),
+                    label: tr(lang, label_key),
+                    workspace: ws,
+                    enabled,
+                    visible: true,
+                    bounds: None,
+                    value: None,
+                });
+            }
+            widgets.push(SemanticWidgetNode {
+                id: "editor.menu.view".to_owned(),
+                role: "menu_button".to_owned(),
+                label: tr(lang, "menu-view"),
                 workspace: ws,
                 enabled: true,
                 visible: true,
@@ -1444,6 +1598,56 @@ pub fn build_ui_tree(
                 workspace: ws,
                 enabled: true,
                 visible: true,
+                bounds: None,
+                value: None,
+            });
+
+            let smart_paste_active = editor_ui.smart_paste.is_some();
+            widgets.push(SemanticWidgetNode {
+                id: "editor.smart_paste.panel".to_owned(),
+                role: "region".to_owned(),
+                label: tr(lang, "smart-paste-title"),
+                workspace: ws,
+                enabled: smart_paste_active,
+                visible: smart_paste_active,
+                bounds: None,
+                value: editor_ui.smart_paste.as_ref().map(|sp| {
+                    format!(
+                        "{:?} {}x{}",
+                        sp.mode,
+                        sp.target_width.round() as u32,
+                        sp.target_height.round() as u32
+                    )
+                }),
+            });
+            for (id, label_key) in [
+                (
+                    "editor.smart_paste.keep_original",
+                    "smart-paste-keep-original",
+                ),
+                ("editor.smart_paste.fit", "smart-paste-fit-canvas"),
+                ("editor.smart_paste.stretch", "smart-paste-stretch-fill"),
+                ("editor.smart_paste.apply", "action-apply"),
+                ("editor.smart_paste.dismiss", "smart-paste-dismiss"),
+            ] {
+                widgets.push(SemanticWidgetNode {
+                    id: id.to_owned(),
+                    role: "button".to_owned(),
+                    label: tr(lang, label_key),
+                    workspace: ws,
+                    enabled: smart_paste_active,
+                    visible: smart_paste_active,
+                    bounds: None,
+                    value: None,
+                });
+            }
+            widgets.push(SemanticWidgetNode {
+                id: "editor.tab.context_menu".to_owned(),
+                role: "menu".to_owned(),
+                label: tr(lang, "action-tab-close"),
+                workspace: ws,
+                enabled: !tabs.is_empty(),
+                visible: !tabs.is_empty(),
                 bounds: None,
                 value: None,
             });

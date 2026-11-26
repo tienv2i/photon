@@ -1,7 +1,8 @@
 //! Unified sidebar panel frames, drop-target wrappers, dock containers, cards, and status bar.
 
-use iced::widget::{column, container, mouse_area, row, rule, text};
+use iced::widget::{column, container, mouse_area, row, rule};
 use iced::{Alignment, Element, Length, Padding};
+use photon_ui::typography::text;
 
 use photon_ui::button::{self as ui_button, ButtonVariant};
 use photon_ui::icons::{self, Icon};

@@ -1,7 +1,8 @@
 //! Themed dialog bridge over `photon-dialogs` plus modal presets and toast banners.
 
+use crate::typography::text;
 use iced::widget::{
-    column, container, mouse_area, opaque, row, rule, scrollable, stack, text, text_input,
+    column, container, mouse_area, opaque, row, rule, scrollable, stack, text_input,
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Size, Theme};
 

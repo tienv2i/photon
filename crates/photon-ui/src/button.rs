@@ -1,6 +1,7 @@
 //! Standardized button styles, toolbar controls, and reusable button constructors.
 
-use iced::widget::{Button, button, container, row, text};
+use crate::typography::text;
+use iced::widget::{Button, button, container, row};
 use iced::{Alignment, Border, Color, Element, Length, Padding, Theme};
 
 use crate::icons::{self, Icon};

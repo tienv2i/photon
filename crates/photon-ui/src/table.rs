@@ -1,7 +1,8 @@
 //! Reusable sortable Details table header and rows for Browser views.
 
+use crate::typography::text;
 use iced::alignment::Horizontal;
-use iced::widget::{button, column, container, row, rule, text};
+use iced::widget::{button, column, container, row, rule};
 use iced::{Alignment, Border, Color, Element, Length};
 
 use crate::button::{self as ui_button, ButtonVariant};

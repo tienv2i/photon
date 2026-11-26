@@ -2,8 +2,9 @@
 
 use std::time::Duration;
 
+use crate::typography::text;
 use iced::Element;
-use iced::widget::{container, text, tooltip};
+use iced::widget::{container, tooltip};
 
 use crate::theme::tooltip_style;
 

@@ -1,7 +1,8 @@
 //! Tab strip primitives for multi-tab sidebar panels (`Tool Options | History`, etc.).
 
-use iced::widget::{button, container, responsive, row, scrollable, text};
+use iced::widget::{button, container, responsive, row, scrollable};
 use iced::{Alignment, Border, Color, Element, Length};
+use photon_ui::typography::text;
 
 use photon_ui::button::{self as ui_button, ButtonVariant};
 use photon_ui::icons::{self, Icon};

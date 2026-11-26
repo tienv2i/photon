@@ -7,7 +7,8 @@
 
 use std::rc::Rc;
 
-use iced::widget::{Space, button, column, container, mouse_area, row, rule, slider, text};
+use crate::typography::text;
+use iced::widget::{Space, button, column, container, mouse_area, row, rule, slider};
 use iced::{Alignment, Border, Color, Element, Length};
 
 use crate::button::{self as ui_button, ButtonVariant};

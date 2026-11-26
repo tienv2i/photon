@@ -1970,6 +1970,20 @@ impl Core {
                 let text = self.close_editor_tab(*tab_id)?;
                 Ok((Some(text), None))
             }
+            Command::EditorCloseTabs { tab_ids } => {
+                let text = self.close_editor_tabs(tab_ids)?;
+                Ok((Some(text), None))
+            }
+            Command::EditorDuplicateDocument { tab_id } => {
+                let text = self.duplicate_editor_document(*tab_id)?;
+                self.workspace = Workspace::Editor;
+                Ok((Some(text), None))
+            }
+            Command::EditorNewFromClipboard { png_bytes } => {
+                let text = self.new_editor_from_clipboard(png_bytes.as_deref())?;
+                self.workspace = Workspace::Editor;
+                Ok((Some(text), None))
+            }
             Command::EditorReorderTab { tab_id, new_index } => {
                 self.reorder_editor_tab(*tab_id, *new_index)?;
                 Ok((None, None))
@@ -2226,6 +2240,158 @@ impl Core {
             }
         }
         Ok(UiText::new("editor_closed"))
+    }
+
+    fn close_editor_tabs(&mut self, tab_ids: &[u64]) -> Result<UiText, ProtocolError> {
+        if tab_ids.is_empty() {
+            return Ok(UiText::with("editor_tabs_closed", [("count", "0")]));
+        }
+        let mut closed = 0usize;
+        for &id in tab_ids {
+            if self.editor_tabs.iter().any(|s| s.id == id) {
+                let _ = self.close_editor_tab(Some(id))?;
+                closed += 1;
+            }
+        }
+        if closed == 1 {
+            Ok(UiText::new("editor_closed"))
+        } else {
+            Ok(UiText::with(
+                "editor_tabs_closed",
+                [("count", closed.to_string())],
+            ))
+        }
+    }
+
+    fn unique_virtual_tab_name(&self, base: &str) -> String {
+        let existing_names: Vec<String> = self
+            .editor_tabs
+            .iter()
+            .filter_map(|slot| {
+                let doc = if Some(slot.id) == self.active_editor_tab_id {
+                    self.editor.as_ref().or(slot.doc.as_ref())
+                } else {
+                    slot.doc.as_ref()
+                }?;
+                doc.source_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_owned)
+            })
+            .collect();
+        if !existing_names.iter().any(|n| n == base) {
+            return base.to_owned();
+        }
+        let mut idx = 2usize;
+        loop {
+            let candidate = format!("{base} {idx}");
+            if !existing_names.iter().any(|n| n == &candidate) {
+                return candidate;
+            }
+            idx += 1;
+        }
+    }
+
+    fn duplicate_editor_document(&mut self, tab_id: Option<u64>) -> Result<UiText, ProtocolError> {
+        let target_id = tab_id
+            .or(self.active_editor_tab_id)
+            .ok_or_else(no_doc_err)?;
+        let src_doc = if Some(target_id) == self.active_editor_tab_id {
+            self.editor.as_ref().cloned()
+        } else {
+            self.editor_tabs
+                .iter()
+                .find(|s| s.id == target_id)
+                .and_then(|s| s.doc.as_ref().cloned())
+        }
+        .ok_or_else(no_doc_err)?;
+
+        let stem = src_doc
+            .source_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("Untitled");
+        let base_copy = format!("{stem} copy");
+        let copy_name = self.unique_virtual_tab_name(&base_copy);
+
+        let mut cloned = src_doc;
+        cloned.source_path = PathBuf::from(&copy_name);
+        cloned.save_path = PathBuf::from(&copy_name);
+        cloned.original_revision = self.next_original_revision;
+        self.next_original_revision += 1;
+
+        self.park_active_editor_tab();
+        let new_tab_id = self.next_editor_tab_id;
+        self.next_editor_tab_id += 1;
+        self.editor_tabs.push(EditorTabSlot {
+            id: new_tab_id,
+            doc: None,
+            caption: None,
+            source_is_virtual: true,
+        });
+        self.active_editor_tab_id = Some(new_tab_id);
+        self.editor = Some(cloned);
+        self.editor_source_is_virtual = true;
+        self.editor_unsupported = None;
+        self.editor_caption = None;
+
+        Ok(UiText::with("editor_duplicated", [("name", copy_name)]))
+    }
+
+    fn new_editor_from_clipboard(
+        &mut self,
+        png_bytes: Option<&[u8]>,
+    ) -> Result<UiText, ProtocolError> {
+        let rgba = if let Some(bytes) = png_bytes {
+            let dyn_img = image::load_from_memory(bytes)
+                .map_err(|e| ProtocolError::new("decode_error", e.to_string()))?;
+            let rgba = dyn_img.to_rgba8();
+            photon_image::validate_dimensions(rgba.width(), rgba.height())
+                .map_err(map_image_err)?;
+            rgba
+        } else {
+            let cb = self.pixel_clipboard.as_ref().ok_or_else(|| {
+                ProtocolError::line("clipboard_empty", UiText::new("toast_clipboard_empty"))
+            })?;
+            RgbaImage::from_raw(cb.width, cb.height, (*cb.rgba).clone()).ok_or_else(|| {
+                ProtocolError::new("invalid_clipboard", "corrupt pixel clipboard buffer")
+            })?
+        };
+
+        let (w, h) = rgba.dimensions();
+        let name = self.unique_virtual_tab_name("Clipboard");
+        let mut doc = EditorDocument::from_rgba(PathBuf::from(&name), rgba);
+        if let Some(layer) = doc.stack.layers.first_mut() {
+            layer.name = "Background".to_owned();
+        }
+        doc.original_stack = doc.stack.clone();
+        doc.original_revision = self.next_original_revision;
+        self.next_original_revision += 1;
+
+        self.park_active_editor_tab();
+        let tab_id = self.next_editor_tab_id;
+        self.next_editor_tab_id += 1;
+        self.editor_tabs.push(EditorTabSlot {
+            id: tab_id,
+            doc: None,
+            caption: None,
+            source_is_virtual: true,
+        });
+        self.active_editor_tab_id = Some(tab_id);
+        self.editor = Some(doc);
+        self.editor_source_is_virtual = true;
+        self.editor_unsupported = None;
+        self.editor_caption = None;
+
+        Ok(UiText::with(
+            "editor_opened",
+            [
+                ("name", name),
+                ("width", w.to_string()),
+                ("height", h.to_string()),
+            ],
+        ))
     }
 
     fn reorder_editor_tab(&mut self, tab_id: u64, new_index: usize) -> Result<(), ProtocolError> {
@@ -2876,6 +3042,7 @@ impl Core {
             }
         }
 
+        let (iw, ih) = img.dimensions();
         doc.apply_layer_op(LayerOperation::AddImage {
             name: "Pasted".to_owned(),
             offset_x: ox,
@@ -2884,7 +3051,19 @@ impl Core {
         })
         .map_err(map_image_err)?;
 
-        Ok((Some(UiText::new("toast_pasted")), None))
+        let layer_id = doc.stack().active_layer_id;
+        Ok((
+            Some(UiText::new("toast_pasted")),
+            Some(serde_json::json!({
+                "layerId": layer_id,
+                "width": iw,
+                "height": ih,
+                "canvasWidth": cw,
+                "canvasHeight": ch,
+                "offsetX": ox,
+                "offsetY": oy,
+            })),
+        ))
     }
 
     fn paste_image_bytes(
@@ -5115,5 +5294,184 @@ for line in sys.stdin:
         assert!(!temp_dir.exists());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn duplicate_document_clones_layers_to_unsaved_copy_tab() {
+        let mut core = Core::new(true, true);
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "n1",
+                photon_protocol::ClientKind::Cli,
+                Command::EditorNew {
+                    width: 40,
+                    height: 30,
+                    background: [20, 40, 60, 255],
+                },
+            ))
+            .ok
+        );
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "l1",
+                photon_protocol::ClientKind::Cli,
+                Command::EditorLayerAdd {
+                    name: "Accent".to_owned(),
+                },
+            ))
+            .ok
+        );
+        let orig_tab_id = core.meta().active_editor_tab_id.expect("orig tab");
+        assert_eq!(core.meta().editor.as_ref().unwrap().layers.len(), 2);
+
+        let dup = core.dispatch(photon_protocol::Envelope::new(
+            "d1",
+            photon_protocol::ClientKind::Cli,
+            Command::EditorDuplicateDocument { tab_id: None },
+        ));
+        assert!(dup.ok);
+        let meta = core.meta();
+        assert_eq!(meta.editor_tabs.len(), 2);
+        let dup_tab_id = meta.active_editor_tab_id.expect("dup tab");
+        assert_ne!(dup_tab_id, orig_tab_id);
+        assert!(meta.editor_source_is_virtual);
+        let ed = meta.editor.expect("duplicated doc");
+        assert_eq!(ed.name, "untitled copy");
+        assert_eq!((ed.width, ed.height), (40, 30));
+        assert_eq!(ed.layers.len(), 2);
+
+        // Saving the duplicate without Save As must fail with save_as_required.
+        let save_resp = core.dispatch(photon_protocol::Envelope::new(
+            "s1",
+            photon_protocol::ClientKind::Cli,
+            Command::EditorSave,
+        ));
+        assert!(!save_resp.ok);
+        assert_eq!(save_resp.error.unwrap().code, "save_as_required");
+
+        // Mutating the duplicate does not mutate the original tab.
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "l2",
+                photon_protocol::ClientKind::Cli,
+                Command::EditorLayerAdd {
+                    name: "OnlyOnCopy".to_owned(),
+                },
+            ))
+            .ok
+        );
+        assert_eq!(core.meta().editor.as_ref().unwrap().layers.len(), 3);
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "sw1",
+                photon_protocol::ClientKind::Cli,
+                Command::EditorSwitchTab {
+                    tab_id: orig_tab_id,
+                },
+            ))
+            .ok
+        );
+        assert_eq!(core.meta().editor.as_ref().unwrap().layers.len(), 2);
+
+        // Second duplicate gets numbered copy suffix.
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "d2",
+                photon_protocol::ClientKind::Cli,
+                Command::EditorDuplicateDocument {
+                    tab_id: Some(orig_tab_id),
+                },
+            ))
+            .ok
+        );
+        assert_eq!(core.meta().editor.as_ref().unwrap().name, "untitled copy 2");
+    }
+
+    #[test]
+    fn editor_close_tabs_closes_batch_and_keeps_remaining_tab() {
+        let mut core = Core::new(true, true);
+        for i in 0..4 {
+            assert!(
+                core.dispatch(photon_protocol::Envelope::new(
+                    format!("n{i}"),
+                    photon_protocol::ClientKind::Cli,
+                    Command::EditorNew {
+                        width: 16 + i,
+                        height: 16,
+                        background: [255, 255, 255, 255],
+                    },
+                ))
+                .ok
+            );
+        }
+        let tabs: Vec<u64> = core.meta().editor_tabs.iter().map(|t| t.id).collect();
+        assert_eq!(tabs.len(), 4);
+
+        // Close others keeping tabs[1].
+        let to_close = vec![tabs[0], tabs[2], tabs[3]];
+        let resp = core.dispatch(photon_protocol::Envelope::new(
+            "ct1",
+            photon_protocol::ClientKind::Cli,
+            Command::EditorCloseTabs { tab_ids: to_close },
+        ));
+        assert!(resp.ok);
+        let remaining: Vec<u64> = core.meta().editor_tabs.iter().map(|t| t.id).collect();
+        assert_eq!(remaining, vec![tabs[1]]);
+        assert_eq!(core.meta().active_editor_tab_id, Some(tabs[1]));
+    }
+
+    #[test]
+    fn editor_new_from_clipboard_and_smart_paste_metadata() {
+        use image::ImageEncoder;
+        let mut core = Core::new(true, true);
+        let img = image::RgbaImage::from_pixel(24, 18, image::Rgba([220, 80, 40, 255]));
+        let mut png_bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png_bytes)
+            .write_image(img.as_raw(), 24, 18, image::ExtendedColorType::Rgba8)
+            .unwrap();
+
+        let resp = core.dispatch(photon_protocol::Envelope::new(
+            "cb1",
+            photon_protocol::ClientKind::Cli,
+            Command::EditorNewFromClipboard {
+                png_bytes: Some(png_bytes.clone()),
+            },
+        ));
+        assert!(resp.ok);
+        let meta = core.meta();
+        assert_eq!(meta.workspace, Workspace::Editor);
+        assert!(meta.editor_source_is_virtual);
+        let ed = meta.editor.expect("clipboard doc");
+        assert_eq!(ed.name, "Clipboard");
+        assert_eq!((ed.width, ed.height), (24, 18));
+
+        // Pasting into a larger canvas returns layer metadata for Smart Paste.
+        assert!(
+            core.dispatch(photon_protocol::Envelope::new(
+                "n2",
+                photon_protocol::ClientKind::Cli,
+                Command::EditorNew {
+                    width: 100,
+                    height: 80,
+                    background: [255, 255, 255, 255],
+                },
+            ))
+            .ok
+        );
+        let paste_resp = core.dispatch(photon_protocol::Envelope::new(
+            "p1",
+            photon_protocol::ClientKind::Cli,
+            Command::EditorPastePixels {
+                png_bytes: Some(png_bytes),
+                into_selection: false,
+            },
+        ));
+        assert!(paste_resp.ok);
+        let data = paste_resp.data.expect("paste metadata");
+        assert_eq!(data["width"], 24);
+        assert_eq!(data["height"], 18);
+        assert_eq!(data["canvasWidth"], 100);
+        assert_eq!(data["canvasHeight"], 80);
+        assert!(data["layerId"].as_u64().is_some());
     }
 }

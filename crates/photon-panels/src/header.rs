@@ -1,7 +1,8 @@
 //! Unified draggable, collapsible, swappable, closable, and inline-tabbed sidebar panel header.
 
-use iced::widget::{Space, column, container, mouse_area, row, text};
+use iced::widget::{Space, column, container, mouse_area, row};
 use iced::{Alignment, Border, Element, Length};
+use photon_ui::typography::text;
 
 use photon_ui::button::{self as ui_button, ButtonVariant};
 use photon_ui::icons::{self, Icon};

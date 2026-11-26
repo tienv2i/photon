@@ -3,8 +3,7 @@
 //! output/overwrite guardrails.
 
 use iced::widget::{
-    button as iced_button, checkbox, column, container, pick_list, row, rule, slider, text,
-    text_input,
+    button as iced_button, checkbox, column, container, pick_list, row, rule, slider, text_input,
 };
 use iced::{Alignment, Border, Element, Fill, Length};
 use photon_i18n::tr;
@@ -23,6 +22,7 @@ use photon_ui::theme::{
     hairline_rule_style, input_style, pick_list_menu_style, pick_list_style, slider_style,
 };
 use photon_ui::tooltip::{TooltipPosition, with_tooltip_pos};
+use photon_ui::typography::text;
 
 use photon_dialogs::{DialogEvent, DialogWindowState};
 

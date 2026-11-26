@@ -8,14 +8,14 @@ use iced::mouse;
 use iced::widget::overlay::menu as iced_menu;
 use iced::widget::{
     Shader, canvas, checkbox, column, container, pick_list, responsive, row, rule, scrollable,
-    slider, stack, text, text_input,
+    slider, stack, text_input,
 };
 use iced::window;
 use iced::{Alignment, Border, Color, Element, Fill, Length, Point, Rectangle, Shadow, Size};
 use photon_i18n::{tr, tr_args, tr_ui_text};
 use photon_panels::{
-    DocumentTabItem, DraggablePanelHeaderSpec, PanelFrameSpec, PanelTabItem, dock_panel_closable,
-    document_tab_bar, kv_row, section_card, sidebar_dock, sidebar_panel, stacked_panel_heights,
+    DraggablePanelHeaderSpec, PanelFrameSpec, PanelTabItem, dock_panel_closable, kv_row,
+    section_card, sidebar_dock, sidebar_panel, stacked_panel_heights,
 };
 use photon_protocol::{
     AiMaskStroke, ApplyTarget, BlendMode, BrushSettings, BrushSmoothingMode, BrushTip,
@@ -40,9 +40,16 @@ use photon_ui::theme::{
     hairline_rule_style, input_style, slider_style,
 };
 use photon_ui::toolbar::toolbar;
+use photon_ui::typography::text;
 use photon_ui::{TooltipPosition, with_tooltip, with_tooltip_pos};
 
+pub mod clipboard_paste;
 pub mod panel_splitter;
+pub mod shortcuts;
+pub mod tabs;
+
+pub use clipboard_paste::{SmartPasteFitMode, SmartPasteState};
+pub use tabs::{TabCloseScope, build_editor_tab_context_menu};
 
 use iced::widget::container as iced_container;
 use iced::widget::image as iced_image;
@@ -63,6 +70,7 @@ pub enum EditorMenuKind {
     File,
     Edit,
     Image,
+    Layer,
     Select,
     Filter,
     Plugins,
@@ -129,7 +137,17 @@ pub enum EditorMessage {
     OpenCanvasSizeDialog,
     SwitchTab(u64),
     RequestCloseTab(u64),
+    RequestCloseTabs(Vec<u64>),
+    OpenTabContextMenu(u64),
+    DuplicateDocument(Option<u64>),
     OpenNewTabDialog,
+    SmartPasteSetMode(SmartPasteFitMode),
+    SmartPasteSetWidth(f32),
+    SmartPasteSetHeight(f32),
+    SmartPasteSetOffsetX(f32),
+    SmartPasteSetOffsetY(f32),
+    SmartPasteApply,
+    SmartPasteDismiss,
     OpenColorPicker(ColorPickerTarget),
     ColorPickerSetRgb(u8, u8, u8),
     ColorPickerHexChanged(String),
@@ -860,6 +878,7 @@ pub struct EditorUiState {
     pub denoise_strength: f32,
     pub denoise_detail: f32,
     pub transform_spec: LayerTransformSpec,
+    pub smart_paste: Option<SmartPasteState>,
     pub ai_rembg_model: String,
     pub ai_rembg_feather: u8,
     pub ai_rembg_refine: AlphaRefineMode,
@@ -1121,6 +1140,7 @@ impl Default for EditorUiState {
             denoise_strength: 0.35,
             denoise_detail: 0.6,
             transform_spec: LayerTransformSpec::default(),
+            smart_paste: None,
             ai_rembg_model: "birefnet-general".to_owned(),
             ai_rembg_feather: 2,
             ai_rembg_refine: AlphaRefineMode::Off,
@@ -1285,6 +1305,7 @@ pub fn build_editor_toolbar<'a>(
             trigger(tr(lang, "menu-file"), EditorMenuKind::File),
             trigger(tr(lang, "menu-edit"), EditorMenuKind::Edit),
             trigger(tr(lang, "menu-image"), EditorMenuKind::Image),
+            trigger(tr(lang, "menu-layer"), EditorMenuKind::Layer),
             trigger(tr(lang, "menu-select"), EditorMenuKind::Select),
             trigger(tr(lang, "menu-filter"), EditorMenuKind::Filter),
             trigger(tr(lang, "menu-plugins"), EditorMenuKind::Plugins),
@@ -1469,7 +1490,9 @@ pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMe
     } else {
         state.editor_ui.effective_canvas_tool()
     };
-    let transform_preview = if !adjust_open && state.editor_ui.tool == EditorTool::Transform {
+    let transform_preview = if !adjust_open
+        && (state.editor_ui.tool == EditorTool::Transform || state.editor_ui.smart_paste.is_some())
+    {
         state.transform_preview.cloned()
     } else {
         None
@@ -1702,7 +1725,7 @@ pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMe
         return editor_row.into();
     }
 
-    let tab_bar = build_editor_tab_bar(state, lang);
+    let tab_bar = tabs::build_editor_tab_bar(state, lang);
     column![
         tab_bar,
         rule::horizontal(1).style(hairline_rule_style),
@@ -1711,32 +1734,6 @@ pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMe
     .width(Fill)
     .height(Fill)
     .into()
-}
-
-fn build_editor_tab_bar(state: EditorViewState<'_>, lang: Language) -> Element<'_, EditorMessage> {
-    let items: Vec<DocumentTabItem<EditorMessage>> = state
-        .snapshot
-        .meta
-        .editor_tabs
-        .iter()
-        .map(|tab| {
-            let tip = format!("{} ({}×{})", tab.path, tab.width, tab.height);
-            DocumentTabItem::new(
-                tab.id,
-                tab.name.clone(),
-                tab.active,
-                EditorMessage::SwitchTab(tab.id),
-                EditorMessage::RequestCloseTab(tab.id),
-            )
-            .modified(tab.modified)
-            .tooltip(tip)
-        })
-        .collect();
-    with_tooltip_pos(
-        document_tab_bar(items, Some(EditorMessage::OpenNewTabDialog)),
-        tr(lang, "tooltip-editor-new-tab"),
-        TooltipPosition::Bottom,
-    )
 }
 
 fn build_tool_rail(state: EditorViewState<'_>, lang: Language) -> Element<'_, EditorMessage> {
@@ -2175,7 +2172,12 @@ fn build_tool_options_history_panel<'a>(
 ) -> Element<'a, EditorMessage> {
     let tab_body: Element<'a, EditorMessage> = match state.editor_tool_tab {
         EditorToolTab::Options => {
-            if let Some(tool_card) = build_tool_options_card(state, ed, lang) {
+            let smart_paste_card = state
+                .editor_ui
+                .smart_paste
+                .as_ref()
+                .map(|sp| clipboard_paste::build_smart_paste_card(sp, lang));
+            let base_card = if let Some(tool_card) = build_tool_options_card(state, ed, lang) {
                 tool_card
             } else {
                 let tool_title = match state.editor_ui.tool {
@@ -2194,6 +2196,11 @@ fn build_tool_options_history_panel<'a>(
                             }
                         }),
                 )
+            };
+            if let Some(sp_card) = smart_paste_card {
+                column![sp_card, base_card].spacing(8).into()
+            } else {
+                base_card
             }
         }
         EditorToolTab::History => build_history_panel(ed, lang),

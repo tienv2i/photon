@@ -9,9 +9,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::typography::text;
 use iced::mouse;
 use iced::widget::canvas::{self, Action, Frame, Geometry, Path, Stroke, Text};
-use iced::widget::{column, container, row, text};
+use iced::widget::{column, container, row};
 use iced::{Alignment, Border, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::button::{self as ui_button, ButtonVariant};

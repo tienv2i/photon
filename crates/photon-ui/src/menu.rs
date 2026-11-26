@@ -1,8 +1,8 @@
 //! Reusable popover menus, shortcut-hinted items, separators, and compact menubars.
 
+use crate::typography::text;
 use iced::widget::{
     Space, button, column, container, mouse_area, opaque, responsive, row, rule, scrollable, stack,
-    text,
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Size};
 

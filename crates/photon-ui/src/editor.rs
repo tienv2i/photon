@@ -2,10 +2,11 @@
 //! 3x3 canvas anchor selector, inspector panel tabs, checker swatches, and
 //! interactive tonal curves spline canvas.
 
+use crate::typography::text;
 use iced::mouse;
 use iced::widget::canvas::{self, Action, Frame, Geometry, Path, Stroke};
 use iced::widget::{
-    Button, Space, button, column, container, image as iced_image, mouse_area, row, stack, text,
+    Button, Space, button, column, container, image as iced_image, mouse_area, row, stack,
     text_input,
 };
 use iced::{

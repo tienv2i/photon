@@ -12,7 +12,7 @@ use iced::widget::canvas::{
 use iced::widget::overlay::menu as iced_menu;
 use iced::widget::{
     Shader, button as iced_button, column, container, image as iced_image, mouse_area, pick_list,
-    progress_bar, responsive, row, rule, scrollable, stack, text, text_input,
+    progress_bar, responsive, row, rule, scrollable, stack, text_input,
 };
 use iced::{
     Alignment, Border, Color, ContentFit, Element, Fill, Length, Padding, Point, Rectangle,
@@ -41,6 +41,7 @@ use photon_ui::toolbar::{
     workspace_switcher_responsive,
 };
 use photon_ui::tooltip::{TooltipPosition, with_tooltip, with_tooltip_pos};
+use photon_ui::typography::text;
 
 use photon_canvas::{CanvasEvent, CanvasTool, CpuImageFrame, ImageCanvasProgram};
 

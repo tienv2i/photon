@@ -1,8 +1,7 @@
 //! Reusable responsive thumbnail grid and clickable breadcrumb bar.
 
-use iced::widget::{
-    button, column, container, image, mouse_area, responsive, row, scrollable, text,
-};
+use crate::typography::text;
+use iced::widget::{button, column, container, image, mouse_area, responsive, row, scrollable};
 use iced::{Alignment, Border, ContentFit, Element, Length};
 
 use crate::button::{self as ui_button, ButtonVariant};

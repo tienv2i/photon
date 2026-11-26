@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use iced::keyboard::{self, Key, Modifiers, key::Named};
 use iced::widget::{
     checkbox, column, container, image as iced_image, operation as widget_operation, pick_list,
-    row, scrollable, text, text_input,
+    row, scrollable, text_input,
 };
 use iced::{
     Alignment, Color, Element, Fill, Length, Point, Rectangle, Size, Subscription, Task,
@@ -52,6 +52,7 @@ use photon_ui::theme::{
     pick_list_style,
 };
 use photon_ui::tooltip::{TooltipPosition, with_tooltip_pos};
+use photon_ui::typography::text;
 
 use crate::inspector::{ViewerUiPresentation, build_ui_tree};
 use photon_browser::batch_dialog::{
@@ -70,14 +71,18 @@ use photon_canvas::{
     dual_spread_geometry,
 };
 use photon_editor::panel_splitter::{DockDragState, DockSplitterKind};
+use photon_editor::shortcuts::{
+    EditorShortcutAction, ShortcutKey, ShortcutNamedKey, resolve_editor_shortcut,
+};
 use photon_editor::{
     AdjustmentPopupTab, AlphaRefineMode, ColorBalanceZone, ColorPickerTarget, CompareMode,
     CurvesChannel, DimGridAction, DimensionInputState, EditorMenuKind, EditorMessage, EditorTool,
-    EditorUiState, EditorViewState, WatermarkTab, apply_target_control, build_color_picker_dialog,
-    build_editor_add_layer_menu, build_editor_canvas_context_menu, build_editor_layer_context_menu,
-    build_editor_plugins_menu_entries, build_editor_toolbar, build_editor_view,
-    build_export_dialog, crop_uv_to_signed, default_curves, format_hex, parse_hex_rgb,
-    rgb_to_color, slider_stepper_control,
+    EditorUiState, EditorViewState, SmartPasteFitMode, SmartPasteState, TabCloseScope,
+    WatermarkTab, apply_target_control, build_color_picker_dialog, build_editor_add_layer_menu,
+    build_editor_canvas_context_menu, build_editor_layer_context_menu,
+    build_editor_plugins_menu_entries, build_editor_tab_context_menu, build_editor_toolbar,
+    build_editor_view, build_export_dialog, crop_uv_to_signed, default_curves, format_hex,
+    parse_hex_rgb, rgb_to_color, slider_stepper_control,
 };
 use photon_protocol::DisplayFont;
 use photon_ui::editor::{anchor_grid_3x3, checker_swatch};
@@ -154,6 +159,7 @@ pub(crate) enum ActiveMenu {
     EditorFile,
     EditorEdit,
     EditorImage,
+    EditorLayer,
     EditorFilter,
     EditorPlugins,
     EditorSelect,
@@ -225,6 +231,11 @@ pub(crate) enum ActiveContextMenu {
         x: f32,
         y: f32,
         layer_id: u64,
+    },
+    EditorTab {
+        x: f32,
+        y: f32,
+        tab_id: u64,
     },
 }
 
@@ -553,6 +564,10 @@ pub struct PhotonGui {
     pub(crate) editor_ui: EditorUiState,
     pub(crate) browser_file_clipboard: Vec<String>,
     pub(crate) last_synced_clipboard_png: Option<Vec<u8>>,
+    pub(crate) pending_close_tabs: Vec<u64>,
+    pub(crate) new_doc_clipboard_dims: Option<(u32, u32)>,
+    pub(crate) new_doc_clipboard_png: Option<Vec<u8>>,
+    pub(crate) new_doc_create_from_clipboard: bool,
     pub(crate) viewer_mode: ViewerViewMode,
     pub(crate) viewer_manga_rtl: bool,
     pub(crate) viewer_manga_cover_separate: bool,
@@ -992,12 +1007,32 @@ pub enum Message {
         png_bytes: Option<Vec<u8>>,
         clipboard_empty: bool,
     },
+    EditorPasteCompleted(Result<CommandResponse, String>),
+    EditorNewFromClipboard,
+    EditorNewFromClipboardResolved(Option<Vec<u8>>),
+    NewDocClipboardProbed {
+        dims: Option<(u32, u32)>,
+        png: Option<Vec<u8>>,
+    },
+    NewDocUseClipboardSize,
+    NewDocToggleCreateFromClipboard(bool),
+    NewDocCreateFromClipboard,
+    SmartPasteSetMode(SmartPasteFitMode),
+    SmartPasteSetWidth(f32),
+    SmartPasteSetHeight(f32),
+    SmartPasteSetOffsetX(f32),
+    SmartPasteSetOffsetY(f32),
+    SmartPasteApply,
+    SmartPasteDismiss,
     EditorPixelsCopiedSyncClipboard(Result<CommandResponse, String>),
     RecordSyncedClipboardPng(Vec<u8>),
     EditorSetRotateAngle(f64),
     EditorApplyRotateAngle,
     EditorSwitchTab(u64),
     EditorRequestCloseTab(u64),
+    EditorRequestCloseTabs(Vec<u64>),
+    EditorOpenTabContextMenu(u64),
+    EditorDuplicateDocument(Option<u64>),
     EditorOpenNewTabDialog,
     EditorNewTabFilesPicked(Vec<PathBuf>),
     OpenInViewerWindow(String),
@@ -1270,6 +1305,10 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
         editor_ui,
         browser_file_clipboard: Vec::new(),
         last_synced_clipboard_png: None,
+        pending_close_tabs: Vec::new(),
+        new_doc_clipboard_dims: None,
+        new_doc_clipboard_png: None,
+        new_doc_create_from_clipboard: false,
         viewer_mode,
         viewer_manga_rtl,
         viewer_manga_cover_separate,
@@ -1650,7 +1689,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             state.dialog = Some(InAppDialog::Alert {
                 id: DesktopDialogId::Shortcuts,
                 title: tr(lang, "action-shortcuts"),
-                message: "Ctrl+1/2/3: Switch Workspace\nCtrl+O / Ctrl+Shift+O: Open Folder / Files\nCtrl+Z / Ctrl+Y: Undo / Redo · Ctrl+S: Save · Ctrl+Shift+E: Export\nCtrl+R: Resize · F / 0: Fit · 1: 100% · F11: Fullscreen\nEditor Tools: V (Pointer), H (Hand), Z (Zoom), B (Brush), E (Eraser), L (Liquify), I (Eyedropper), C (Crop), X (Swap Colors), [ / ] (Brush Size)".to_owned(),
+                message: "Ctrl+1/2/3: Switch Workspace (Browser/Viewer)\nCtrl+O / Ctrl+Shift+O: Open Folder / Files · Ctrl+N: New Document · Ctrl+W: Close Tab\nCtrl+Z / Ctrl+Shift+Z: Undo / Redo · Ctrl+S / Ctrl+Shift+S: Save / Save As · Ctrl+Shift+E: Export\nCtrl+A / Ctrl+D / Ctrl+Shift+I: Select All / Deselect / Invert · Ctrl+J: Duplicate Layer · Ctrl+E: Merge Down · Ctrl+Shift+N: New Layer · Ctrl+T: Free Transform\nCtrl++ / Ctrl+- / Ctrl+0 / Ctrl+1: Zoom In / Out / Fit / 100% · F11: Fullscreen\nEditor Tools: V (Move), M (Marquee), L (Lasso), W (Magic Wand), C (Crop), I (Eyedropper), B (Brush), E (Eraser), G (Gradient/Bucket), P (Pen), A (Path), U (Shape), T (Text), J (Healing), H (Hand), Z (Zoom), X (Swap Colors), Q (Quick Mask), [ / ] (Brush Size)".to_owned(),
             });
             open_dialog_window(state, DesktopDialogId::Shortcuts);
             Task::none()
@@ -2846,10 +2885,17 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 if state.snapshot.meta.editor.is_some() {
                     tasks.push(load_editor_frame_task(state.core.clone()));
                     tasks.push(load_editor_thumbnails_task(state.core.clone()));
-                    if state.editor_ui.tool == EditorTool::Transform {
+                    if state.editor_ui.tool == EditorTool::Transform
+                        || state.editor_ui.smart_paste.is_some()
+                    {
+                        let layer_id = state
+                            .editor_ui
+                            .smart_paste
+                            .map(|sp| sp.layer_id)
+                            .or(state.transform_layer_id);
                         tasks.push(load_editor_transform_frames_task(
                             state.core.clone(),
-                            state.transform_layer_id,
+                            layer_id,
                         ));
                     }
                 } else {
@@ -3419,6 +3465,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         Message::EditorRequestCloseTab(id) => {
             state.active_menu = None;
             state.context_menu = None;
+            state.pending_close_tabs.clear();
             let is_modified = state
                 .snapshot
                 .meta
@@ -3447,8 +3494,57 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 Command::EditorCloseTab { tab_id: Some(id) },
             )
         }
+        Message::EditorRequestCloseTabs(ids) => {
+            state.active_menu = None;
+            state.context_menu = None;
+            if ids.is_empty() {
+                return Task::none();
+            }
+            let any_modified = ids.iter().any(|id| {
+                state
+                    .snapshot
+                    .meta
+                    .editor_tabs
+                    .iter()
+                    .find(|t| t.id == *id)
+                    .is_some_and(|t| t.modified)
+            });
+            if any_modified {
+                state.pending_close_tabs = ids;
+                state.dialog = Some(InAppDialog::ConfirmUnsavedLeave {
+                    tab_id: None,
+                    close_editor: true,
+                });
+                open_dialog_window(state, DesktopDialogId::ConfirmUnsavedLeave);
+                return Task::none();
+            }
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorCloseTabs { tab_ids: ids },
+            )
+        }
+        Message::EditorOpenTabContextMenu(tab_id) => {
+            state.active_menu = None;
+            let p = state.last_cursor.unwrap_or(Point::new(120.0, 72.0));
+            state.context_menu = Some(ActiveContextMenu::EditorTab {
+                x: p.x.max(8.0),
+                y: p.y.max(48.0),
+                tab_id,
+            });
+            sync_ui_tree_task(state)
+        }
+        Message::EditorDuplicateDocument(tab_id) => {
+            state.active_menu = None;
+            state.context_menu = None;
+            state.editor_ui.smart_paste = None;
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorDuplicateDocument { tab_id },
+            )
+        }
         Message::DiscardAndLeaveEditor(close_editor) => {
             let to_browser = std::mem::take(&mut state.pending_leave_to_browser);
+            let batch_tabs = std::mem::take(&mut state.pending_close_tabs);
             let tab_id = match state.dialog.take() {
                 Some(InAppDialog::ConfirmUnsavedLeave { tab_id, .. }) => tab_id,
                 _ => None,
@@ -3456,6 +3552,14 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             state
                 .dialog_manager
                 .close(&DesktopDialogId::ConfirmUnsavedLeave);
+            if !batch_tabs.is_empty() {
+                return dispatch_to_core(
+                    state.core.clone(),
+                    Command::EditorCloseTabs {
+                        tab_ids: batch_tabs,
+                    },
+                );
+            }
             if !close_editor && is_standalone_editor() {
                 if to_browser {
                     return forward_or_spawn_browser(browser_dir_for_state(state));
@@ -3585,6 +3689,8 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         }
         Message::CloseDialog => {
             state.pending_leave_to_browser = false;
+            state.pending_close_tabs.clear();
+            state.new_doc_create_from_clipboard = false;
             if let Some(d) = state.dialog.take() {
                 if let InAppDialog::ColorPicker {
                     target: ColorPickerTarget::ViewportBackground,
@@ -3649,6 +3755,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             state.context_menu = None;
             state.new_doc_draft = None;
             state.reopen_new_doc_after_picker = false;
+            state.new_doc_clipboard_dims = None;
+            state.new_doc_clipboard_png = None;
+            state.new_doc_create_from_clipboard = false;
             state.dialog = Some(InAppDialog::NewDocument {
                 dims: DimensionInputState::from_dims(1920, 1080),
                 background: NewDocBackground::White,
@@ -3656,7 +3765,112 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 error: None,
             });
             open_dialog_window(state, DesktopDialogId::NewDocument);
+            let core = state.core.clone();
+            let has_internal = state.snapshot.meta.has_pixel_clipboard;
+            Task::perform(
+                async move {
+                    let os_png = tokio::task::spawn_blocking(read_clipboard_png_bytes)
+                        .await
+                        .ok()
+                        .flatten();
+                    let png = if let Some(bytes) = os_png {
+                        Some(bytes)
+                    } else if has_internal {
+                        match core.query(Query::EditorClipboardPng).await {
+                            Ok(Ok(val)) => val
+                                .get("pngBytes")
+                                .and_then(|v| serde_json::from_value::<Vec<u8>>(v.clone()).ok()),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let dims = png.as_deref().and_then(probe_png_dimensions);
+                    (dims, png)
+                },
+                |(dims, png)| Message::NewDocClipboardProbed { dims, png },
+            )
+        }
+        Message::NewDocClipboardProbed { dims, png } => {
+            state.new_doc_clipboard_dims = dims;
+            state.new_doc_clipboard_png = png;
             Task::none()
+        }
+        Message::NewDocUseClipboardSize => {
+            if let Some((w, h)) = state.new_doc_clipboard_dims
+                && let Some(InAppDialog::NewDocument { dims, error, .. }) = &mut state.dialog
+            {
+                dims.sync_from_px(w, h);
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::NewDocToggleCreateFromClipboard(enabled) => {
+            state.new_doc_create_from_clipboard = enabled;
+            if enabled
+                && let Some((w, h)) = state.new_doc_clipboard_dims
+                && let Some(InAppDialog::NewDocument { dims, error, .. }) = &mut state.dialog
+            {
+                dims.sync_from_px(w, h);
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::NewDocCreateFromClipboard => {
+            let png = state.new_doc_clipboard_png.clone();
+            state.dialog = None;
+            state.new_doc_draft = None;
+            state.reopen_new_doc_after_picker = false;
+            state.new_doc_create_from_clipboard = false;
+            state.dialog_manager.close(&DesktopDialogId::NewDocument);
+            if png.is_some() || state.snapshot.meta.has_pixel_clipboard {
+                dispatch_to_core(
+                    state.core.clone(),
+                    Command::EditorNewFromClipboard { png_bytes: png },
+                )
+            } else {
+                update(state, Message::EditorNewFromClipboard)
+            }
+        }
+        Message::EditorNewFromClipboard => {
+            state.active_menu = None;
+            state.context_menu = None;
+            let has_internal = state.snapshot.meta.has_pixel_clipboard;
+            let last_synced = state.last_synced_clipboard_png.clone();
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        let os_png = read_clipboard_png_bytes();
+                        match os_png {
+                            Some(bytes) => {
+                                if has_internal && last_synced.as_ref() == Some(&bytes) {
+                                    Some(bytes)
+                                } else {
+                                    Some(bytes)
+                                }
+                            }
+                            None => None,
+                        }
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                },
+                Message::EditorNewFromClipboardResolved,
+            )
+        }
+        Message::EditorNewFromClipboardResolved(png_bytes) => {
+            if png_bytes.is_none() && !state.snapshot.meta.has_pixel_clipboard {
+                return show_toast(
+                    state,
+                    tr(state.snapshot.meta.language, "toast-clipboard-empty"),
+                    ToastKind::Info,
+                );
+            }
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorNewFromClipboard { png_bytes },
+            )
         }
         Message::NewDocDimAction(action) => {
             if let Some(InAppDialog::NewDocument { dims, error, .. }) = &mut state.dialog {
@@ -3708,6 +3922,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ConfirmNewDocument => {
+            if state.new_doc_create_from_clipboard {
+                return update(state, Message::NewDocCreateFromClipboard);
+            }
             let Some(InAppDialog::NewDocument {
                 dims, background, ..
             }) = state.dialog.clone()
@@ -5578,7 +5795,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::EditorTransformFramesLoaded(maybe_frames) => {
-            if state.editor_ui.tool != EditorTool::Transform {
+            if state.editor_ui.tool != EditorTool::Transform
+                && state.editor_ui.smart_paste.is_none()
+            {
                 return Task::none();
             }
             let Some(frames) = maybe_frames else {
@@ -5968,13 +6187,151 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                     ToastKind::Info,
                 );
             }
-            dispatch_to_core(
-                state.core.clone(),
-                Command::EditorPastePixels {
-                    png_bytes,
-                    into_selection,
+            let core = state.core.clone();
+            Task::perform(
+                async move {
+                    core.dispatch(Envelope::new(
+                        format!("gui-paste-{}", std::process::id()),
+                        ClientKind::Gui,
+                        Command::EditorPastePixels {
+                            png_bytes,
+                            into_selection,
+                        },
+                    ))
+                    .await
                 },
+                Message::EditorPasteCompleted,
             )
+        }
+        Message::EditorPasteCompleted(res) => {
+            let mut tasks = Vec::new();
+            if let Ok(resp) = &res
+                && resp.ok
+                && let Some(data) = &resp.data
+                && let (Some(layer_id), Some(w), Some(h), Some(cw), Some(ch)) = (
+                    data.get("layerId").and_then(|v| v.as_u64()),
+                    data.get("width").and_then(|v| v.as_u64()).map(|v| v as u32),
+                    data.get("height")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32),
+                    data.get("canvasWidth")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32),
+                    data.get("canvasHeight")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32),
+                )
+            {
+                let ox = data.get("offsetX").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                let oy = data.get("offsetY").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                let sp = SmartPasteState::new(layer_id, w, h, cw, ch, ox, oy);
+                state.editor_ui.smart_paste = Some(sp);
+                state.editor_ui.transform_spec = sp.to_transform_spec();
+                state.editor_tool_tab = EditorToolTab::Options;
+                tasks.push(load_editor_transform_frames_task(
+                    state.core.clone(),
+                    Some(layer_id),
+                ));
+            }
+            tasks.push(update(state, Message::CommandCompleted(res)));
+            tasks.push(sync_ui_tree_task(state));
+            Task::batch(tasks)
+        }
+        Message::SmartPasteSetMode(mode) => {
+            if let Some(sp) = &mut state.editor_ui.smart_paste {
+                sp.apply_mode(mode);
+                let spec = sp.to_transform_spec();
+                let layer_id = sp.layer_id;
+                state.editor_ui.transform_spec = spec;
+                if let Some(tp) = &mut state.transform_preview {
+                    tp.spec = spec;
+                } else {
+                    return load_editor_transform_frames_task(state.core.clone(), Some(layer_id));
+                }
+            }
+            sync_ui_tree_task(state)
+        }
+        Message::SmartPasteSetWidth(w) => {
+            if let Some(sp) = &mut state.editor_ui.smart_paste {
+                sp.target_width = w.max(1.0);
+                let spec = sp.to_transform_spec();
+                let layer_id = sp.layer_id;
+                state.editor_ui.transform_spec = spec;
+                if let Some(tp) = &mut state.transform_preview {
+                    tp.spec = spec;
+                } else {
+                    return load_editor_transform_frames_task(state.core.clone(), Some(layer_id));
+                }
+            }
+            Task::none()
+        }
+        Message::SmartPasteSetHeight(h) => {
+            if let Some(sp) = &mut state.editor_ui.smart_paste {
+                sp.target_height = h.max(1.0);
+                let spec = sp.to_transform_spec();
+                let layer_id = sp.layer_id;
+                state.editor_ui.transform_spec = spec;
+                if let Some(tp) = &mut state.transform_preview {
+                    tp.spec = spec;
+                } else {
+                    return load_editor_transform_frames_task(state.core.clone(), Some(layer_id));
+                }
+            }
+            Task::none()
+        }
+        Message::SmartPasteSetOffsetX(x) => {
+            if let Some(sp) = &mut state.editor_ui.smart_paste {
+                sp.translate_x = x;
+                let spec = sp.to_transform_spec();
+                let layer_id = sp.layer_id;
+                state.editor_ui.transform_spec = spec;
+                if let Some(tp) = &mut state.transform_preview {
+                    tp.spec = spec;
+                } else {
+                    return load_editor_transform_frames_task(state.core.clone(), Some(layer_id));
+                }
+            }
+            Task::none()
+        }
+        Message::SmartPasteSetOffsetY(y) => {
+            if let Some(sp) = &mut state.editor_ui.smart_paste {
+                sp.translate_y = y;
+                let spec = sp.to_transform_spec();
+                let layer_id = sp.layer_id;
+                state.editor_ui.transform_spec = spec;
+                if let Some(tp) = &mut state.transform_preview {
+                    tp.spec = spec;
+                } else {
+                    return load_editor_transform_frames_task(state.core.clone(), Some(layer_id));
+                }
+            }
+            Task::none()
+        }
+        Message::SmartPasteApply => {
+            let Some(sp) = state.editor_ui.smart_paste.take() else {
+                return Task::none();
+            };
+            let spec = sp.to_transform_spec();
+            state.editor_ui.transform_spec = LayerTransformSpec::default();
+            state.transform_preview = None;
+            state.transform_layer_id = None;
+            if !spec.is_identity() {
+                return dispatch_to_core(
+                    state.core.clone(),
+                    Command::EditorTransformLayer {
+                        layer_id: Some(sp.layer_id),
+                        transform: spec,
+                    },
+                );
+            }
+            sync_ui_tree_task(state)
+        }
+        Message::SmartPasteDismiss => {
+            state.editor_ui.smart_paste = None;
+            state.editor_ui.transform_spec = LayerTransformSpec::default();
+            state.transform_preview = None;
+            state.transform_layer_id = None;
+            sync_ui_tree_task(state)
         }
         Message::EditorSetRotateAngle(deg) => {
             state.editor_ui.rotate_angle = deg.clamp(-180.0, 180.0);
@@ -7327,6 +7684,250 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
     }
 }
 
+fn dispatch_editor_shortcut(state: &mut PhotonGui, action: EditorShortcutAction) -> Task<Message> {
+    let active_layer_id = state
+        .snapshot
+        .meta
+        .editor
+        .as_ref()
+        .map(|e| e.active_layer_id);
+    let has_selection = state
+        .snapshot
+        .meta
+        .editor
+        .as_ref()
+        .is_some_and(|e| e.selection.has_selection);
+    match action {
+        EditorShortcutAction::ToolMove => {
+            update(state, Message::EditorSelectTool(EditorTool::Pointer))
+        }
+        EditorShortcutAction::ToolMarquee => update(
+            state,
+            Message::EditorSelectTool(state.editor_ui.marquee_subtool),
+        ),
+        EditorShortcutAction::ToolMarqueeCycle => {
+            let next = match state.editor_ui.marquee_subtool {
+                EditorTool::MarqueeRect => EditorTool::MarqueeEllipse,
+                EditorTool::MarqueeEllipse => EditorTool::SingleRow,
+                EditorTool::SingleRow => EditorTool::SingleCol,
+                _ => EditorTool::MarqueeRect,
+            };
+            update(state, Message::EditorSelectTool(next))
+        }
+        EditorShortcutAction::ToolLasso => update(
+            state,
+            Message::EditorSelectTool(state.editor_ui.lasso_subtool),
+        ),
+        EditorShortcutAction::ToolLassoCycle => {
+            let next = match state.editor_ui.lasso_subtool {
+                EditorTool::Lasso => EditorTool::PolygonLasso,
+                EditorTool::PolygonLasso => EditorTool::MagneticLasso,
+                EditorTool::MagneticLasso => EditorTool::BezierSelect,
+                _ => EditorTool::Lasso,
+            };
+            update(state, Message::EditorSelectTool(next))
+        }
+        EditorShortcutAction::ToolMagicWand => update(
+            state,
+            Message::EditorSelectTool(state.editor_ui.smart_subtool),
+        ),
+        EditorShortcutAction::ToolMagicWandCycle => {
+            let next = match state.editor_ui.smart_subtool {
+                EditorTool::MagicWand => EditorTool::QuickSelect,
+                _ => EditorTool::MagicWand,
+            };
+            update(state, Message::EditorSelectTool(next))
+        }
+        EditorShortcutAction::ToolCrop => {
+            update(state, Message::EditorSelectTool(EditorTool::Crop))
+        }
+        EditorShortcutAction::ToolEyedropper => {
+            update(state, Message::EditorSelectTool(EditorTool::Eyedropper))
+        }
+        EditorShortcutAction::ToolBrush => {
+            update(state, Message::EditorSelectTool(EditorTool::Brush))
+        }
+        EditorShortcutAction::ToolEraser => {
+            update(state, Message::EditorSelectTool(EditorTool::Eraser))
+        }
+        EditorShortcutAction::ToolFillGroup => update(
+            state,
+            Message::EditorSelectTool(state.editor_ui.fill_subtool),
+        ),
+        EditorShortcutAction::ToolFillGroupCycle => {
+            let next = match state.editor_ui.fill_subtool {
+                EditorTool::Gradient => EditorTool::PaintBucket,
+                _ => EditorTool::Gradient,
+            };
+            update(state, Message::EditorSelectTool(next))
+        }
+        EditorShortcutAction::ToolPen => {
+            update(state, Message::EditorSelectTool(EditorTool::BezierPen))
+        }
+        EditorShortcutAction::ToolPathSelect => {
+            // Path/Node Selection tool lands in Phase 3; focus BezierPen for now.
+            update(state, Message::EditorSelectTool(EditorTool::BezierPen))
+        }
+        EditorShortcutAction::ToolShape => update(
+            state,
+            Message::EditorSelectTool(state.editor_ui.shape_subtool),
+        ),
+        EditorShortcutAction::ToolShapeCycle => {
+            let next = match state.editor_ui.shape_subtool {
+                EditorTool::DrawRect => EditorTool::DrawEllipse,
+                EditorTool::DrawEllipse => EditorTool::DrawLine,
+                EditorTool::DrawLine => EditorTool::DrawPolygon,
+                EditorTool::DrawPolygon => EditorTool::DrawPolyline,
+                _ => EditorTool::DrawRect,
+            };
+            update(state, Message::EditorSelectTool(next))
+        }
+        EditorShortcutAction::ToolText => {
+            // Non-destructive Text tool lands in Phase 3.
+            show_toast(
+                state,
+                tr(state.snapshot.meta.language, "tool-text-soon"),
+                ToastKind::Info,
+            )
+        }
+        EditorShortcutAction::ToolHealingBrush => {
+            update(state, Message::EditorSelectTool(EditorTool::HealingBrush))
+        }
+        EditorShortcutAction::ToolHand => {
+            update(state, Message::EditorSelectTool(EditorTool::Hand))
+        }
+        EditorShortcutAction::ToolZoom => {
+            update(state, Message::EditorSelectTool(EditorTool::Zoom))
+        }
+        EditorShortcutAction::ToolLiquify => {
+            update(state, Message::EditorSelectTool(EditorTool::Liquify))
+        }
+        EditorShortcutAction::SwapForegroundBackground => update(state, Message::EditorSwapColors),
+        EditorShortcutAction::ToggleQuickMask => {
+            dispatch_to_core(state.core.clone(), Command::EditorSelectToggleQuickMask)
+        }
+        EditorShortcutAction::BrushSizeDecrease => {
+            if state.editor_ui.tool == EditorTool::HealingBrush {
+                update(
+                    state,
+                    Message::EditorSetHealingRadius(
+                        (state.editor_ui.healing_radius - 2.0).max(1.0),
+                    ),
+                )
+            } else {
+                update(
+                    state,
+                    Message::EditorSetBrushRadius((state.editor_ui.brush_radius - 2.0).max(1.0)),
+                )
+            }
+        }
+        EditorShortcutAction::BrushSizeIncrease => {
+            if state.editor_ui.tool == EditorTool::HealingBrush {
+                update(
+                    state,
+                    Message::EditorSetHealingRadius(
+                        (state.editor_ui.healing_radius + 2.0).min(200.0),
+                    ),
+                )
+            } else {
+                update(
+                    state,
+                    Message::EditorSetBrushRadius((state.editor_ui.brush_radius + 2.0).min(200.0)),
+                )
+            }
+        }
+        EditorShortcutAction::NewDocument => update(state, Message::OpenNewDocumentDialog),
+        EditorShortcutAction::Save => dispatch_to_core(state.core.clone(), Command::EditorSave),
+        EditorShortcutAction::SaveAs => update(state, Message::PickSaveAsDialog),
+        EditorShortcutAction::Export => update(state, Message::OpenExportDialog),
+        EditorShortcutAction::CloseTab => {
+            if let Some(doc) = &state.snapshot.meta.editor {
+                update(state, Message::EditorRequestCloseTab(doc.id))
+            } else {
+                Task::none()
+            }
+        }
+        EditorShortcutAction::ImageSize => update(state, Message::OpenResizeDialog),
+        EditorShortcutAction::CanvasSize => update(state, Message::OpenCanvasSizeDialog),
+        EditorShortcutAction::Undo => dispatch_to_core(state.core.clone(), Command::EditorUndo),
+        EditorShortcutAction::Redo => dispatch_to_core(state.core.clone(), Command::EditorRedo),
+        EditorShortcutAction::Cut => update(state, Message::EditorCutPixels),
+        EditorShortcutAction::Copy => update(state, Message::EditorCopyPixels { merged: false }),
+        EditorShortcutAction::CopyMerged => {
+            update(state, Message::EditorCopyPixels { merged: true })
+        }
+        EditorShortcutAction::Paste => update(
+            state,
+            Message::EditorPastePixels {
+                into_selection: false,
+            },
+        ),
+        EditorShortcutAction::PasteIntoSelection => update(
+            state,
+            Message::EditorPastePixels {
+                into_selection: true,
+            },
+        ),
+        EditorShortcutAction::FreeTransform => {
+            update(state, Message::EditorSelectTool(EditorTool::Transform))
+        }
+        EditorShortcutAction::SelectAll => {
+            dispatch_to_core(state.core.clone(), Command::EditorSelectAll)
+        }
+        EditorShortcutAction::Deselect => {
+            dispatch_to_core(state.core.clone(), Command::EditorDeselect)
+        }
+        EditorShortcutAction::Reselect => {
+            dispatch_to_core(state.core.clone(), Command::EditorReselect)
+        }
+        EditorShortcutAction::InvertSelection => {
+            dispatch_to_core(state.core.clone(), Command::EditorSelectInvert)
+        }
+        EditorShortcutAction::ClearSelectedPixels => {
+            if has_selection {
+                dispatch_to_core(state.core.clone(), Command::EditorSelectionClearPixels)
+            } else {
+                Task::none()
+            }
+        }
+        EditorShortcutAction::NewLayer => {
+            let next_idx = state
+                .snapshot
+                .meta
+                .editor
+                .as_ref()
+                .map(|e| e.layers.len() + 1)
+                .unwrap_or(1);
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorLayerAdd {
+                    name: format!("Layer {next_idx}"),
+                },
+            )
+        }
+        EditorShortcutAction::DuplicateLayer => {
+            if has_selection {
+                dispatch_to_core(state.core.clone(), Command::EditorSelectionDuplicateLayer)
+            } else if let Some(id) = active_layer_id {
+                dispatch_to_core(state.core.clone(), Command::EditorLayerDuplicate { id })
+            } else {
+                Task::none()
+            }
+        }
+        EditorShortcutAction::MergeDown => {
+            if let Some(id) = active_layer_id {
+                dispatch_to_core(state.core.clone(), Command::EditorLayerMergeDown { id })
+            } else {
+                Task::none()
+            }
+        }
+        EditorShortcutAction::ZoomIn => update(state, Message::ZoomStep(1.25)),
+        EditorShortcutAction::ZoomOut => update(state, Message::ZoomStep(0.8)),
+        EditorShortcutAction::ZoomFit => update(state, Message::Canvas(CanvasEvent::ResetFit)),
+        EditorShortcutAction::ZoomActual => update(state, Message::EditorZoomActual),
+    }
+}
+
 fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message> {
     if let keyboard::Event::KeyReleased {
         key: Key::Named(Named::Space),
@@ -7447,6 +8048,9 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
             state.path_editing = false;
             return Task::none();
         }
+        if state.editor_ui.smart_paste.is_some() {
+            return update(state, Message::SmartPasteDismiss);
+        }
         if state.editor_ui.adjust_popup_tab.is_some() {
             return update(state, Message::EditorCloseAdjustPopup { apply: false });
         }
@@ -7523,6 +8127,41 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
 
     if matches!(key, Key::Named(Named::F5)) && state.snapshot.meta.workspace == Workspace::Browser {
         return dispatch_to_core(state.core.clone(), Command::Refresh);
+    }
+
+    // Editor workspace shortcuts are resolved from the canonical Photoshop-aligned
+    // shortcut table in `photon_editor::shortcuts` so Editor bindings never conflict
+    // with Browser/Viewer shortcuts (e.g. Ctrl+1 = 100% zoom, Ctrl+Shift+N = New Layer,
+    // Ctrl+J = Duplicate Layer, Ctrl+E = Merge Down, L = Lasso, Ctrl+Shift+X = Liquify).
+    if state.snapshot.meta.workspace == Workspace::Editor
+        && state.editor_ui.renaming_layer_id.is_none()
+    {
+        if matches!(key, Key::Named(Named::Enter)) {
+            if state.editor_ui.smart_paste.is_some() {
+                return update(state, Message::SmartPasteApply);
+            }
+            if state.editor_ui.tool == EditorTool::Transform {
+                return update(state, Message::EditorTransformCommit);
+            }
+            if state.editor_ui.tool == EditorTool::Gradient
+                && state.editor_ui.gradient_draft.is_some()
+            {
+                return update(state, Message::EditorApplyGradientDraft);
+            }
+        }
+        let shortcut_key = match key.as_ref() {
+            Key::Character(s) => s.chars().next().map(ShortcutKey::from_char),
+            Key::Named(Named::Delete) => Some(ShortcutKey::Named(ShortcutNamedKey::Delete)),
+            Key::Named(Named::Backspace) => Some(ShortcutKey::Named(ShortcutNamedKey::Backspace)),
+            Key::Named(Named::Space) => Some(ShortcutKey::Named(ShortcutNamedKey::Space)),
+            _ => None,
+        };
+        if let Some(sk) = shortcut_key
+            && let Some(action) =
+                resolve_editor_shortcut(modifiers.control(), modifiers.shift(), modifiers.alt(), sk)
+        {
+            return dispatch_editor_shortcut(state, action);
+        }
     }
 
     if modifiers.contains(Modifiers::CTRL) {
@@ -7769,120 +8408,7 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
     }
 
     match state.snapshot.meta.workspace {
-        Workspace::Editor if state.editor_ui.renaming_layer_id.is_none() => match key.as_ref() {
-            Key::Character("v") | Key::Character("V") => {
-                update(state, Message::EditorSelectTool(EditorTool::Pointer))
-            }
-            Key::Character("h") | Key::Character("H") => {
-                update(state, Message::EditorSelectTool(EditorTool::Hand))
-            }
-            Key::Character("z") | Key::Character("Z") => {
-                update(state, Message::EditorSelectTool(EditorTool::Zoom))
-            }
-            Key::Character("m") | Key::Character("M") => update(
-                state,
-                Message::EditorSelectTool(state.editor_ui.marquee_subtool),
-            ),
-            Key::Character("w") | Key::Character("W") => update(
-                state,
-                Message::EditorSelectTool(state.editor_ui.smart_subtool),
-            ),
-            Key::Character("q") | Key::Character("Q") => {
-                dispatch_to_core(state.core.clone(), Command::EditorSelectToggleQuickMask)
-            }
-            Key::Named(Named::Delete)
-                if state
-                    .snapshot
-                    .meta
-                    .editor
-                    .as_ref()
-                    .is_some_and(|e| e.selection.has_selection) =>
-            {
-                dispatch_to_core(state.core.clone(), Command::EditorSelectionClearPixels)
-            }
-            Key::Character("b") | Key::Character("B") => {
-                update(state, Message::EditorSelectTool(EditorTool::Brush))
-            }
-            Key::Character("e") | Key::Character("E") => {
-                update(state, Message::EditorSelectTool(EditorTool::Eraser))
-            }
-            Key::Character("l") | Key::Character("L") => {
-                update(state, Message::EditorSelectTool(EditorTool::Liquify))
-            }
-            Key::Character("i") | Key::Character("I") => {
-                update(state, Message::EditorSelectTool(EditorTool::Eyedropper))
-            }
-            Key::Character("c") | Key::Character("C") => {
-                update(state, Message::EditorSelectTool(EditorTool::Crop))
-            }
-            Key::Character("u") | Key::Character("U") => update(
-                state,
-                Message::EditorSelectTool(state.editor_ui.shape_subtool),
-            ),
-            Key::Character("p") | Key::Character("P") => {
-                update(state, Message::EditorSelectTool(EditorTool::BezierPen))
-            }
-            Key::Character("f") | Key::Character("F") => {
-                update(state, Message::EditorSelectTool(EditorTool::PaintBucket))
-            }
-            Key::Character("g") | Key::Character("G") => {
-                update(state, Message::EditorSelectTool(EditorTool::Gradient))
-            }
-            Key::Character("j") | Key::Character("J") => {
-                update(state, Message::EditorSelectTool(EditorTool::HealingBrush))
-            }
-            Key::Character("x") | Key::Character("X") => update(state, Message::EditorSwapColors),
-            Key::Character("0") => update(state, Message::Canvas(CanvasEvent::ResetFit)),
-            Key::Character("1") => update(state, Message::EditorZoomActual),
-            Key::Character("+") | Key::Character("=") => update(state, Message::ZoomStep(1.25)),
-            Key::Character("-") => update(state, Message::ZoomStep(0.8)),
-            Key::Named(Named::Enter) if state.editor_ui.tool == EditorTool::Transform => {
-                update(state, Message::EditorTransformCommit)
-            }
-            Key::Named(Named::Enter)
-                if state.editor_ui.tool == EditorTool::Gradient
-                    && state.editor_ui.gradient_draft.is_some() =>
-            {
-                update(state, Message::EditorApplyGradientDraft)
-            }
-            Key::Character("[") => {
-                if state.editor_ui.tool == EditorTool::HealingBrush {
-                    update(
-                        state,
-                        Message::EditorSetHealingRadius(
-                            (state.editor_ui.healing_radius - 2.0).max(1.0),
-                        ),
-                    )
-                } else {
-                    update(
-                        state,
-                        Message::EditorSetBrushRadius(
-                            (state.editor_ui.brush_radius - 2.0).max(1.0),
-                        ),
-                    )
-                }
-            }
-            Key::Character("]") => {
-                if state.editor_ui.tool == EditorTool::HealingBrush {
-                    update(
-                        state,
-                        Message::EditorSetHealingRadius(
-                            (state.editor_ui.healing_radius + 2.0).min(200.0),
-                        ),
-                    )
-                } else {
-                    update(
-                        state,
-                        Message::EditorSetBrushRadius(
-                            (state.editor_ui.brush_radius + 2.0).min(200.0),
-                        ),
-                    )
-                }
-            }
-            // Space is handled by photon-canvas for temporary Hand pan while held.
-            Key::Named(Named::Space) => Task::none(),
-            _ => Task::none(),
-        },
+        Workspace::Editor => Task::none(),
         Workspace::Viewer => match key.as_ref() {
             Key::Named(Named::ArrowLeft) => {
                 if state.viewer_mode == ViewerViewMode::Double {
@@ -8009,6 +8535,10 @@ fn handle_key_event(state: &mut PhotonGui, ev: keyboard::Event) -> Task<Message>
 }
 
 pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
+    photon_ui::set_active_typography(
+        state.snapshot.meta.layout.font_scale(),
+        iced_font_for(state.snapshot.meta.layout.display_font),
+    );
     let role = state
         .windows
         .get(&window_id)
@@ -8300,6 +8830,27 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
                     *y,
                     state.window_size,
                     220.0,
+                    est_h,
+                    menu_el,
+                    Message::CloseContextMenu,
+                )
+            } else {
+                with_menu
+            }
+        }
+        Some(ActiveContextMenu::EditorTab { x, y, tab_id }) => {
+            if let Some((raw_est_h, raw_menu)) =
+                build_editor_tab_context_menu(state.editor_view_state(), *tab_id)
+            {
+                let (menu_el, est_h) =
+                    clamp_menu_height(raw_menu.map(Message::Editor), raw_est_h, max_menu_h);
+                with_context_menu(
+                    with_menu,
+                    true,
+                    *x,
+                    *y,
+                    state.window_size,
+                    210.0,
                     est_h,
                     menu_el,
                     Message::CloseContextMenu,
@@ -9011,6 +9562,13 @@ fn build_active_menu(
                     .icon(Icon::Plus)
                     .shortcut("Ctrl+N"),
                 ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-new-from-clipboard"),
+                        Message::EditorNewFromClipboard,
+                    )
+                    .icon(Icon::Paste),
+                ),
                 MenuEntry::Separator,
                 MenuEntry::Item(
                     MenuItem::new(
@@ -9085,7 +9643,7 @@ fn build_active_menu(
                             Message::Dispatch(Command::EditorRedo),
                         )
                         .icon(Icon::Redo)
-                        .shortcut("Ctrl+Y")
+                        .shortcut("Ctrl+Shift+Z")
                         .enabled(ed.is_some_and(|d| d.can_redo)),
                     ),
                     MenuEntry::Separator,
@@ -9132,6 +9690,7 @@ fn build_active_menu(
                             },
                         )
                         .icon(Icon::Paste)
+                        .shortcut("Ctrl+Shift+V")
                         .enabled(has_sel),
                     ),
                     MenuEntry::Separator,
@@ -9159,6 +9718,15 @@ fn build_active_menu(
         (Workspace::Editor, ActiveMenu::EditorImage) => (
             Some(96.0),
             vec![
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-duplicate-image"),
+                        Message::EditorDuplicateDocument(None),
+                    )
+                    .icon(Icon::Duplicate)
+                    .enabled(ed.is_some()),
+                ),
+                MenuEntry::Separator,
                 MenuEntry::Item(
                     MenuItem::new(
                         tr(lang, "action-rotate-left"),
@@ -9236,6 +9804,86 @@ fn build_active_menu(
                 ),
             ],
         ),
+        (Workspace::Editor, ActiveMenu::EditorLayer) => {
+            let active_id = ed.map(|e| e.active_layer_id).unwrap_or(0);
+            let layer_count = ed.map(|e| e.layers.len()).unwrap_or(0);
+            let active_idx = ed
+                .and_then(|e| e.layers.iter().position(|l| l.id == e.active_layer_id))
+                .unwrap_or(0);
+            (
+                Some(148.0),
+                vec![
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-layer-add"),
+                            Message::Dispatch(Command::EditorLayerAdd {
+                                name: format!("Layer {}", layer_count + 1),
+                            }),
+                        )
+                        .icon(Icon::Plus)
+                        .shortcut("Ctrl+Shift+N")
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-layer-duplicate"),
+                            Message::Dispatch(Command::EditorLayerDuplicate { id: active_id }),
+                        )
+                        .icon(Icon::Duplicate)
+                        .shortcut("Ctrl+J")
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Separator,
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-layer-merge-down"),
+                            Message::Dispatch(Command::EditorLayerMergeDown { id: active_id }),
+                        )
+                        .shortcut("Ctrl+E")
+                        .enabled(ed.is_some() && active_idx > 0),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-layer-flatten"),
+                            Message::Dispatch(Command::EditorLayerFlatten),
+                        )
+                        .enabled(ed.is_some() && layer_count > 1),
+                    ),
+                    MenuEntry::Separator,
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-mask-add-reveal"),
+                            Message::Dispatch(Command::EditorLayerMaskAdd {
+                                id: active_id,
+                                reveal_all: true,
+                            }),
+                        )
+                        .icon(Icon::Mask)
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-mask-add-hide"),
+                            Message::Dispatch(Command::EditorLayerMaskAdd {
+                                id: active_id,
+                                reveal_all: false,
+                            }),
+                        )
+                        .icon(Icon::Mask)
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Separator,
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-layer-delete"),
+                            Message::Dispatch(Command::EditorLayerDelete { id: active_id }),
+                        )
+                        .icon(Icon::Trash)
+                        .enabled(ed.is_some() && layer_count > 1),
+                    ),
+                ],
+            )
+        }
         (Workspace::Editor, ActiveMenu::EditorFilter) => (
             Some(208.0),
             vec![
@@ -9430,17 +10078,17 @@ fn build_active_menu(
             )
         }
         (Workspace::Editor, ActiveMenu::EditorView) => (
-            Some(316.0),
+            Some(360.0),
             vec![
                 MenuEntry::Item(
                     MenuItem::new(tr(lang, "action-zoom-in"), Message::ZoomStep(1.25))
                         .icon(Icon::ZoomIn)
-                        .shortcut("+"),
+                        .shortcut("Ctrl++"),
                 ),
                 MenuEntry::Item(
                     MenuItem::new(tr(lang, "action-zoom-out"), Message::ZoomStep(0.8))
                         .icon(Icon::ZoomOut)
-                        .shortcut("-"),
+                        .shortcut("Ctrl+-"),
                 ),
                 MenuEntry::Item(
                     MenuItem::new(
@@ -9448,11 +10096,11 @@ fn build_active_menu(
                         Message::Canvas(CanvasEvent::ResetFit),
                     )
                     .icon(Icon::Fit)
-                    .shortcut("0"),
+                    .shortcut("Ctrl+0"),
                 ),
                 MenuEntry::Item(
                     MenuItem::new(tr(lang, "action-actual-size"), Message::EditorZoomActual)
-                        .shortcut("1"),
+                        .shortcut("Ctrl+1"),
                 ),
                 MenuEntry::Separator,
                 MenuEntry::Header(tr(lang, "settings-canvas-aa")),
@@ -9961,7 +10609,7 @@ fn build_settings_general_tab(state: &PhotonGui) -> Element<'_, Message> {
                 font_buttons,
                 text(tr(lang, "settings-display-font-sample"))
                     .font(iced_font_for(display_font))
-                    .size(preview_px),
+                    .unscaled_size(preview_px),
                 text(tr(lang, "settings-display-font-hint"))
                     .size(11)
                     .style(|theme| text::Style {
@@ -11862,12 +12510,54 @@ fn build_in_app_dialog<'a>(
             .spacing(8)
             .align_y(Alignment::Center);
 
+            let clipboard_size_label = match state.new_doc_clipboard_dims {
+                Some((cw, ch)) => {
+                    let args = BTreeMap::from([
+                        ("width".to_owned(), cw.to_string()),
+                        ("height".to_owned(), ch.to_string()),
+                    ]);
+                    photon_i18n::tr_args(lang, "action-size-from-clipboard-dims", &args)
+                }
+                None => tr(lang, "action-size-from-clipboard"),
+            };
+            let has_cb_img =
+                state.new_doc_clipboard_dims.is_some() || state.snapshot.meta.has_pixel_clipboard;
+            let clipboard_row = column![
+                row![
+                    button::labeled(
+                        clipboard_size_label,
+                        Some(Icon::Paste),
+                        ButtonVariant::Secondary,
+                        state
+                            .new_doc_clipboard_dims
+                            .is_some()
+                            .then_some(Message::NewDocUseClipboardSize),
+                    )
+                    .width(Fill),
+                    button::labeled(
+                        tr(lang, "action-create-from-clipboard"),
+                        Some(Icon::Plus),
+                        ButtonVariant::Secondary,
+                        has_cb_img.then_some(Message::NewDocCreateFromClipboard),
+                    ),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+                checkbox(state.new_doc_create_from_clipboard)
+                    .label(tr(lang, "action-create-from-clipboard"))
+                    .on_toggle_maybe(has_cb_img.then_some(Message::NewDocToggleCreateFromClipboard))
+                    .size(15)
+                    .text_size(12),
+            ]
+            .spacing(6);
+
             let mut body_col = column![
                 preset_row,
+                clipboard_row,
                 dims.view(lang, Message::NewDocDimAction),
                 column![text(tr(lang, "label-background")).size(12), bg_row].spacing(4),
             ]
-            .spacing(12);
+            .spacing(10);
 
             if let Some(err) = error {
                 body_col = body_col.push(text(err.clone()).size(12).style(|theme| {
@@ -12908,6 +13598,7 @@ fn map_editor_message(msg: EditorMessage) -> Message {
                 EditorMenuKind::File => ActiveMenu::EditorFile,
                 EditorMenuKind::Edit => ActiveMenu::EditorEdit,
                 EditorMenuKind::Image => ActiveMenu::EditorImage,
+                EditorMenuKind::Layer => ActiveMenu::EditorLayer,
                 EditorMenuKind::Filter => ActiveMenu::EditorFilter,
                 EditorMenuKind::Plugins => ActiveMenu::EditorPlugins,
                 EditorMenuKind::Select => ActiveMenu::EditorSelect,
@@ -12924,6 +13615,7 @@ fn map_editor_message(msg: EditorMessage) -> Message {
                 EditorMenuKind::File => ActiveMenu::EditorFile,
                 EditorMenuKind::Edit => ActiveMenu::EditorEdit,
                 EditorMenuKind::Image => ActiveMenu::EditorImage,
+                EditorMenuKind::Layer => ActiveMenu::EditorLayer,
                 EditorMenuKind::Filter => ActiveMenu::EditorFilter,
                 EditorMenuKind::Plugins => ActiveMenu::EditorPlugins,
                 EditorMenuKind::Select => ActiveMenu::EditorSelect,
@@ -12955,7 +13647,17 @@ fn map_editor_message(msg: EditorMessage) -> Message {
         EditorMessage::OpenCanvasSizeDialog => Message::OpenCanvasSizeDialog,
         EditorMessage::SwitchTab(id) => Message::EditorSwitchTab(id),
         EditorMessage::RequestCloseTab(id) => Message::EditorRequestCloseTab(id),
+        EditorMessage::RequestCloseTabs(ids) => Message::EditorRequestCloseTabs(ids),
+        EditorMessage::OpenTabContextMenu(id) => Message::EditorOpenTabContextMenu(id),
+        EditorMessage::DuplicateDocument(tab_id) => Message::EditorDuplicateDocument(tab_id),
         EditorMessage::OpenNewTabDialog => Message::EditorOpenNewTabDialog,
+        EditorMessage::SmartPasteSetMode(m) => Message::SmartPasteSetMode(m),
+        EditorMessage::SmartPasteSetWidth(w) => Message::SmartPasteSetWidth(w),
+        EditorMessage::SmartPasteSetHeight(h) => Message::SmartPasteSetHeight(h),
+        EditorMessage::SmartPasteSetOffsetX(x) => Message::SmartPasteSetOffsetX(x),
+        EditorMessage::SmartPasteSetOffsetY(y) => Message::SmartPasteSetOffsetY(y),
+        EditorMessage::SmartPasteApply => Message::SmartPasteApply,
+        EditorMessage::SmartPasteDismiss => Message::SmartPasteDismiss,
         EditorMessage::OpenColorPicker(t) => Message::OpenColorPicker(t),
         EditorMessage::ColorPickerSetRgb(r, g, b) => Message::ColorPickerSetRgb(r, g, b),
         EditorMessage::ColorPickerHexChanged(v) => Message::ColorPickerHexChanged(v),
@@ -13215,6 +13917,7 @@ impl PhotonGui {
             Some(ActiveMenu::EditorFile) => Some(EditorMenuKind::File),
             Some(ActiveMenu::EditorEdit) => Some(EditorMenuKind::Edit),
             Some(ActiveMenu::EditorImage) => Some(EditorMenuKind::Image),
+            Some(ActiveMenu::EditorLayer) => Some(EditorMenuKind::Layer),
             Some(ActiveMenu::EditorFilter) => Some(EditorMenuKind::Filter),
             Some(ActiveMenu::EditorPlugins) => Some(EditorMenuKind::Plugins),
             Some(ActiveMenu::EditorSelect) => Some(EditorMenuKind::Select),
@@ -13471,9 +14174,9 @@ fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) -> Task<Mes
         "browser.menu.file" => update(state, Message::ToggleMenu(ActiveMenu::BrowserFile)),
         "browser.menu.file.open_viewer" => update(state, Message::BrowserOpenSelectedInViewer),
         "browser.menu.edit" => update(state, Message::ToggleMenu(ActiveMenu::BrowserEdit)),
-        "browser.menu.file.edit"
-        | "browser.menu.edit.edit_in_editor"
-        | "browser.menu.tools.edit" => update(state, Message::BrowserOpenSelectedInEditor),
+        "browser.menu.edit.edit_in_editor" | "browser.menu.tools.edit" => {
+            update(state, Message::BrowserOpenSelectedInEditor)
+        }
         "browser.menu.edit.copy_to" => update(
             state,
             Message::BrowserCopyTo(state.snapshot.meta.selection.clone()),
@@ -13715,6 +14418,199 @@ fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) -> Task<Mes
         }
         "editor.adjust_popup.apply" => {
             update(state, Message::EditorCloseAdjustPopup { apply: true })
+        }
+        "editor.menu.file" => update(state, Message::ToggleMenu(ActiveMenu::EditorFile)),
+        "editor.menu.file.new" => update(state, Message::OpenNewDocumentDialog),
+        "editor.menu.file.new_from_clipboard" => update(state, Message::EditorNewFromClipboard),
+        "editor.menu.file.save" => dispatch_to_core(state.core.clone(), Command::EditorSave),
+        "editor.menu.file.save_as" => update(state, Message::PickSaveAsDialog),
+        "editor.menu.file.export" => update(state, Message::OpenExportDialog),
+        "editor.menu.file.close" => {
+            update(state, Message::RequestEditorLeave { close_editor: true })
+        }
+        "editor.menu.edit" => update(state, Message::ToggleMenu(ActiveMenu::EditorEdit)),
+        "editor.menu.edit.undo" => dispatch_to_core(state.core.clone(), Command::EditorUndo),
+        "editor.menu.edit.redo" => dispatch_to_core(state.core.clone(), Command::EditorRedo),
+        "editor.menu.edit.cut" => update(state, Message::EditorCutPixels),
+        "editor.menu.edit.copy" => update(state, Message::EditorCopyPixels { merged: false }),
+        "editor.menu.edit.copy_merged" => update(state, Message::EditorCopyPixels { merged: true }),
+        "editor.menu.edit.paste" => update(
+            state,
+            Message::EditorPastePixels {
+                into_selection: false,
+            },
+        ),
+        "editor.menu.edit.paste_into_selection" => update(
+            state,
+            Message::EditorPastePixels {
+                into_selection: true,
+            },
+        ),
+        "editor.menu.edit.transform" => {
+            update(state, Message::EditorSelectTool(EditorTool::Transform))
+        }
+        "editor.menu.image" => update(state, Message::ToggleMenu(ActiveMenu::EditorImage)),
+        "editor.menu.image.duplicate" => update(state, Message::EditorDuplicateDocument(None)),
+        "editor.menu.image.rotate_left" => dispatch_to_core(
+            state.core.clone(),
+            Command::EditorRotate {
+                degrees: -90,
+                target: state.editor_ui.apply_target,
+            },
+        ),
+        "editor.menu.image.rotate_right" => dispatch_to_core(
+            state.core.clone(),
+            Command::EditorRotate {
+                degrees: 90,
+                target: state.editor_ui.apply_target,
+            },
+        ),
+        "editor.menu.image.flip_h" => dispatch_to_core(
+            state.core.clone(),
+            Command::EditorFlip {
+                axis: FlipAxis::Horizontal,
+                target: state.editor_ui.apply_target,
+            },
+        ),
+        "editor.menu.image.flip_v" => dispatch_to_core(
+            state.core.clone(),
+            Command::EditorFlip {
+                axis: FlipAxis::Vertical,
+                target: state.editor_ui.apply_target,
+            },
+        ),
+        "editor.menu.image.crop" => update(state, Message::ToggleCropMode),
+        "editor.menu.image.resize" => update(state, Message::OpenResizeDialog),
+        "editor.menu.image.canvas_size" => update(state, Message::OpenCanvasSizeDialog),
+        "editor.menu.layer" => update(state, Message::ToggleMenu(ActiveMenu::EditorLayer)),
+        "editor.menu.layer.new" => {
+            let next_idx = state
+                .snapshot
+                .meta
+                .editor
+                .as_ref()
+                .map(|e| e.layers.len() + 1)
+                .unwrap_or(1);
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorLayerAdd {
+                    name: format!("Layer {next_idx}"),
+                },
+            )
+        }
+        "editor.menu.layer.duplicate" => state
+            .snapshot
+            .meta
+            .editor
+            .as_ref()
+            .map(|e| {
+                dispatch_to_core(
+                    state.core.clone(),
+                    Command::EditorLayerDuplicate {
+                        id: e.active_layer_id,
+                    },
+                )
+            })
+            .unwrap_or_else(Task::none),
+        "editor.menu.layer.merge_down" => state
+            .snapshot
+            .meta
+            .editor
+            .as_ref()
+            .map(|e| {
+                dispatch_to_core(
+                    state.core.clone(),
+                    Command::EditorLayerMergeDown {
+                        id: e.active_layer_id,
+                    },
+                )
+            })
+            .unwrap_or_else(Task::none),
+        "editor.menu.layer.delete" => state
+            .snapshot
+            .meta
+            .editor
+            .as_ref()
+            .map(|e| {
+                dispatch_to_core(
+                    state.core.clone(),
+                    Command::EditorLayerDelete {
+                        id: e.active_layer_id,
+                    },
+                )
+            })
+            .unwrap_or_else(Task::none),
+        "editor.menu.layer.flatten" => {
+            dispatch_to_core(state.core.clone(), Command::EditorLayerFlatten)
+        }
+        "editor.menu.view" => update(state, Message::ToggleMenu(ActiveMenu::EditorView)),
+        "editor.menu.view.zoom_in" => update(state, Message::ZoomStep(1.25)),
+        "editor.menu.view.zoom_out" => update(state, Message::ZoomStep(0.8)),
+        "editor.menu.view.fit" => update(state, Message::Canvas(CanvasEvent::ResetFit)),
+        "editor.menu.view.actual_size" => update(state, Message::EditorZoomActual),
+        "editor.tab.context_menu" => {
+            if let Some(tab_id) = state.snapshot.meta.active_editor_tab_id {
+                state.active_menu = None;
+                state.context_menu = Some(ActiveContextMenu::EditorTab {
+                    x: 120.0,
+                    y: 72.0,
+                    tab_id,
+                });
+                sync_ui_tree_task(state)
+            } else {
+                Task::none()
+            }
+        }
+        "editor.tab.close_others" => {
+            if let Some(tab_id) = state.snapshot.meta.active_editor_tab_id {
+                let ids = photon_editor::tabs::target_tab_ids(
+                    &state.snapshot.meta.editor_tabs,
+                    TabCloseScope::Others(tab_id),
+                );
+                update(state, Message::EditorRequestCloseTabs(ids))
+            } else {
+                Task::none()
+            }
+        }
+        "editor.tab.close_left" => {
+            if let Some(tab_id) = state.snapshot.meta.active_editor_tab_id {
+                let ids = photon_editor::tabs::target_tab_ids(
+                    &state.snapshot.meta.editor_tabs,
+                    TabCloseScope::ToLeft(tab_id),
+                );
+                update(state, Message::EditorRequestCloseTabs(ids))
+            } else {
+                Task::none()
+            }
+        }
+        "editor.tab.close_right" => {
+            if let Some(tab_id) = state.snapshot.meta.active_editor_tab_id {
+                let ids = photon_editor::tabs::target_tab_ids(
+                    &state.snapshot.meta.editor_tabs,
+                    TabCloseScope::ToRight(tab_id),
+                );
+                update(state, Message::EditorRequestCloseTabs(ids))
+            } else {
+                Task::none()
+            }
+        }
+        "editor.smart_paste.keep_original" => update(
+            state,
+            Message::SmartPasteSetMode(SmartPasteFitMode::KeepOriginal),
+        ),
+        "editor.smart_paste.fit" => update(
+            state,
+            Message::SmartPasteSetMode(SmartPasteFitMode::FitToCanvas),
+        ),
+        "editor.smart_paste.stretch" => update(
+            state,
+            Message::SmartPasteSetMode(SmartPasteFitMode::StretchFill),
+        ),
+        "editor.smart_paste.apply" => update(state, Message::SmartPasteApply),
+        "editor.smart_paste.dismiss" => update(state, Message::SmartPasteDismiss),
+        "dialog.new_document.size_from_clipboard" => update(state, Message::NewDocUseClipboardSize),
+        "dialog.new_document.create_from_clipboard" => {
+            update(state, Message::NewDocCreateFromClipboard)
         }
         "editor.menu.filter" => update(state, Message::ToggleMenu(ActiveMenu::EditorFilter)),
         "editor.menu.filter.denoise" => update(state, Message::OpenDenoiseDialog),
@@ -16438,6 +17334,14 @@ fn write_png_bytes_to_clipboard(png_bytes: &[u8]) -> bool {
         }
     }
     false
+}
+
+fn probe_png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
 }
 
 fn read_clipboard_png_bytes() -> Option<Vec<u8>> {

@@ -832,12 +832,18 @@ impl Core {
             }
             Command::SetWorkspace { workspace } => match workspace {
                 Workspace::Browser => {
+                    if self.workspace == Workspace::Editor {
+                        self.sync_browser_from_active_editor_doc();
+                    }
                     self.workspace = Workspace::Browser;
                     self.editor_unsupported = None;
                     self.sync_session_prefs();
                     Ok((None, None))
                 }
                 Workspace::Viewer => {
+                    if self.workspace == Workspace::Editor {
+                        self.sync_viewer_from_active_editor_doc();
+                    }
                     if self.viewer_images.is_empty() {
                         return Err(ProtocolError::line(
                             "no_images",
@@ -885,7 +891,9 @@ impl Core {
                 self.workspace = match self.workspace {
                     Workspace::Editor => {
                         self.editor_unsupported = None;
+                        self.sync_viewer_from_active_editor_doc();
                         if self.viewer_images.is_empty() {
+                            self.sync_browser_from_active_editor_doc();
                             Workspace::Browser
                         } else {
                             Workspace::Viewer
@@ -928,6 +936,35 @@ impl Core {
                     )),
                     None,
                 ))
+            }
+            Command::SetUiScale { scale_pct } => {
+                let clamped = (*scale_pct).clamp(
+                    photon_protocol::UI_SCALE_PCT_MIN,
+                    photon_protocol::UI_SCALE_PCT_MAX,
+                );
+                self.config.layout.ui_scale_pct = clamped;
+                self.ui_state.layout.ui_scale_pct = clamped;
+                self.ui_state_dirty = true;
+                self.persist_config();
+                Ok((None, None))
+            }
+            Command::SetFontScale { scale_pct } => {
+                let clamped = (*scale_pct).clamp(
+                    photon_protocol::FONT_SCALE_PCT_MIN,
+                    photon_protocol::FONT_SCALE_PCT_MAX,
+                );
+                self.config.layout.font_scale_pct = clamped;
+                self.ui_state.layout.font_scale_pct = clamped;
+                self.ui_state_dirty = true;
+                self.persist_config();
+                Ok((None, None))
+            }
+            Command::SetDisplayFont { font } => {
+                self.config.layout.display_font = *font;
+                self.ui_state.layout.display_font = *font;
+                self.ui_state_dirty = true;
+                self.persist_config();
+                Ok((None, None))
             }
             Command::SetLayout { layout } => {
                 let prev_sort = (
@@ -2501,6 +2538,70 @@ impl Core {
             .viewer_index
             .and_then(|idx| self.viewer_images.get(idx))
             .and_then(|p| translate::load_saved_translation(Path::new(p)));
+    }
+
+    fn active_editor_disk_path(&self) -> Option<PathBuf> {
+        if let Some(doc) = &self.editor {
+            if !doc.save_path.as_os_str().is_empty() && doc.save_path.is_file() {
+                return Some(doc.save_path.clone());
+            }
+            if !doc.source_path.as_os_str().is_empty() && doc.source_path.is_file() {
+                return Some(doc.source_path.clone());
+            }
+        }
+        if let Some(unsup) = &self.editor_unsupported {
+            let p = Path::new(&unsup.path);
+            if p.is_file() {
+                return Some(p.to_path_buf());
+            }
+        }
+        None
+    }
+
+    pub(crate) fn sync_viewer_from_active_editor_doc(&mut self) {
+        let Some(path) = self.active_editor_disk_path() else {
+            return;
+        };
+        let path_str = path.to_string_lossy().into_owned();
+        if let Some(idx) = self.viewer_images.iter().position(|p| p == &path_str) {
+            self.viewer_index = Some(idx);
+            self.sync_viewer_saved_translation();
+            return;
+        }
+        if self.viewer_archive.is_some() {
+            return;
+        }
+        if self.viewer_images.is_empty()
+            && self.current_folder.is_none()
+            && let Some(parent) = path.parent()
+            && parent.is_dir()
+        {
+            let _ = self.open_folder(parent);
+        }
+        if let Some(idx) = self.viewer_images.iter().position(|p| p == &path_str) {
+            self.viewer_index = Some(idx);
+        } else {
+            self.viewer_images = vec![path_str];
+            self.viewer_index = Some(0);
+        }
+        self.sync_viewer_saved_translation();
+    }
+
+    pub(crate) fn sync_browser_from_active_editor_doc(&mut self) {
+        let Some(path) = self.active_editor_disk_path() else {
+            return;
+        };
+        let path_str = path.to_string_lossy().into_owned();
+        if self.current_folder.is_none()
+            && let Some(parent) = path.parent()
+            && parent.is_dir()
+        {
+            let _ = self.open_folder(parent);
+        }
+        if self.entries.iter().any(|e| e.path == path_str) {
+            self.selection_info = build_selection_info(&path);
+            self.selection = vec![path_str];
+        }
     }
 
     pub(crate) fn refresh_after_file_op(&mut self) {

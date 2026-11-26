@@ -25,6 +25,7 @@ pub fn build_ui_tree(
     snapshot: &UiStateSnapshot,
     window_count: usize,
     window_size: iced::Size,
+    scale_factor: f32,
     zoom: f32,
     pan_x: f32,
     pan_y: f32,
@@ -208,6 +209,8 @@ pub fn build_ui_tree(
                     .map(|b| format!("{}/{}", b.done, b.total)),
             });
             let has_images = snapshot.entries.iter().any(|e| e.is_image);
+            let has_selection = !snapshot.meta.selection.is_empty();
+            let single_selected = snapshot.meta.selection.len() == 1;
             let has_selected_image = snapshot
                 .entries
                 .iter()
@@ -223,6 +226,16 @@ pub fn build_ui_tree(
                 value: None,
             });
             widgets.push(SemanticWidgetNode {
+                id: "browser.menu.file.open_viewer".to_owned(),
+                role: "menu_item".to_owned(),
+                label: tr(lang, "menu-file-open-viewer"),
+                workspace: ws,
+                enabled: has_selected_image,
+                visible: true,
+                bounds: None,
+                value: None,
+            });
+            widgets.push(SemanticWidgetNode {
                 id: "browser.menu.file.edit".to_owned(),
                 role: "menu_item".to_owned(),
                 label: tr(lang, "menu-file-edit"),
@@ -232,6 +245,58 @@ pub fn build_ui_tree(
                 bounds: None,
                 value: None,
             });
+            widgets.push(SemanticWidgetNode {
+                id: "browser.menu.edit".to_owned(),
+                role: "menu_button".to_owned(),
+                label: tr(lang, "menu-edit"),
+                workspace: ws,
+                enabled: true,
+                visible: true,
+                bounds: None,
+                value: None,
+            });
+            for (id, label_key, enabled) in [
+                (
+                    "browser.menu.edit.edit_in_editor",
+                    "menu-file-edit",
+                    has_selected_image,
+                ),
+                ("browser.menu.edit.copy_to", "action-copy-to", has_selection),
+                ("browser.menu.edit.move_to", "action-move-to", has_selection),
+                ("browser.menu.edit.rename", "action-rename", single_selected),
+                (
+                    "browser.menu.edit.duplicate",
+                    "action-duplicate",
+                    has_selection,
+                ),
+                ("browser.menu.edit.delete", "action-trash", has_selection),
+                (
+                    "browser.menu.edit.copy_path",
+                    "action-copy-path",
+                    single_selected,
+                ),
+                (
+                    "browser.menu.edit.select_all",
+                    "action-select-all",
+                    !snapshot.entries.is_empty(),
+                ),
+                (
+                    "browser.menu.edit.clear_selection",
+                    "action-clear-selection",
+                    has_selection,
+                ),
+            ] {
+                widgets.push(SemanticWidgetNode {
+                    id: id.to_owned(),
+                    role: "menu_item".to_owned(),
+                    label: tr(lang, label_key),
+                    workspace: ws,
+                    enabled,
+                    visible: true,
+                    bounds: None,
+                    value: None,
+                });
+            }
             widgets.push(SemanticWidgetNode {
                 id: "browser.menu.view".to_owned(),
                 role: "menu_button".to_owned(),
@@ -1748,6 +1813,39 @@ pub fn build_ui_tree(
         }
     }
 
+    if settings_open && settings_tab == "general" {
+        widgets.push(SemanticWidgetNode {
+            id: "settings.general.ui_scale".to_owned(),
+            role: "slider".to_owned(),
+            label: tr(lang, "settings-ui-scale"),
+            workspace: ws,
+            enabled: true,
+            visible: true,
+            bounds: None,
+            value: Some(format!("{}%", snapshot.meta.layout.ui_scale_pct)),
+        });
+        widgets.push(SemanticWidgetNode {
+            id: "settings.general.font_scale".to_owned(),
+            role: "slider".to_owned(),
+            label: tr(lang, "settings-font-scale"),
+            workspace: ws,
+            enabled: true,
+            visible: true,
+            bounds: None,
+            value: Some(format!("{}%", snapshot.meta.layout.font_scale_pct)),
+        });
+        widgets.push(SemanticWidgetNode {
+            id: "settings.general.display_font".to_owned(),
+            role: "select".to_owned(),
+            label: tr(lang, "settings-display-font"),
+            workspace: ws,
+            enabled: true,
+            visible: true,
+            bounds: None,
+            value: Some(snapshot.meta.layout.display_font.as_str().to_owned()),
+        });
+    }
+
     if settings_open && settings_tab == "plugins" {
         widgets.push(SemanticWidgetNode {
             id: "settings.plugins.device".to_owned(),
@@ -1784,7 +1882,7 @@ pub fn build_ui_tree(
             window_count,
             window_width: window_size.width,
             window_height: window_size.height,
-            scale_factor: 1.0,
+            scale_factor,
             zoom,
             pan_x,
             pan_y,

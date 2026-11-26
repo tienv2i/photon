@@ -1023,3 +1023,19 @@ action-back-to-browser = Quay lại Trình duyệt
 tooltip-drag-move = Kéo để di chuyển
 action-translate-next = Tiếp theo
 action-translate-review = Xem lại
+
+# Phase 1: Trình đơn Chỉnh sửa & Tỉ lệ giao diện / Cỡ chữ / Phông chữ hiển thị
+action-duplicate = Nhân bản
+action-clear-selection = Bỏ chọn tất cả
+settings-section-scaling-typography = Tỉ lệ giao diện & Phông chữ
+settings-ui-scale = Tỉ lệ giao diện (UI Scale)
+settings-ui-scale-hint = Thu phóng toàn bộ giao diện (nút bấm, biểu tượng, bảng, khoảng cách và chữ), phối hợp chuẩn với tỉ lệ phân số của hệ điều hành / Wayland.
+settings-font-scale = Tỉ lệ cỡ chữ (Font Scale)
+settings-font-scale-hint = Thu phóng kích thước chữ độc lập với kích thước nút bấm và bảng điều khiển.
+settings-display-font = Phông chữ hiển thị
+settings-display-font-sample = Tiếng Việt có dấu & chữ số rõ nét — 0123456789
+settings-display-font-hint = Chọn họ phông chữ hiển thị cho giao diện (khởi động lại để áp dụng phông mặc định cho toàn bộ không gian làm việc).
+display-font-system = Mặc định hệ thống
+display-font-bundled = Mặc định tích hợp (Sans)
+display-font-serif = Có chân (Serif)
+display-font-monospace = Đơn cách (Monospace)

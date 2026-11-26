@@ -271,6 +271,56 @@ pub enum ViewportDenoiseMode {
     Strong,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayFont {
+    #[default]
+    System,
+    #[serde(alias = "bundled", alias = "default")]
+    BundledSans,
+    Inter,
+    Cantarell,
+    NotoSans,
+    DejaVuSans,
+    Serif,
+    Monospace,
+}
+
+impl DisplayFont {
+    pub const ALL: [Self; 8] = [
+        Self::System,
+        Self::BundledSans,
+        Self::Inter,
+        Self::Cantarell,
+        Self::NotoSans,
+        Self::DejaVuSans,
+        Self::Serif,
+        Self::Monospace,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::BundledSans => "bundled_sans",
+            Self::Inter => "inter",
+            Self::Cantarell => "cantarell",
+            Self::NotoSans => "noto_sans",
+            Self::DejaVuSans => "deja_vu_sans",
+            Self::Serif => "serif",
+            Self::Monospace => "monospace",
+        }
+    }
+}
+
+pub const UI_SCALE_PCT_MIN: u16 = 50;
+pub const UI_SCALE_PCT_MAX: u16 = 250;
+pub const FONT_SCALE_PCT_MIN: u16 = 75;
+pub const FONT_SCALE_PCT_MAX: u16 = 200;
+
+fn default_scale_pct() -> u16 {
+    100
+}
+
 fn default_editor_right_width() -> u32 {
     300
 }
@@ -306,6 +356,12 @@ pub struct LayoutState {
     pub app_launch_window_mode: AppLaunchWindowMode,
     #[serde(default = "crate::default_true")]
     pub window_maximized: bool,
+    #[serde(default = "default_scale_pct", alias = "ui_scale")]
+    pub ui_scale_pct: u16,
+    #[serde(default = "default_scale_pct", alias = "font_scale")]
+    pub font_scale_pct: u16,
+    #[serde(default)]
+    pub display_font: DisplayFont,
     #[serde(default)]
     pub canvas_anti_aliasing: CanvasAntiAliasingMode,
     #[serde(default)]
@@ -345,6 +401,9 @@ impl Default for LayoutState {
             window_height: 800,
             app_launch_window_mode: AppLaunchWindowMode::default(),
             window_maximized: true,
+            ui_scale_pct: default_scale_pct(),
+            font_scale_pct: default_scale_pct(),
+            display_font: DisplayFont::default(),
             canvas_anti_aliasing: CanvasAntiAliasingMode::Smooth,
             viewport_denoise: ViewportDenoiseMode::Off,
             browser_view_mode: BrowserViewMode::Grid,
@@ -383,6 +442,10 @@ impl LayoutState {
             sanitize_panel_order(&self.editor_right_panel_order, &EditorRightPanel::ALL);
         self.window_width = self.window_width.clamp(680, 3840);
         self.window_height = self.window_height.clamp(500, 2160);
+        self.ui_scale_pct = self.ui_scale_pct.clamp(UI_SCALE_PCT_MIN, UI_SCALE_PCT_MAX);
+        self.font_scale_pct = self
+            .font_scale_pct
+            .clamp(FONT_SCALE_PCT_MIN, FONT_SCALE_PCT_MAX);
         self.manga_page_gap = self.manga_page_gap.min(64);
         let mut panels = BTreeMap::new();
         for key in LAYOUT_PANEL_KEYS {
@@ -396,6 +459,17 @@ impl LayoutState {
         }
         self.panels = panels;
         self
+    }
+
+    pub fn ui_scale(&self) -> f32 {
+        (self.ui_scale_pct.clamp(UI_SCALE_PCT_MIN, UI_SCALE_PCT_MAX) as f32) / 100.0
+    }
+
+    pub fn font_scale(&self) -> f32 {
+        (self
+            .font_scale_pct
+            .clamp(FONT_SCALE_PCT_MIN, FONT_SCALE_PCT_MAX) as f32)
+            / 100.0
     }
 
     pub fn panel(&self, key: &str) -> bool {
@@ -414,6 +488,9 @@ impl LayoutState {
     pub fn settings_fields_eq(&self, other: &Self) -> bool {
         self.app_launch_window_mode == other.app_launch_window_mode
             && self.system_open_window_mode == other.system_open_window_mode
+            && self.ui_scale_pct == other.ui_scale_pct
+            && self.font_scale_pct == other.font_scale_pct
+            && self.display_font == other.display_font
             && self.viewer_view_mode == other.viewer_view_mode
             && self.canvas_anti_aliasing == other.canvas_anti_aliasing
             && self.viewport_denoise == other.viewport_denoise
@@ -427,6 +504,9 @@ impl LayoutState {
     pub fn apply_settings_from(&mut self, settings: &Self) {
         self.app_launch_window_mode = settings.app_launch_window_mode;
         self.system_open_window_mode = settings.system_open_window_mode;
+        self.ui_scale_pct = settings.ui_scale_pct;
+        self.font_scale_pct = settings.font_scale_pct;
+        self.display_font = settings.display_font;
         self.viewer_view_mode = settings.viewer_view_mode;
         self.canvas_anti_aliasing = settings.canvas_anti_aliasing;
         self.viewport_denoise = settings.viewport_denoise;
@@ -605,5 +685,21 @@ mod tests {
         assert!(parsed.window_maximized);
         assert_eq!(parsed.canvas_anti_aliasing, CanvasAntiAliasingMode::Smooth);
         assert_eq!(parsed.viewport_denoise, ViewportDenoiseMode::Off);
+        assert_eq!(parsed.ui_scale_pct, 100);
+        assert_eq!(parsed.font_scale_pct, 100);
+        assert_eq!(parsed.display_font, DisplayFont::System);
+        assert!((parsed.ui_scale() - 1.0).abs() < 1e-6);
+        assert!((parsed.font_scale() - 1.0).abs() < 1e-6);
+
+        let clamped = LayoutState {
+            ui_scale_pct: 400,
+            font_scale_pct: 30,
+            display_font: DisplayFont::Inter,
+            ..Default::default()
+        }
+        .sanitized();
+        assert_eq!(clamped.ui_scale_pct, UI_SCALE_PCT_MAX);
+        assert_eq!(clamped.font_scale_pct, FONT_SCALE_PCT_MIN);
+        assert_eq!(clamped.display_font, DisplayFont::Inter);
     }
 }

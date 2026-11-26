@@ -2277,7 +2277,7 @@ fn build_tool_options_card<'a>(
                     button::labeled(
                         tr(lang, "dialog-cancel"),
                         None,
-                        ButtonVariant::Ghost,
+                        ButtonVariant::Secondary,
                         Some(EditorMessage::CancelCrop),
                     ),
                     with_tooltip_pos(
@@ -2389,33 +2389,24 @@ fn build_tool_options_card<'a>(
 
         if ui.tool.is_smart_group() {
             if ui.tool == EditorTool::QuickSelect {
-                body = body
-                    .push(kv_row(
-                        tr(lang, "label-brush-size"),
-                        format!("{:.0} px", ui.quick_select_radius),
-                    ))
-                    .push(
-                        slider(
-                            4.0..=80.0,
-                            ui.quick_select_radius,
-                            EditorMessage::EditorSetQuickSelectRadius,
-                        )
-                        .step(1.0_f32)
-                        .style(slider_style),
-                    );
+                body = body.push(slider_stepper_control(
+                    tr(lang, "label-brush-size"),
+                    ui.quick_select_radius,
+                    4.0..=80.0,
+                    1.0_f32,
+                    format!("{:.0} px", ui.quick_select_radius),
+                    EditorMessage::EditorSetQuickSelectRadius,
+                ));
             } else {
                 body = body
-                    .push(kv_row(
+                    .push(slider_stepper_control(
                         tr(lang, "label-tolerance"),
+                        f32::from(ui.wand_tolerance),
+                        0.0..=100.0,
+                        1.0_f32,
                         format!("{}", ui.wand_tolerance),
+                        |v| EditorMessage::EditorSetWandTolerance(v.round() as u8),
                     ))
-                    .push(
-                        slider(0.0..=100.0, f32::from(ui.wand_tolerance), |v| {
-                            EditorMessage::EditorSetWandTolerance(v.round() as u8)
-                        })
-                        .step(1.0_f32)
-                        .style(slider_style),
-                    )
                     .push(
                         checkbox(ui.wand_contiguous)
                             .label(tr(lang, "label-contiguous"))
@@ -2429,19 +2420,14 @@ fn build_tool_options_card<'a>(
             );
         } else if !matches!(ui.tool, EditorTool::SingleRow | EditorTool::SingleCol) {
             body = body
-                .push(kv_row(
+                .push(slider_stepper_control(
                     tr(lang, "label-feather"),
+                    ui.select_feather,
+                    0.0..=25.0,
+                    1.0_f32,
                     format!("{:.0} px", ui.select_feather),
+                    EditorMessage::EditorSetSelectFeather,
                 ))
-                .push(
-                    slider(
-                        0.0..=25.0,
-                        ui.select_feather,
-                        EditorMessage::EditorSetSelectFeather,
-                    )
-                    .step(1.0_f32)
-                    .style(slider_style),
-                )
                 .push(
                     checkbox(ui.select_anti_alias)
                         .label(tr(lang, "label-anti-alias"))
@@ -2517,61 +2503,46 @@ fn build_tool_options_card<'a>(
             ]
             .spacing(4);
             let mut col = column![
-                kv_row(
+                slider_stepper_control(
                     tr(lang, "label-brush-size"),
-                    format!("{:.0} px", ui.brush_radius)
-                ),
-                slider(
-                    1.0..=120.0,
                     ui.brush_radius,
-                    EditorMessage::EditorSetBrushRadius
-                )
-                .step(1.0_f32)
-                .style(slider_style),
-                kv_row(
+                    1.0..=120.0,
+                    1.0_f32,
+                    format!("{:.0} px", ui.brush_radius),
+                    EditorMessage::EditorSetBrushRadius,
+                ),
+                slider_stepper_control(
                     tr(lang, "label-brush-opacity"),
-                    format!("{:.0}%", ui.brush_opacity * 100.0)
-                ),
-                slider(
-                    0.05..=1.0,
                     ui.brush_opacity,
-                    EditorMessage::EditorSetBrushOpacity
-                )
-                .step(0.05_f32)
-                .style(slider_style),
-                kv_row(
+                    0.05..=1.0,
+                    0.05_f32,
+                    format!("{:.0}%", ui.brush_opacity * 100.0),
+                    EditorMessage::EditorSetBrushOpacity,
+                ),
+                slider_stepper_control(
                     tr(lang, "label-brush-hardness"),
-                    format!("{:.0}%", ui.brush_settings.hardness * 100.0)
-                ),
-                slider(
-                    0.0..=1.0,
                     ui.brush_settings.hardness,
-                    EditorMessage::EditorSetBrushHardness
-                )
-                .step(0.05_f32)
-                .style(slider_style),
-                kv_row(
+                    0.0..=1.0,
+                    0.05_f32,
+                    format!("{:.0}%", ui.brush_settings.hardness * 100.0),
+                    EditorMessage::EditorSetBrushHardness,
+                ),
+                slider_stepper_control(
                     tr(lang, "label-brush-flow"),
-                    format!("{:.0}%", ui.brush_settings.flow * 100.0)
-                ),
-                slider(
-                    0.05..=1.0,
                     ui.brush_settings.flow,
-                    EditorMessage::EditorSetBrushFlow
-                )
-                .step(0.05_f32)
-                .style(slider_style),
-                kv_row(
-                    tr(lang, "label-brush-spacing"),
-                    format!("{:.0}%", ui.brush_settings.spacing * 100.0)
-                ),
-                slider(
                     0.05..=1.0,
+                    0.05_f32,
+                    format!("{:.0}%", ui.brush_settings.flow * 100.0),
+                    EditorMessage::EditorSetBrushFlow,
+                ),
+                slider_stepper_control(
+                    tr(lang, "label-brush-spacing"),
                     ui.brush_settings.spacing,
-                    EditorMessage::EditorSetBrushSpacing
-                )
-                .step(0.05_f32)
-                .style(slider_style),
+                    0.05..=1.0,
+                    0.05_f32,
+                    format!("{:.0}%", ui.brush_settings.spacing * 100.0),
+                    EditorMessage::EditorSetBrushSpacing,
+                ),
                 text(tr(lang, "label-brush-tip")).size(11),
                 tips_grid,
                 text(tr(lang, "label-brush-smoothing")).size(11),
@@ -2579,20 +2550,14 @@ fn build_tool_options_card<'a>(
             ]
             .spacing(6);
             if ui.brush_settings.smoothing_mode == BrushSmoothingMode::Stabilizer {
-                col = col
-                    .push(kv_row(
-                        tr(lang, "label-stabilizer-distance"),
-                        format!("{:.0} px", ui.brush_settings.stabilizer_distance),
-                    ))
-                    .push(
-                        slider(
-                            4.0..=100.0,
-                            ui.brush_settings.stabilizer_distance,
-                            EditorMessage::EditorSetStabilizerDistance,
-                        )
-                        .step(1.0_f32)
-                        .style(slider_style),
-                    );
+                col = col.push(slider_stepper_control(
+                    tr(lang, "label-stabilizer-distance"),
+                    ui.brush_settings.stabilizer_distance,
+                    4.0..=100.0,
+                    1.0_f32,
+                    format!("{:.0} px", ui.brush_settings.stabilizer_distance),
+                    EditorMessage::EditorSetStabilizerDistance,
+                ));
             }
             Some(section_card(title, col))
         }
@@ -2653,43 +2618,34 @@ fn build_tool_options_card<'a>(
             body = body
                 .push(text(tr(lang, "label-shape-fill-mode")).size(11))
                 .push(fill_row)
-                .push(kv_row(
+                .push(slider_stepper_control(
                     tr(lang, "label-stroke-width"),
+                    ui.shape_stroke_width,
+                    1.0..=64.0,
+                    1.0_f32,
                     format!("{:.0} px", ui.shape_stroke_width),
-                ))
-                .push(
-                    slider(
-                        1.0..=64.0,
-                        ui.shape_stroke_width,
-                        EditorMessage::EditorSetShapeStrokeWidth,
-                    )
-                    .step(1.0_f32)
-                    .style(slider_style),
-                );
+                    EditorMessage::EditorSetShapeStrokeWidth,
+                ));
             Some(section_card(tr(lang, ui.tool.label_key()), body))
         }
         EditorTool::PaintBucket => {
             let body = column![
-                kv_row(
+                slider_stepper_control(
                     tr(lang, "label-flood-fill-tolerance"),
+                    f32::from(ui.flood_fill_tolerance),
+                    0.0..=255.0,
+                    1.0_f32,
                     format!("{}", ui.flood_fill_tolerance),
+                    |v| EditorMessage::EditorSetFloodFillTolerance(v.round() as u8),
                 ),
-                slider(0.0..=255.0, f32::from(ui.flood_fill_tolerance), |v| {
-                    EditorMessage::EditorSetFloodFillTolerance(v.round() as u8)
-                })
-                .step(1.0_f32)
-                .style(slider_style),
-                kv_row(
+                slider_stepper_control(
                     tr(lang, "label-opacity"),
-                    format!("{:.0}%", ui.flood_fill_opacity * 100.0),
-                ),
-                slider(
-                    0.05..=1.0,
                     ui.flood_fill_opacity,
+                    0.05..=1.0,
+                    0.05_f32,
+                    format!("{:.0}%", ui.flood_fill_opacity * 100.0),
                     EditorMessage::EditorSetFloodFillOpacity,
-                )
-                .step(0.05_f32)
-                .style(slider_style),
+                ),
                 checkbox(ui.flood_fill_contiguous)
                     .label(tr(lang, "label-flood-fill-contiguous"))
                     .on_toggle(|_| EditorMessage::EditorToggleFloodFillContiguous),
@@ -2732,39 +2688,30 @@ fn build_tool_options_card<'a>(
             let mut body = column![
                 text(tr(lang, "label-healing-mode")).size(11),
                 mode_row,
-                kv_row(
+                slider_stepper_control(
                     tr(lang, "label-brush-size"),
-                    format!("{:.0} px", ui.healing_radius),
-                ),
-                slider(
-                    2.0..=120.0,
                     ui.healing_radius,
+                    2.0..=120.0,
+                    1.0_f32,
+                    format!("{:.0} px", ui.healing_radius),
                     EditorMessage::EditorSetHealingRadius,
-                )
-                .step(1.0_f32)
-                .style(slider_style),
-                kv_row(
+                ),
+                slider_stepper_control(
                     tr(lang, "label-brush-hardness"),
-                    format!("{:.0}%", ui.healing_hardness * 100.0),
-                ),
-                slider(
-                    0.0..=1.0,
                     ui.healing_hardness,
+                    0.0..=1.0,
+                    0.05_f32,
+                    format!("{:.0}%", ui.healing_hardness * 100.0),
                     EditorMessage::EditorSetHealingHardness,
-                )
-                .step(0.05_f32)
-                .style(slider_style),
-                kv_row(
-                    tr(lang, "label-strength"),
-                    format!("{:.0}%", ui.healing_strength * 100.0),
                 ),
-                slider(
-                    0.05..=1.0,
+                slider_stepper_control(
+                    tr(lang, "label-strength"),
                     ui.healing_strength,
+                    0.05..=1.0,
+                    0.05_f32,
+                    format!("{:.0}%", ui.healing_strength * 100.0),
                     EditorMessage::EditorSetHealingStrength,
-                )
-                .step(0.05_f32)
-                .style(slider_style),
+                ),
                 checkbox(ui.healing_sample_all)
                     .label(tr(lang, "label-sample-all-layers"))
                     .on_toggle(|_| EditorMessage::EditorToggleHealingSampleAll),
@@ -2800,73 +2747,66 @@ fn build_tool_options_card<'a>(
             flipped_v.flip_v = !flipped_v.flip_v;
 
             let body = column![
-                kv_row(
+                slider_stepper_control(
                     tr(lang, "label-transform-x"),
+                    spec.translate_x,
+                    -max_tx..=max_tx,
+                    1.0_f32,
                     format!("{:.1} px", spec.translate_x),
+                    move |v| {
+                        let mut next = spec;
+                        next.translate_x = v;
+                        EditorMessage::EditorSetTransformSpec(next)
+                    },
                 ),
-                slider(-max_tx..=max_tx, spec.translate_x, move |v| {
-                    let mut next = spec;
-                    next.translate_x = v;
-                    EditorMessage::EditorSetTransformSpec(next)
-                })
-                .step(1.0_f32)
-                .style(slider_style),
-                kv_row(
+                slider_stepper_control(
                     tr(lang, "label-transform-y"),
+                    spec.translate_y,
+                    -max_ty..=max_ty,
+                    1.0_f32,
                     format!("{:.1} px", spec.translate_y),
+                    move |v| {
+                        let mut next = spec;
+                        next.translate_y = v;
+                        EditorMessage::EditorSetTransformSpec(next)
+                    },
                 ),
-                slider(-max_ty..=max_ty, spec.translate_y, move |v| {
-                    let mut next = spec;
-                    next.translate_y = v;
-                    EditorMessage::EditorSetTransformSpec(next)
-                })
-                .step(1.0_f32)
-                .style(slider_style),
-                kv_row(
+                slider_stepper_control(
                     tr(lang, "label-transform-width"),
-                    format!("{:.0}%", spec.scale_x * 100.0),
-                ),
-                slider(
-                    10.0..=400.0,
                     (spec.scale_x * 100.0).clamp(10.0, 400.0),
+                    10.0..=400.0,
+                    1.0_f32,
+                    format!("{:.0}%", spec.scale_x * 100.0),
                     move |v| {
                         let mut next = spec;
                         next.scale_x = v / 100.0;
                         EditorMessage::EditorSetTransformSpec(next)
-                    }
-                )
-                .step(1.0_f32)
-                .style(slider_style),
-                kv_row(
-                    tr(lang, "label-transform-height"),
-                    format!("{:.0}%", spec.scale_y * 100.0),
+                    },
                 ),
-                slider(
-                    10.0..=400.0,
+                slider_stepper_control(
+                    tr(lang, "label-transform-height"),
                     (spec.scale_y * 100.0).clamp(10.0, 400.0),
+                    10.0..=400.0,
+                    1.0_f32,
+                    format!("{:.0}%", spec.scale_y * 100.0),
                     move |v| {
                         let mut next = spec;
                         next.scale_y = v / 100.0;
                         EditorMessage::EditorSetTransformSpec(next)
-                    }
-                )
-                .step(1.0_f32)
-                .style(slider_style),
-                kv_row(
-                    tr(lang, "label-transform-angle"),
-                    format!("{:.1}°", spec.rotation_deg),
+                    },
                 ),
-                slider(
-                    -180.0..=180.0,
+                slider_stepper_control(
+                    tr(lang, "label-transform-angle"),
                     spec.rotation_deg.clamp(-180.0, 180.0),
+                    -180.0..=180.0,
+                    0.5_f32,
+                    format!("{:.1}°", spec.rotation_deg),
                     move |v| {
                         let mut next = spec;
                         next.rotation_deg = v;
                         EditorMessage::EditorSetTransformSpec(next)
-                    }
-                )
-                .step(0.5_f32)
-                .style(slider_style),
+                    },
+                ),
                 row![
                     button::labeled(
                         tr(lang, "action-flip-h"),
@@ -2900,7 +2840,7 @@ fn build_tool_options_card<'a>(
                     button::labeled(
                         tr(lang, "dialog-cancel"),
                         None,
-                        ButtonVariant::Ghost,
+                        ButtonVariant::Secondary,
                         Some(EditorMessage::EditorTransformCancel),
                     ),
                     with_tooltip_pos(
@@ -2957,28 +2897,22 @@ fn build_tool_options_card<'a>(
                 tr(lang, "tool-liquify"),
                 column![
                     mode_grid,
-                    kv_row(
+                    slider_stepper_control(
                         tr(lang, "label-brush-size"),
-                        format!("{:.0} px", ui.liquify_radius)
-                    ),
-                    slider(
-                        5.0..=150.0,
                         ui.liquify_radius,
-                        EditorMessage::EditorSetLiquifyRadius
-                    )
-                    .step(1.0_f32)
-                    .style(slider_style),
-                    kv_row(
-                        tr(lang, "label-strength"),
-                        format!("{:.0}%", ui.liquify_strength * 100.0)
+                        5.0..=150.0,
+                        1.0_f32,
+                        format!("{:.0} px", ui.liquify_radius),
+                        EditorMessage::EditorSetLiquifyRadius,
                     ),
-                    slider(
-                        0.05..=1.0,
+                    slider_stepper_control(
+                        tr(lang, "label-strength"),
                         ui.liquify_strength,
-                        EditorMessage::EditorSetLiquifyStrength
-                    )
-                    .step(0.05_f32)
-                    .style(slider_style),
+                        0.05..=1.0,
+                        0.05_f32,
+                        format!("{:.0}%", ui.liquify_strength * 100.0),
+                        EditorMessage::EditorSetLiquifyStrength,
+                    ),
                 ]
                 .spacing(6),
             ))
@@ -3006,12 +2940,14 @@ fn build_tool_options_card<'a>(
         EditorTool::RotateAngle => Some(section_card(
             tr(lang, "tool-rotate-angle"),
             column![
-                kv_row(tr(lang, "label-angle"), format!("{:.1}°", ui.rotate_angle)),
-                slider(-180.0..=180.0, ui.rotate_angle as f32, |v| {
-                    EditorMessage::EditorSetRotateAngle(f64::from(v))
-                })
-                .step(0.5_f32)
-                .style(slider_style),
+                slider_stepper_control(
+                    tr(lang, "label-angle"),
+                    ui.rotate_angle as f32,
+                    -180.0..=180.0,
+                    0.5_f32,
+                    format!("{:.1}°", ui.rotate_angle),
+                    |v| EditorMessage::EditorSetRotateAngle(f64::from(v)),
+                ),
                 row![
                     button::labeled(
                         "-45°",
@@ -3079,40 +3015,126 @@ fn build_tool_options_card<'a>(
     }
 }
 
-fn build_apply_target_row<'a>(target: ApplyTarget, lang: Language) -> Element<'a, EditorMessage> {
-    row![
-        button::labeled(
-            tr(lang, "target-active-layer"),
-            None,
-            ButtonVariant::Tab {
-                active: target == ApplyTarget::ActiveLayer,
+/// Two-line slider with stepper control:
+/// - Line 1: `<Label>` on the left (`Length::Fill`), `< [value] >` stepper on the right.
+/// - Line 2: Full-width slider (`Length::Fill`).
+pub fn slider_stepper_control<'a, M: Clone + 'a>(
+    label: impl Into<String>,
+    value: f32,
+    range: std::ops::RangeInclusive<f32>,
+    step: f32,
+    value_text: impl Into<String>,
+    on_change: impl Fn(f32) -> M + 'a,
+) -> Element<'a, M> {
+    let min = *range.start();
+    let max = *range.end();
+    let eps = (step * 0.25).max(1e-5);
+    let can_dec = value > min + eps;
+    let can_inc = value < max - eps;
+    let dec_msg = can_dec.then(|| on_change((value - step).clamp(min, max)));
+    let inc_msg = can_inc.then(|| on_change((value + step).clamp(min, max)));
+
+    let value_pill = container(
+        text(value_text.into())
+            .size(TEXT_SIZE_CAPTION)
+            .style(|theme| text::Style {
+                color: Some(PaletteTokens::for_theme(theme).text_primary),
+            }),
+    )
+    .width(Length::Fixed(58.0))
+    .padding([2, 4])
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .style(|theme| {
+        let t = PaletteTokens::for_theme(theme);
+        container::Style {
+            background: Some(t.bg_elevated.into()),
+            border: iced::Border {
+                color: t.border,
+                width: 1.0,
+                radius: photon_ui::theme::RADIUS_SM.into(),
             },
-            Some(EditorMessage::EditorSetApplyTarget(
-                ApplyTarget::ActiveLayer
-            )),
-        )
-        .width(Fill),
-        button::labeled(
-            tr(lang, "target-whole-image"),
-            None,
-            ButtonVariant::Tab {
-                active: target == ApplyTarget::WholeImage,
-            },
-            Some(EditorMessage::EditorSetApplyTarget(ApplyTarget::WholeImage)),
-        )
-        .width(Fill),
-        button::labeled(
-            tr(lang, "target-new-layer"),
-            None,
-            ButtonVariant::Tab {
-                active: target == ApplyTarget::NewLayer,
-            },
-            Some(EditorMessage::EditorSetApplyTarget(ApplyTarget::NewLayer)),
-        )
-        .width(Fill),
+            ..Default::default()
+        }
+    });
+
+    let stepper = row![
+        button::compact_icon(Icon::Prev, ButtonVariant::Ghost, dec_msg),
+        value_pill,
+        button::compact_icon(Icon::Next, ButtonVariant::Ghost, inc_msg),
     ]
-    .spacing(3)
+    .spacing(2)
+    .align_y(Alignment::Center);
+
+    let header = row![
+        text(label.into())
+            .size(TEXT_SIZE_CAPTION)
+            .width(Fill)
+            .style(|theme| text::Style {
+                color: Some(PaletteTokens::for_theme(theme).text_secondary),
+            }),
+        stepper,
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    let bar = slider(range, value, on_change)
+        .step(step)
+        .width(Fill)
+        .style(slider_style);
+
+    column![header, bar].spacing(3).width(Fill).into()
+}
+
+pub fn apply_target_control<'a, M: Clone + 'a>(
+    lang: Language,
+    target: ApplyTarget,
+    on_select: impl Fn(ApplyTarget) -> M + 'a,
+) -> Element<'a, M> {
+    column![
+        text(tr(lang, "label-apply-target"))
+            .size(TEXT_SIZE_CAPTION)
+            .style(|theme| text::Style {
+                color: Some(PaletteTokens::for_theme(theme).text_secondary),
+            }),
+        row![
+            button::labeled(
+                tr(lang, "target-active-layer"),
+                None,
+                ButtonVariant::Tab {
+                    active: target == ApplyTarget::ActiveLayer,
+                },
+                Some(on_select(ApplyTarget::ActiveLayer)),
+            )
+            .width(Fill),
+            button::labeled(
+                tr(lang, "target-whole-image"),
+                None,
+                ButtonVariant::Tab {
+                    active: target == ApplyTarget::WholeImage,
+                },
+                Some(on_select(ApplyTarget::WholeImage)),
+            )
+            .width(Fill),
+            button::labeled(
+                tr(lang, "target-new-layer"),
+                None,
+                ButtonVariant::Tab {
+                    active: target == ApplyTarget::NewLayer,
+                },
+                Some(on_select(ApplyTarget::NewLayer)),
+            )
+            .width(Fill),
+        ]
+        .spacing(4),
+    ]
+    .spacing(4)
+    .width(Fill)
     .into()
+}
+
+fn build_apply_target_row<'a>(target: ApplyTarget, lang: Language) -> Element<'a, EditorMessage> {
+    apply_target_control(lang, target, EditorMessage::EditorSetApplyTarget)
 }
 
 fn build_ai_task_banner<'a>(
@@ -3550,15 +3572,14 @@ fn build_gradient_tool_options<'a>(
         text(tr(lang, "label-gradient-stops")).size(11),
         stop_bar,
         stop_controls,
-        kv_row(
+        slider_stepper_control(
             tr(lang, "label-stop-pos"),
+            cur_stop.pos as f32,
+            0.0..=1.0,
+            0.01_f32,
             format!("{:.0}%", cur_stop.pos * 100.0),
+            move |v| EditorMessage::EditorSetGradientStopPos(sel_idx, f64::from(v)),
         ),
-        slider(0.0..=1.0, cur_stop.pos as f32, move |v| {
-            EditorMessage::EditorSetGradientStopPos(sel_idx, f64::from(v))
-        })
-        .step(0.01_f32)
-        .style(slider_style),
         text(tr(lang, "label-gradient-kind")).size(11),
         shape_grid,
         text(tr(lang, "label-gradient-repeat")).size(11),
@@ -3569,17 +3590,14 @@ fn build_gradient_tool_options<'a>(
         ]
         .spacing(8)
         .align_y(Alignment::Center),
-        kv_row(
+        slider_stepper_control(
             tr(lang, "label-opacity"),
-            format!("{:.0}%", ui.gradient_opacity * 100.0),
-        ),
-        slider(
-            0.05..=1.0,
             ui.gradient_opacity,
+            0.05..=1.0,
+            0.05_f32,
+            format!("{:.0}%", ui.gradient_opacity * 100.0),
             EditorMessage::EditorSetGradientOpacity,
-        )
-        .step(0.05_f32)
-        .style(slider_style),
+        ),
         row![
             checkbox(ui.gradient_reverse)
                 .label(tr(lang, "label-gradient-reverse"))
@@ -3599,17 +3617,17 @@ fn build_gradient_tool_options<'a>(
         body = body.push(
             row![
                 button::labeled(
-                    tr(lang, "action-apply"),
-                    Some(Icon::Check),
-                    ButtonVariant::Primary,
-                    Some(EditorMessage::EditorApplyGradientDraft),
-                )
-                .width(Fill),
-                button::labeled(
                     tr(lang, "action-cancel"),
                     Some(Icon::Close),
                     ButtonVariant::Secondary,
                     Some(EditorMessage::EditorCancelGradientDraft),
+                )
+                .width(Fill),
+                button::labeled(
+                    tr(lang, "action-apply"),
+                    Some(Icon::Check),
+                    ButtonVariant::Primary,
+                    Some(EditorMessage::EditorApplyGradientDraft),
                 )
                 .width(Fill),
             ]
@@ -3744,16 +3762,14 @@ fn build_ai_rembg_tool_options<'a>(
         text(tr(lang, "label-ai-model")).size(11),
         model_col,
         build_ai_model_quick_row(state, lang, "photon.rmbg.onnx", &ui.ai_rembg_model),
-        kv_row(
+        slider_stepper_control(
             tr(lang, "label-ai-edge-feather"),
+            f32::from(ui.ai_rembg_feather),
+            0.0..=20.0,
+            1.0_f32,
             format!("{} px", ui.ai_rembg_feather),
+            |v| EditorMessage::AiSetRembgFeather(v.round() as u8),
         ),
-        slider(0.0..=20.0, f32::from(ui.ai_rembg_feather), |v| {
-            EditorMessage::AiSetRembgFeather(v.round() as u8)
-        })
-        .step(1.0_f32)
-        .style(slider_style),
-        text(tr(lang, "label-apply-target")).size(11),
         build_apply_target_row(ui.apply_target, lang),
         button::labeled(
             tr(lang, "action-remove-background"),
@@ -3794,24 +3810,22 @@ fn build_ai_rembg_tool_options<'a>(
             .width(Fill),
         ]
         .spacing(3),
-        kv_row(
+        slider_stepper_control(
             tr(lang, "label-brush-size"),
+            ui.ai_rembg_refine_radius,
+            2.0..=150.0,
+            1.0_f32,
             format!("{:.0} px", ui.ai_rembg_refine_radius),
+            EditorMessage::AiSetRembgRefineRadius,
         ),
-        slider(2.0..=150.0, ui.ai_rembg_refine_radius, |v| {
-            EditorMessage::AiSetRembgRefineRadius(v)
-        })
-        .step(1.0_f32)
-        .style(slider_style),
-        kv_row(
+        slider_stepper_control(
             tr(lang, "label-brush-softness"),
+            ui.ai_rembg_refine_softness,
+            0.0..=1.0,
+            0.05_f32,
             format!("{:.0}%", ui.ai_rembg_refine_softness * 100.0),
+            EditorMessage::AiSetRembgRefineSoftness,
         ),
-        slider(0.0..=1.0, ui.ai_rembg_refine_softness, |v| {
-            EditorMessage::AiSetRembgRefineSoftness(v)
-        })
-        .step(0.05_f32)
-        .style(slider_style),
     ]
     .spacing(6);
 
@@ -3865,12 +3879,7 @@ fn build_ai_watermark_tool_options<'a>(
     ]
     .spacing(3);
 
-    let mut col = column![
-        tabs,
-        text(tr(lang, "label-apply-target")).size(11),
-        build_apply_target_row(ui.apply_target, lang),
-    ]
-    .spacing(6);
+    let mut col = column![tabs, build_apply_target_row(ui.apply_target, lang)].spacing(6);
 
     let region_controls = || {
         column![
@@ -3909,62 +3918,66 @@ fn build_ai_watermark_tool_options<'a>(
                 .width(Fill),
             ]
             .spacing(3),
-            kv_row(
+            slider_stepper_control(
                 tr(lang, "label-region-x"),
-                format!("{:.0}%", ui.ai_wm_region_x)
+                ui.ai_wm_region_x,
+                0.0..=95.0,
+                1.0_f32,
+                format!("{:.0}%", ui.ai_wm_region_x),
+                |v| {
+                    EditorMessage::AiSetWmRegion(
+                        v,
+                        ui.ai_wm_region_y,
+                        ui.ai_wm_region_w,
+                        ui.ai_wm_region_h,
+                    )
+                },
             ),
-            slider(0.0..=95.0, ui.ai_wm_region_x, |v| {
-                EditorMessage::AiSetWmRegion(
-                    v,
-                    ui.ai_wm_region_y,
-                    ui.ai_wm_region_w,
-                    ui.ai_wm_region_h,
-                )
-            })
-            .step(1.0_f32)
-            .style(slider_style),
-            kv_row(
+            slider_stepper_control(
                 tr(lang, "label-region-y"),
-                format!("{:.0}%", ui.ai_wm_region_y)
+                ui.ai_wm_region_y,
+                0.0..=95.0,
+                1.0_f32,
+                format!("{:.0}%", ui.ai_wm_region_y),
+                |v| {
+                    EditorMessage::AiSetWmRegion(
+                        ui.ai_wm_region_x,
+                        v,
+                        ui.ai_wm_region_w,
+                        ui.ai_wm_region_h,
+                    )
+                },
             ),
-            slider(0.0..=95.0, ui.ai_wm_region_y, |v| {
-                EditorMessage::AiSetWmRegion(
-                    ui.ai_wm_region_x,
-                    v,
-                    ui.ai_wm_region_w,
-                    ui.ai_wm_region_h,
-                )
-            })
-            .step(1.0_f32)
-            .style(slider_style),
-            kv_row(
+            slider_stepper_control(
                 tr(lang, "label-region-w"),
-                format!("{:.0}%", ui.ai_wm_region_w)
+                ui.ai_wm_region_w,
+                1.0..=100.0,
+                1.0_f32,
+                format!("{:.0}%", ui.ai_wm_region_w),
+                |v| {
+                    EditorMessage::AiSetWmRegion(
+                        ui.ai_wm_region_x,
+                        ui.ai_wm_region_y,
+                        v,
+                        ui.ai_wm_region_h,
+                    )
+                },
             ),
-            slider(1.0..=100.0, ui.ai_wm_region_w, |v| {
-                EditorMessage::AiSetWmRegion(
-                    ui.ai_wm_region_x,
-                    ui.ai_wm_region_y,
-                    v,
-                    ui.ai_wm_region_h,
-                )
-            })
-            .step(1.0_f32)
-            .style(slider_style),
-            kv_row(
+            slider_stepper_control(
                 tr(lang, "label-region-h"),
-                format!("{:.0}%", ui.ai_wm_region_h)
+                ui.ai_wm_region_h,
+                1.0..=100.0,
+                1.0_f32,
+                format!("{:.0}%", ui.ai_wm_region_h),
+                |v| {
+                    EditorMessage::AiSetWmRegion(
+                        ui.ai_wm_region_x,
+                        ui.ai_wm_region_y,
+                        ui.ai_wm_region_w,
+                        v,
+                    )
+                },
             ),
-            slider(1.0..=100.0, ui.ai_wm_region_h, |v| {
-                EditorMessage::AiSetWmRegion(
-                    ui.ai_wm_region_x,
-                    ui.ai_wm_region_y,
-                    ui.ai_wm_region_w,
-                    v,
-                )
-            })
-            .step(1.0_f32)
-            .style(slider_style),
         ]
         .spacing(4)
     };
@@ -4046,45 +4059,36 @@ fn build_ai_watermark_tool_options<'a>(
                     "photon.ai_inpaint.onnx",
                     &ui.ai_wm_inpainter,
                 ))
-                .push(kv_row(
+                .push(slider_stepper_control(
                     tr(lang, "label-confidence"),
+                    ui.ai_wm_confidence,
+                    0.05..=0.95,
+                    0.05_f32,
                     format!("{:.0}%", ui.ai_wm_confidence * 100.0),
+                    EditorMessage::AiSetWmConfidence,
                 ))
-                .push(
-                    slider(0.05..=0.95, ui.ai_wm_confidence, |v| {
-                        EditorMessage::AiSetWmConfidence(v)
-                    })
-                    .step(0.05_f32)
-                    .style(slider_style),
-                )
-                .push(kv_row(
+                .push(slider_stepper_control(
                     tr(lang, "label-mask-padding"),
+                    ui.ai_wm_mask_padding as f32,
+                    0.0..=64.0,
+                    1.0_f32,
                     format!("{} px", ui.ai_wm_mask_padding),
-                ))
-                .push(
-                    slider(0.0..=64.0, ui.ai_wm_mask_padding as f32, |v| {
-                        EditorMessage::AiSetWmMaskPadding(v.round() as u32)
-                    })
-                    .step(1.0_f32)
-                    .style(slider_style),
-                );
+                    |v| EditorMessage::AiSetWmMaskPadding(v.round() as u32),
+                ));
             if ui.ai_wm_detector == "brush" {
                 col = col
-                    .push(kv_row(
-                        tr(lang, "label-brush-size"),
+                    .push(slider_stepper_control(
                         format!(
-                            "{:.0} px ({} strokes)",
-                            ui.ai_wm_brush_radius,
+                            "{} ({})",
+                            tr(lang, "label-brush-size"),
                             ui.ai_wm_mask_strokes.len()
                         ),
+                        ui.ai_wm_brush_radius,
+                        4.0..=150.0,
+                        1.0_f32,
+                        format!("{:.0} px", ui.ai_wm_brush_radius),
+                        EditorMessage::AiSetWmMaskBrushRadius,
                     ))
-                    .push(
-                        slider(4.0..=150.0, ui.ai_wm_brush_radius, |v| {
-                            EditorMessage::AiSetWmMaskBrushRadius(v)
-                        })
-                        .step(1.0_f32)
-                        .style(slider_style),
-                    )
                     .push(
                         button::labeled(
                             tr(lang, "action-clear-mask"),
@@ -4143,39 +4147,30 @@ fn build_ai_watermark_tool_options<'a>(
                     ]
                     .spacing(3),
                 )
-                .push(kv_row(
+                .push(slider_stepper_control(
                     tr(lang, "label-gemini-brightness"),
+                    ui.ai_wm_gemini_brightness,
+                    0.0..=1.0,
+                    0.02_f32,
                     format!("{:.2}", ui.ai_wm_gemini_brightness),
+                    EditorMessage::AiSetWmGeminiBrightness,
                 ))
-                .push(
-                    slider(0.0..=1.0, ui.ai_wm_gemini_brightness, |v| {
-                        EditorMessage::AiSetWmGeminiBrightness(v)
-                    })
-                    .step(0.02_f32)
-                    .style(slider_style),
-                )
-                .push(kv_row(
+                .push(slider_stepper_control(
                     tr(lang, "label-offset-x"),
+                    ui.ai_wm_gemini_offset_x as f32,
+                    -20.0..=20.0,
+                    1.0_f32,
                     format!("{} px", ui.ai_wm_gemini_offset_x),
+                    |v| EditorMessage::AiSetWmGeminiOffsetX(v.round() as i32),
                 ))
-                .push(
-                    slider(-20.0..=20.0, ui.ai_wm_gemini_offset_x as f32, |v| {
-                        EditorMessage::AiSetWmGeminiOffsetX(v.round() as i32)
-                    })
-                    .step(1.0_f32)
-                    .style(slider_style),
-                )
-                .push(kv_row(
+                .push(slider_stepper_control(
                     tr(lang, "label-offset-y"),
+                    ui.ai_wm_gemini_offset_y as f32,
+                    -20.0..=20.0,
+                    1.0_f32,
                     format!("{} px", ui.ai_wm_gemini_offset_y),
+                    |v| EditorMessage::AiSetWmGeminiOffsetY(v.round() as i32),
                 ))
-                .push(
-                    slider(-20.0..=20.0, ui.ai_wm_gemini_offset_y as f32, |v| {
-                        EditorMessage::AiSetWmGeminiOffsetY(v.round() as i32)
-                    })
-                    .step(1.0_f32)
-                    .style(slider_style),
-                )
                 .push(
                     checkbox(ui.ai_wm_gemini_force)
                         .label(tr(lang, "label-force-remove"))
@@ -4194,17 +4189,14 @@ fn build_ai_watermark_tool_options<'a>(
         WatermarkTab::Region => {
             col = col
                 .push(region_controls())
-                .push(kv_row(
+                .push(slider_stepper_control(
                     tr(lang, "label-ai-edge-feather"),
+                    ui.ai_wm_region_feather as f32,
+                    0.0..=32.0,
+                    1.0_f32,
                     format!("{} px", ui.ai_wm_region_feather),
+                    |v| EditorMessage::AiSetWmRegionFeather(v.round() as u32),
                 ))
-                .push(
-                    slider(0.0..=32.0, ui.ai_wm_region_feather as f32, |v| {
-                        EditorMessage::AiSetWmRegionFeather(v.round() as u32)
-                    })
-                    .step(1.0_f32)
-                    .style(slider_style),
-                )
                 .push(
                     button::labeled(
                         tr(lang, "action-inpaint-region"),
@@ -4264,24 +4256,22 @@ fn build_ai_caption_tool_options<'a>(
         ]
         .spacing(3),
         build_ai_model_quick_row(state, lang, "photon.caption.onnx", &ui.ai_caption_model),
-        kv_row(
+        slider_stepper_control(
             tr(lang, "label-general-threshold"),
+            ui.ai_caption_general_threshold,
+            0.1..=0.9,
+            0.05_f32,
             format!("{:.2}", ui.ai_caption_general_threshold),
+            EditorMessage::AiSetCaptionGeneralThreshold,
         ),
-        slider(0.1..=0.9, ui.ai_caption_general_threshold, |v| {
-            EditorMessage::AiSetCaptionGeneralThreshold(v)
-        })
-        .step(0.05_f32)
-        .style(slider_style),
-        kv_row(
+        slider_stepper_control(
             tr(lang, "label-character-threshold"),
+            ui.ai_caption_char_threshold,
+            0.1..=0.95,
+            0.05_f32,
             format!("{:.2}", ui.ai_caption_char_threshold),
+            EditorMessage::AiSetCaptionCharThreshold,
         ),
-        slider(0.1..=0.95, ui.ai_caption_char_threshold, |v| {
-            EditorMessage::AiSetCaptionCharThreshold(v)
-        })
-        .step(0.05_f32)
-        .style(slider_style),
         checkbox(ui.ai_caption_replace_underscores)
             .label(tr(lang, "label-replace-underscores"))
             .on_toggle(|_| EditorMessage::AiToggleCaptionUnderscores),
@@ -4477,44 +4467,31 @@ fn build_layers_panel<'a>(
         .spacing(8)
         .align_y(Alignment::Center);
 
-        let opacity_row = row![
-            with_tooltip_pos(
-                slider(0.0..=1.0, layer.opacity, move |v| {
-                    EditorMessage::Dispatch(Command::EditorLayerSetProps {
-                        id: layer_id,
-                        name: None,
-                        visible: None,
-                        locked: None,
-                        opacity: Some(v),
-                        blend_mode: None,
-                        offset_x: None,
-                        offset_y: None,
-                    })
+        let opacity_row = slider_stepper_control(
+            tr(lang, "label-opacity"),
+            layer.opacity,
+            0.0..=1.0,
+            0.02_f32,
+            format!("{:.0}%", layer.opacity * 100.0),
+            move |v| {
+                EditorMessage::Dispatch(Command::EditorLayerSetProps {
+                    id: layer_id,
+                    name: None,
+                    visible: None,
+                    locked: None,
+                    opacity: Some(v),
+                    blend_mode: None,
+                    offset_x: None,
+                    offset_y: None,
                 })
-                .step(0.02_f32)
-                .style(slider_style)
-                .width(Fill),
-                tr(lang, "label-opacity"),
-                TooltipPosition::Top,
-            ),
-            text(format!("{:.0}%", layer.opacity * 100.0))
-                .size(11)
-                .width(Length::Fixed(34.0))
-                .style(|theme| {
-                    let t = PaletteTokens::for_theme(theme);
-                    text::Style {
-                        color: Some(t.text_muted),
-                    }
-                }),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center);
+            },
+        );
 
         props_col = props_col.push(blend_row).push(opacity_row);
 
         if let Some(effect) = &layer.effect {
             let effect_ctrl: Option<Element<'_, EditorMessage>> = match effect {
-                LayerEffect::Blur { radius } => Some(photon_ui::panel::slider_control_row(
+                LayerEffect::Blur { radius } => Some(slider_stepper_control(
                     tr(lang, "label-radius"),
                     *radius,
                     1.0..=24.0,
@@ -4527,28 +4504,19 @@ fn build_layers_panel<'a>(
                         })
                     },
                 )),
-                LayerEffect::Sharpen { amount } => Some(
-                    row![
-                        text(tr(lang, "label-strength"))
-                            .size(11)
-                            .style(|theme| text::Style {
-                                color: Some(PaletteTokens::for_theme(theme).text_muted),
-                            }),
-                        slider(0.0..=2.5, *amount, move |v| {
-                            EditorMessage::Dispatch(Command::EditorLayerUpdateEffect {
-                                id: layer_id,
-                                effect: LayerEffect::Sharpen { amount: v },
-                            })
+                LayerEffect::Sharpen { amount } => Some(slider_stepper_control(
+                    tr(lang, "label-strength"),
+                    *amount,
+                    0.0..=2.5,
+                    0.1_f32,
+                    format!("{amount:.1}"),
+                    move |v| {
+                        EditorMessage::Dispatch(Command::EditorLayerUpdateEffect {
+                            id: layer_id,
+                            effect: LayerEffect::Sharpen { amount: v },
                         })
-                        .step(0.1_f32)
-                        .style(slider_style)
-                        .width(Fill),
-                        text(format!("{amount:.1}")).size(11),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center)
-                    .into(),
-                ),
+                    },
+                )),
                 LayerEffect::Denoise {
                     strength,
                     detail_preserve,
@@ -4557,13 +4525,13 @@ fn build_layers_panel<'a>(
                     let det_val = *detail_preserve;
                     Some(
                         column![
-                            row![
-                                text(tr(lang, "label-strength")).size(11).style(|theme| {
-                                    text::Style {
-                                        color: Some(PaletteTokens::for_theme(theme).text_muted),
-                                    }
-                                }),
-                                slider(0.05..=1.0, str_val, move |v| {
+                            slider_stepper_control(
+                                tr(lang, "label-strength"),
+                                str_val,
+                                0.05..=1.0,
+                                0.05_f32,
+                                format!("{:.0}%", str_val * 100.0),
+                                move |v| {
                                     EditorMessage::Dispatch(Command::EditorLayerUpdateEffect {
                                         id: layer_id,
                                         effect: LayerEffect::Denoise {
@@ -4571,21 +4539,15 @@ fn build_layers_panel<'a>(
                                             detail_preserve: det_val,
                                         },
                                     })
-                                })
-                                .step(0.05_f32)
-                                .style(slider_style)
-                                .width(Fill),
-                                text(format!("{:.0}%", str_val * 100.0)).size(11),
-                            ]
-                            .spacing(6)
-                            .align_y(Alignment::Center),
-                            row![
-                                text(tr(lang, "label-preserve-detail"))
-                                    .size(11)
-                                    .style(|theme| text::Style {
-                                        color: Some(PaletteTokens::for_theme(theme).text_muted),
-                                    }),
-                                slider(0.0..=1.0, det_val, move |v| {
+                                },
+                            ),
+                            slider_stepper_control(
+                                tr(lang, "label-preserve-detail"),
+                                det_val,
+                                0.0..=1.0,
+                                0.05_f32,
+                                format!("{:.0}%", det_val * 100.0),
+                                move |v| {
                                     EditorMessage::Dispatch(Command::EditorLayerUpdateEffect {
                                         id: layer_id,
                                         effect: LayerEffect::Denoise {
@@ -4593,14 +4555,8 @@ fn build_layers_panel<'a>(
                                             detail_preserve: v,
                                         },
                                     })
-                                })
-                                .step(0.05_f32)
-                                .style(slider_style)
-                                .width(Fill),
-                                text(format!("{:.0}%", det_val * 100.0)).size(11),
-                            ]
-                            .spacing(6)
-                            .align_y(Alignment::Center),
+                                },
+                            ),
                         ]
                         .spacing(4)
                         .into(),
@@ -5178,21 +5134,30 @@ pub fn build_color_picker_dialog<'a>(
         ]
         .spacing(12)
         .align_y(Alignment::Center),
-        kv_row("R", r.to_string()),
-        slider(0..=255, r, move |v| EditorMessage::ColorPickerSetRgb(
-            v, g, b
-        ))
-        .style(slider_style),
-        kv_row("G", g.to_string()),
-        slider(0..=255, g, move |v| EditorMessage::ColorPickerSetRgb(
-            r, v, b
-        ))
-        .style(slider_style),
-        kv_row("B", b.to_string()),
-        slider(0..=255, b, move |v| EditorMessage::ColorPickerSetRgb(
-            r, g, v
-        ))
-        .style(slider_style),
+        slider_stepper_control(
+            "R",
+            f32::from(r),
+            0.0..=255.0,
+            1.0_f32,
+            r.to_string(),
+            move |v| EditorMessage::ColorPickerSetRgb(v.round() as u8, g, b),
+        ),
+        slider_stepper_control(
+            "G",
+            f32::from(g),
+            0.0..=255.0,
+            1.0_f32,
+            g.to_string(),
+            move |v| EditorMessage::ColorPickerSetRgb(r, v.round() as u8, b),
+        ),
+        slider_stepper_control(
+            "B",
+            f32::from(b),
+            0.0..=255.0,
+            1.0_f32,
+            b.to_string(),
+            move |v| EditorMessage::ColorPickerSetRgb(r, g, v.round() as u8),
+        ),
         preset_row,
     ]
     .spacing(8);
@@ -5218,14 +5183,7 @@ pub fn build_color_picker_dialog<'a>(
         ColorPickerTarget::GradientStop(_) => tr(lang, "label-gradient-stops"),
     };
 
-    let mut footer = row![button::labeled(
-        tr(lang, "dialog-cancel"),
-        None,
-        ButtonVariant::Ghost,
-        Some(EditorMessage::CloseDialog),
-    ),]
-    .spacing(6)
-    .align_y(Alignment::Center);
+    let mut footer = row![].spacing(8).align_y(Alignment::Center);
     if matches!(
         target,
         ColorPickerTarget::ViewportBackground | ColorPickerTarget::ViewerViewportBg
@@ -5239,6 +5197,12 @@ pub fn build_color_picker_dialog<'a>(
     }
     let footer = footer
         .push(iced::widget::space::horizontal())
+        .push(button::labeled(
+            tr(lang, "dialog-cancel"),
+            None,
+            ButtonVariant::Secondary,
+            Some(EditorMessage::CloseDialog),
+        ))
         .push(button::labeled(
             "OK",
             Some(Icon::Check),
@@ -5286,10 +5250,14 @@ pub fn build_export_dialog<'a>(
             .spacing(6),
         ]
         .spacing(4),
-        kv_row(tr(lang, "label-quality"), format!("{quality}%")),
-        slider(10..=100, quality, EditorMessage::ExportQualityChanged)
-            .step(1_u8)
-            .style(slider_style),
+        slider_stepper_control(
+            tr(lang, "label-quality"),
+            f32::from(quality),
+            10.0..=100.0,
+            1.0_f32,
+            format!("{quality}%"),
+            |v| EditorMessage::ExportQualityChanged(v.round() as u8),
+        ),
         column![
             text(tr(lang, "label-max-edge")).size(TEXT_SIZE_CONTROL),
             text_input(&tr(lang, "label-original-size"), max_edge)
@@ -5316,13 +5284,13 @@ pub fn build_export_dialog<'a>(
     }
 
     let footer = row![
+        iced::widget::space::horizontal(),
         button::labeled(
             tr(lang, "dialog-cancel"),
             None,
-            ButtonVariant::Ghost,
+            ButtonVariant::Secondary,
             Some(EditorMessage::CloseDialog),
         ),
-        iced::widget::space::horizontal(),
         button::labeled(
             tr(lang, "action-export"),
             Some(Icon::Export),
@@ -5330,6 +5298,7 @@ pub fn build_export_dialog<'a>(
             Some(EditorMessage::ConfirmExport),
         ),
     ]
+    .spacing(8)
     .align_y(Alignment::Center);
 
     DialogSpec {

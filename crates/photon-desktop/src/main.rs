@@ -344,6 +344,8 @@ fn main() {
         .as_deref()
         .map(canonicalize_path_str);
     let hw_accel = core.config.hardware_acceleration;
+    let initial_display_font = core.config.layout.display_font;
+    let initial_font_scale = core.config.layout.font_scale();
     let use_software_renderer = cli.safe_mode || !hw_accel;
     let (handle, gpu_backend, _viewer_reg_guard) = {
         let _guard = rt.enter();
@@ -432,8 +434,14 @@ fn main() {
     );
 
     if let Err(err) = iced::daemon(app::boot, app::update, app::view)
+        .settings(iced::Settings {
+            default_font: app::iced_font_for(initial_display_font),
+            default_text_size: iced::Pixels(13.0 * initial_font_scale),
+            ..Default::default()
+        })
         .title(app::title)
         .theme(app::theme)
+        .scale_factor(app::scale_factor)
         .subscription(app::subscription)
         .run()
     {

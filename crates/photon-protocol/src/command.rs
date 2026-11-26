@@ -165,6 +165,15 @@ pub enum Command {
     SetLanguage {
         language: Language,
     },
+    SetUiScale {
+        scale_pct: u16,
+    },
+    SetFontScale {
+        scale_pct: u16,
+    },
+    SetDisplayFont {
+        font: crate::DisplayFont,
+    },
     SetLayout {
         layout: LayoutState,
     },
@@ -795,6 +804,9 @@ impl Command {
             Self::SetBackupMethod { .. } => "set_backup_method",
             Self::ToggleTheme => "toggle_theme",
             Self::SetLanguage { .. } => "set_language",
+            Self::SetUiScale { .. } => "set_ui_scale",
+            Self::SetFontScale { .. } => "set_font_scale",
+            Self::SetDisplayFont { .. } => "set_display_font",
             Self::SetLayout { .. } => "set_layout",
             Self::ToggleLeftPanel => "toggle_left_panel",
             Self::ToggleRightPanel { .. } => "toggle_right_panel",

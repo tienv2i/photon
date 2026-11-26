@@ -1023,3 +1023,19 @@ action-back-to-browser = Back to Browser
 tooltip-drag-move = Drag to move
 action-translate-next = Next
 action-translate-review = Review
+
+# Phase 1: Browser Edit Menu & UI / Font Scaling / Display Font
+action-duplicate = Duplicate
+action-clear-selection = Clear Selection
+settings-section-scaling-typography = Scaling & Typography
+settings-ui-scale = UI Scale
+settings-ui-scale-hint = Scales the entire interface (controls, icons, panels, spacing, and text) cleanly alongside OS / Wayland fractional scaling.
+settings-font-scale = Font Scale
+settings-font-scale-hint = Scales text and typography independently of widget and panel geometry.
+settings-display-font = Display Font
+settings-display-font-sample = The quick brown fox jumps over the lazy dog — 0123456789
+settings-display-font-hint = Sets the interface display font family (restart applies the default font across all workspaces).
+display-font-system = System Default
+display-font-bundled = Bundled Default (Sans)
+display-font-serif = Serif
+display-font-monospace = Monospace

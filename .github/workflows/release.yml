@@ -85,9 +85,11 @@ jobs:
       - name: Install Fedora build & RPM dependencies
         run: |
           dnf install -y \
-            gcc clang lld pkgconf-pkg-config rust cargo rpm-build \
+            gcc clang lld pkgconf-pkg-config rpm-build curl \
             openjpeg2-devel libheif-devel gtk3-devel librsvg2-tools \
             desktop-file-utils appstream python3
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build release binaries
         run: cargo build --release -p photon-desktop -p photon-cli
       - name: Build Fedora RPM
@@ -152,7 +154,7 @@ jobs:
           mkdir -p /tmp/arch-work
           cp -a "$PWD" /tmp/arch-work/src
           chown -R builder:builder /tmp/arch-work
-          su - builder -c "cd /tmp/arch-work/src/packaging/linux/arch && _srcdir=/tmp/arch-work/src makepkg -s --noconfirm"
+          su - builder -c "cd /tmp/arch-work/src/packaging/linux/arch && _srcdir=/tmp/arch-work/src makepkg --noconfirm"
           mkdir -p dist/out
           cp /tmp/arch-work/src/packaging/linux/arch/*.pkg.tar.zst dist/out/
       - uses: actions/upload-artifact@v4
@@ -167,7 +169,7 @@ jobs:
       - name: Install Flatpak & build bundle
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils
           flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub \
             org.freedesktop.Platform//24.08 \

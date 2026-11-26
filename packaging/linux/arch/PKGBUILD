@@ -5,8 +5,8 @@ pkgdesc="Fast, automation-first photo browser, viewer, and non-destructive layer
 arch=('x86_64')
 url="https://github.com/tienv2i/photon"
 license=('MIT')
-depends=('gtk3' 'libopenjp2' 'libheif' 'hicolor-icon-theme')
-makedepends=('rust' 'cargo' 'clang' 'lld' 'pkgconf' 'librsvg' 'desktop-file-utils' 'appstream' 'python')
+depends=('gtk3' 'openjpeg2' 'libheif' 'hicolor-icon-theme')
+makedepends=('rust' 'clang' 'lld' 'pkgconf' 'librsvg' 'desktop-file-utils' 'appstream' 'python')
 options=('!lto')
 
 build() {

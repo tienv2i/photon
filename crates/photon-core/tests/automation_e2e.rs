@@ -1068,7 +1068,7 @@ fn layout_state_new_fields_deserialize_with_defaults() {
     let parsed_legacy: LayoutState = serde_json::from_str(legacy).unwrap();
     assert_eq!(
         parsed_legacy.app_launch_window_mode,
-        AppLaunchWindowMode::Remembered
+        AppLaunchWindowMode::Maximized
     );
     assert!(parsed_legacy.window_maximized);
     assert_eq!(

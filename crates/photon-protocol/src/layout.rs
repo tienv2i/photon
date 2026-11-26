@@ -225,8 +225,8 @@ pub enum SystemOpenWindowMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AppLaunchWindowMode {
-    Maximized,
     #[default]
+    Maximized,
     Remembered,
 }
 
@@ -318,7 +318,7 @@ impl Default for LayoutState {
             editor_tool_tab: EditorToolTab::default(),
             window_width: 1240,
             window_height: 800,
-            app_launch_window_mode: AppLaunchWindowMode::Remembered,
+            app_launch_window_mode: AppLaunchWindowMode::default(),
             window_maximized: true,
             canvas_anti_aliasing: CanvasAntiAliasingMode::Smooth,
             viewport_denoise: ViewportDenoiseMode::Off,
@@ -553,7 +553,7 @@ mod tests {
         let layout = LayoutState::default();
         assert_eq!(
             layout.app_launch_window_mode,
-            AppLaunchWindowMode::Remembered
+            AppLaunchWindowMode::Maximized
         );
         assert!(layout.window_maximized);
         assert_eq!(layout.canvas_anti_aliasing, CanvasAntiAliasingMode::Smooth);
@@ -562,7 +562,7 @@ mod tests {
         let parsed: LayoutState = serde_json::from_str(r#"{"windowWidth":1000}"#).unwrap();
         assert_eq!(
             parsed.app_launch_window_mode,
-            AppLaunchWindowMode::Remembered
+            AppLaunchWindowMode::Maximized
         );
         assert!(parsed.window_maximized);
         assert_eq!(parsed.canvas_anti_aliasing, CanvasAntiAliasingMode::Smooth);

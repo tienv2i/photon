@@ -28,7 +28,7 @@ This walkthrough summarizes the major capabilities implemented across `photon-pr
 
 ### 6. Extended Codecs & Hybrid Archive/PDF (`ArchiveSession`)
 - **Native & Extended Codecs**: Added `.jp2`/`.j2k`/`.jpx`/`.jpf` (`libopenjp2`) and `.heic`/`.heif`/`.hif` (`libheif`) via [native_codecs.rs](../crates/photon-image/src/native_codecs.rs), `avif-native`, 29 `rawler` Camera RAW formats, `.kra` (Krita), and `.icns` (`image/x-icns` in [codec.rs](../crates/photon-image/src/codec.rs) via `extract_icns_best_payload`).
-- **Hybrid Archive/PDF**: `ArchiveSession` ([archive.rs](../crates/photon-image/src/archive.rs)) indexes `.cbz`/`.zip`/`.pdf` pages lazily and materializes requested pages on demand, paired with a windowed Filmstrip in Viewer and Open / Edit / `xdg-open` actions in Browser.
+- **Hybrid Archive/PDF**: `ArchiveSession` ([archive.rs](../crates/photon-image/src/archive.rs)) indexes `.cbz`/`.zip`/`.pdf` pages lazily and materializes requested pages on demand, paired with a windowed Filmstrip in Viewer and Open / Edit / `xdg-open` actions in Browser. The Filmstrip and Browser grid are virtualized: only the visible range (+`FILMSTRIP_VISIBLE_OVERSCAN` / `VISIBLE_OVERSCAN_ROWS`) is scheduled for thumbnails, the strip scrolls itself to follow the active page on open/next/prev, and its range is recomputed on window resize so newly revealed thumbs load without a scroll event.
 
 ### 7. 3-Process Architecture & Linux Taskbar Separation
 - **3-Process Routing**: `compute_launch_route` ([main.rs](../crates/photon-desktop/src/main.rs)) routes launches across:

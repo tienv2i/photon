@@ -186,7 +186,11 @@ pub fn breadcrumbs_bar<'a, M: Clone + 'a>(items: Vec<BreadcrumbItem<M>>) -> Elem
         .into()
 }
 
-pub fn filmstrip_bar<'a, M: Clone + 'a>(items: Vec<FilmstripItem<M>>) -> Element<'a, M> {
+pub fn filmstrip_bar<'a, M: Clone + 'a>(
+    items: Vec<FilmstripItem<M>>,
+    scroll_id: iced::widget::Id,
+    on_scroll: Option<Box<dyn Fn(scrollable::Viewport) -> M + 'a>>,
+) -> Element<'a, M> {
     let mut r = row![].spacing(6).align_y(Alignment::Center);
     for item in items {
         let active = item.active;
@@ -232,10 +236,79 @@ pub fn filmstrip_bar<'a, M: Clone + 'a>(items: Vec<FilmstripItem<M>>) -> Element
         );
     }
 
-    container(scrollable(container(r).padding([8, 12])).direction(
-        scrollable::Direction::Horizontal(scrollable::Scrollbar::default()),
-    ))
-    .width(Length::Fill)
-    .style(crate::theme::surface_panel_style)
-    .into()
+    let strip = scrollable(container(r).padding([8, 12]))
+        .id(scroll_id)
+        .direction(scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::default(),
+        ));
+    let strip = match on_scroll {
+        Some(f) => strip.on_scroll(f),
+        None => strip,
+    };
+    container(strip)
+        .width(Length::Fill)
+        .style(crate::theme::surface_panel_style)
+        .into()
+}
+
+/// Horizontal pitch of one filmstrip thumbnail, including its padding and gap.
+pub const FILMSTRIP_ITEM_PITCH: f32 = 58.0 + 3.0 * 2.0 + 6.0;
+const FILMSTRIP_CONTENT_PADDING: f32 = 12.0;
+
+/// Extra filmstrip items (both sides) kept warm around the visible range.
+pub const FILMSTRIP_VISIBLE_OVERSCAN: usize = 12;
+
+/// Half-open visible filmstrip range (plus `overscan` items on both sides).
+pub fn filmstrip_visible_range(
+    offset_x: f32,
+    viewport_w: f32,
+    total: usize,
+    overscan: usize,
+) -> (usize, usize) {
+    if total == 0 {
+        return (0, 0);
+    }
+    let first =
+        ((offset_x - FILMSTRIP_CONTENT_PADDING).max(0.0) / FILMSTRIP_ITEM_PITCH).floor() as usize;
+    let last = (((offset_x + viewport_w - FILMSTRIP_CONTENT_PADDING).max(0.0)
+        / FILMSTRIP_ITEM_PITCH)
+        .ceil()) as usize;
+    let start = first.saturating_sub(overscan).min(total);
+    let end = last.saturating_add(overscan).min(total);
+    (start, end.max(start))
+}
+
+/// Scroll offset that centers `index` in a filmstrip viewport.
+pub fn filmstrip_offset_for_index(index: usize, viewport_w: f32) -> f32 {
+    (index as f32 * FILMSTRIP_ITEM_PITCH + FILMSTRIP_ITEM_PITCH * 0.5 - viewport_w * 0.5).max(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filmstrip_visible_range_covers_viewport_plus_overscan() {
+        // At the start: 10 items fit in 700 px; overscan adds 4 on the right.
+        assert_eq!(filmstrip_visible_range(0.0, 700.0, 40, 4), (0, 14));
+        // Scrolled one viewport: first visible item is 9, worst case 19.
+        assert_eq!(filmstrip_visible_range(700.0, 700.0, 40, 4), (5, 24));
+        // End clamp at the maximum realistic scroll offset.
+        assert_eq!(filmstrip_visible_range(2100.0, 700.0, 40, 4), (25, 40));
+        assert_eq!(filmstrip_visible_range(10_000.0, 700.0, 40, 4), (40, 40));
+        assert_eq!(filmstrip_visible_range(0.0, 700.0, 0, 4), (0, 0));
+    }
+
+    #[test]
+    fn filmstrip_offset_centers_active_item() {
+        assert_eq!(filmstrip_offset_for_index(0, 700.0), 0.0);
+        let offset = filmstrip_offset_for_index(10, 700.0);
+        assert!(offset > 0.0);
+        // Item 10 sits roughly at the middle of the viewport after scrolling.
+        assert!(
+            (offset + 700.0 * 0.5 - (10.0 * FILMSTRIP_ITEM_PITCH + FILMSTRIP_ITEM_PITCH * 0.5))
+                .abs()
+                < 0.01
+        );
+    }
 }

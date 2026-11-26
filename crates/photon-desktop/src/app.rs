@@ -38,6 +38,9 @@ use photon_ui::dialog::{
     ToastSpec, alert_dialog_spec, confirm_dialog_spec, dialog_style_for_theme,
     managed_dialog_stack_with_headers, prompt_dialog_spec, with_toast_banner,
 };
+use photon_ui::grid::{
+    FILMSTRIP_VISIBLE_OVERSCAN, filmstrip_offset_for_index, filmstrip_visible_range,
+};
 use photon_ui::icons::Icon;
 use photon_ui::menu::{
     MenuEntry, MenuIconButton, MenuItem, menu_panel_entries, with_anchored_menu,
@@ -78,10 +81,10 @@ use photon_ui::editor::{anchor_grid_3x3, checker_swatch};
 use photon_viewer::{
     ViewerMessage, ViewerTranslateMode, ViewerTranslateState, ViewerViewState,
     build_viewer_context_menu, build_viewer_quality_menu_entries, build_viewer_toolbar,
-    build_viewer_view, dual_spread_slots, dual_spread_slots_for, step_dual_spread,
-    viewer_counter_summary, viewer_double_fit_geometries, viewer_reader_options_right_offset,
-    viewer_status_summary, viewer_utilities_menu_right_offset, webtoon_index_at_scroll,
-    webtoon_offset_for_index, webtoon_scroll_id,
+    build_viewer_view, dual_spread_slots, dual_spread_slots_for, filmstrip_scroll_id,
+    step_dual_spread, viewer_counter_summary, viewer_double_fit_geometries,
+    viewer_reader_options_right_offset, viewer_status_summary, viewer_utilities_menu_right_offset,
+    webtoon_index_at_scroll, webtoon_offset_for_index, webtoon_scroll_id,
 };
 
 static CORE_HANDLE: OnceLock<CoreHandle> = OnceLock::new();
@@ -560,6 +563,7 @@ pub struct PhotonGui {
     pub(crate) viewer_adjustments_open: bool,
     pub(crate) viewer_right_panels: SidebarOrderState<ViewerRightPanel>,
     pub(crate) viewer_filmstrip_open: bool,
+    pub(crate) viewer_filmstrip_offset: f32,
     pub(crate) viewer_color_popover_open: bool,
     pub(crate) dock_drag: DockDragState,
     pub(crate) browser_left_width_drag: Option<f32>,
@@ -764,6 +768,10 @@ pub enum Message {
     ToggleFullscreen,
     ToggleFilmstrip,
     CloseFilmstrip,
+    /// Horizontal scroll offset of the filmstrip in logical pixels.
+    FilmstripScrolled {
+        offset: f32,
+    },
     ToggleViewerInspector,
     CopyViewerPath,
     ToggleViewerColorPopover,
@@ -1248,6 +1256,7 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
         viewer_adjustments_open,
         viewer_right_panels,
         viewer_filmstrip_open,
+        viewer_filmstrip_offset: 0.0,
         viewer_color_popover_open: viewer_adjustments_open,
         dock_drag: DockDragState::default(),
         browser_left_width_drag: None,
@@ -1651,8 +1660,17 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         Message::CloseFilmstrip => {
             state.context_menu = None;
             state.viewer_filmstrip_open = false;
+            state.viewer_filmstrip_offset = 0.0;
             let layout_task = commit_layout_with(state, |_| {});
             Task::batch([layout_task, sync_ui_tree_task(state)])
+        }
+        Message::FilmstripScrolled { offset } => {
+            let offset = offset.max(0.0);
+            if (state.viewer_filmstrip_offset - offset).abs() < 0.5 {
+                return Task::none();
+            }
+            state.viewer_filmstrip_offset = offset;
+            schedule_missing_thumbnails(state)
         }
         Message::ToggleFilmstrip => {
             state.active_menu = None;
@@ -1661,10 +1679,16 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             let thumb_task = if state.viewer_filmstrip_open {
                 schedule_missing_thumbnails(state)
             } else {
+                state.viewer_filmstrip_offset = 0.0;
                 Task::none()
             };
             let layout_task = commit_layout_with(state, |_| {});
-            Task::batch([thumb_task, layout_task, sync_ui_tree_task(state)])
+            Task::batch([
+                thumb_task,
+                scroll_filmstrip_to_active(state),
+                layout_task,
+                sync_ui_tree_task(state),
+            ])
         }
         Message::ToggleViewerInspector => {
             state.active_menu = None;
@@ -1982,7 +2006,12 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             if state.main_window == Some(id) {
                 state.window_size = size;
                 if is_standalone_viewer() {
-                    return sync_ui_tree_task(state);
+                    let thumb_task = if state.viewer_filmstrip_open {
+                        schedule_missing_thumbnails(state)
+                    } else {
+                        Task::none()
+                    };
+                    return Task::batch([thumb_task, sync_ui_tree_task(state)]);
                 }
                 if state
                     .suppress_resize_until
@@ -2313,10 +2342,14 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             if archive_changed {
                 state.image_sizes.clear();
                 state.thumbnails_loading.clear();
+                state.viewer_filmstrip_offset = 0.0;
             }
             let size_task = probe_viewer_image_sizes(state);
 
             let mut tasks = vec![sync_ui_tree_task(state), size_task];
+            if viewer_changed && state.viewer_filmstrip_open {
+                tasks.push(scroll_filmstrip_to_active(state));
+            }
             if caption_changed || editor_changed {
                 state.editor_ui.ai_caption_draft = state
                     .snapshot
@@ -2507,6 +2540,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 state.webtoon_visible_index = None;
                 state.browser_visible_range = Some((0, BROWSER_INITIAL_VISIBLE_ENTRIES));
                 state.thumbnails_loading.clear();
+                state.viewer_filmstrip_offset = 0.0;
                 tasks.push(schedule_missing_thumbnails(state));
             }
             if viewer_changed {
@@ -5999,10 +6033,16 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             let thumb_task = if state.viewer_filmstrip_open {
                 schedule_missing_thumbnails(state)
             } else {
+                state.viewer_filmstrip_offset = 0.0;
                 Task::none()
             };
             let layout_task = commit_layout_with(state, |_| {});
-            Task::batch([thumb_task, layout_task, sync_ui_tree_task(state)])
+            Task::batch([
+                thumb_task,
+                scroll_filmstrip_to_active(state),
+                layout_task,
+                sync_ui_tree_task(state),
+            ])
         }
         Message::PanelPopupToggleEditorTools => {
             state.active_menu = None;
@@ -12333,6 +12373,7 @@ fn map_viewer_message(msg: ViewerMessage) -> Message {
         ViewerMessage::RevealInFolder(p) => Message::RevealInFolder(p),
         ViewerMessage::ToggleFilmstrip => Message::ToggleFilmstrip,
         ViewerMessage::CloseFilmstrip => Message::CloseFilmstrip,
+        ViewerMessage::FilmstripScrolled { offset } => Message::FilmstripScrolled { offset },
         ViewerMessage::ToggleViewerInspector => Message::ToggleViewerInspector,
         ViewerMessage::ToggleViewerColorPopover => Message::ToggleViewerColorPopover,
         ViewerMessage::CloseViewerPanel(p) => Message::CloseViewerPanel(p),
@@ -13533,6 +13574,13 @@ fn thumbnail_keep_paths(state: &PhotonGui) -> Vec<String> {
             }
         }
     }
+    if state.viewer_filmstrip_open {
+        for idx in viewer_filmstrip_thumb_range(state) {
+            if let Some(p) = state.snapshot.viewer_images.get(idx) {
+                ordered.push(p.clone());
+            }
+        }
+    }
     ordered.extend(state.snapshot.meta.selection.iter().cloned());
     ordered
 }
@@ -13582,6 +13630,45 @@ fn queue_thumbnail_candidates(
     }
 }
 
+/// Approximate filmstrip viewport width (window minus the close-button column).
+fn viewer_filmstrip_viewport_width(state: &PhotonGui) -> f32 {
+    (state.window_size.width - 48.0).max(120.0)
+}
+
+/// Scroll the filmstrip so the active page is centered when it opens or changes.
+fn scroll_filmstrip_to_active(state: &PhotonGui) -> Task<Message> {
+    if !state.viewer_filmstrip_open {
+        return Task::none();
+    }
+    let index = state.snapshot.meta.viewer_index.unwrap_or(0);
+    let viewport_w = viewer_filmstrip_viewport_width(state);
+    widget_operation::scroll_to(
+        filmstrip_scroll_id(),
+        scrollable::AbsoluteOffset {
+            x: Some(filmstrip_offset_for_index(index, viewport_w)),
+            y: None,
+        },
+    )
+}
+
+/// Index range the filmstrip needs thumbnails for, derived from its last known
+/// scroll offset and the current viewport width so resizes are covered too.
+fn viewer_filmstrip_thumb_range(state: &PhotonGui) -> std::ops::Range<usize> {
+    let total = state.snapshot.viewer_images.len();
+    if total == 0 {
+        return 0..0;
+    }
+    let (start, end) = filmstrip_visible_range(
+        state.viewer_filmstrip_offset,
+        viewer_filmstrip_viewport_width(state),
+        total,
+        FILMSTRIP_VISIBLE_OVERSCAN,
+    );
+    let start = start.min(total);
+    let end = end.min(total).max(start);
+    start..end
+}
+
 fn schedule_missing_thumbnails(state: &mut PhotonGui) -> Task<Message> {
     let is_archive = state.snapshot.meta.viewer_archive.is_some();
     prune_thumbnails(state);
@@ -13600,6 +13687,15 @@ fn schedule_missing_thumbnails(state: &mut PhotonGui) -> Task<Message> {
         queue_thumbnail_candidates(state, candidates, &mut pending);
     }
 
+    // Filmstrip first: schedule exactly what the strip currently shows, for both
+    // plain folders and archives (their pages are virtual paths).
+    if workspace == Workspace::Viewer && state.viewer_filmstrip_open {
+        let candidates: Vec<String> = viewer_filmstrip_thumb_range(state)
+            .filter_map(|idx| state.snapshot.viewer_images.get(idx))
+            .cloned()
+            .collect();
+        queue_thumbnail_candidates(state, candidates, &mut pending);
+    }
     if is_archive {
         let center = state.snapshot.meta.viewer_index.unwrap_or(0);
         let candidates: Vec<String> = archive_thumbnail_window_indices(

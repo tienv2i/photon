@@ -29,7 +29,7 @@ use photon_ui::theme::{
     hairline_rule_style, input_style, popover_style, slider_style, surface_panel_style,
 };
 use photon_ui::toolbar::{
-    WorkspaceSwitcherMode, WorkspaceTab, toolbar, toolbar_button_group, workspace_switcher_mode,
+    WorkspaceSwitcherMode, WorkspaceTab, toolbar, toolbar_button_group,
     workspace_switcher_responsive,
 };
 use photon_ui::tooltip::{TooltipPosition, with_tooltip, with_tooltip_pos};
@@ -199,6 +199,10 @@ pub enum ViewerMessage {
     RevealInFolder(String),
     ToggleFilmstrip,
     CloseFilmstrip,
+    /// Horizontal scroll offset of the filmstrip in logical pixels.
+    FilmstripScrolled {
+        offset: f32,
+    },
     ToggleViewerInspector,
     ToggleViewerColorPopover,
     CloseViewerPanel(ViewerRightPanel),
@@ -957,9 +961,13 @@ pub fn build_viewer_view<'a>(state: ViewerViewState<'a>) -> Element<'a, ViewerMe
                 .padding([4, 10]),
             );
         }
+        let on_scroll: Option<Box<dyn Fn(scrollable::Viewport) -> ViewerMessage>> =
+            Some(Box::new(move |viewport| ViewerMessage::FilmstripScrolled {
+                offset: viewport.absolute_offset().x,
+            }));
         filmstrip_col = filmstrip_col.push(
             row![
-                container(filmstrip_bar(items)).width(Fill),
+                container(filmstrip_bar(items, filmstrip_scroll_id(), on_scroll)).width(Fill),
                 container(close_btn).padding([4, 6]),
             ]
             .align_y(Alignment::Center)
@@ -1326,6 +1334,10 @@ fn build_viewer_double_panes<'a>(
 
 pub fn webtoon_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("viewer_webtoon_strip")
+}
+
+pub fn filmstrip_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("viewer_filmstrip_strip")
 }
 
 pub fn compute_webtoon_layout(state: ViewerViewState<'_>) -> (f32, Vec<(String, f32, f32)>) {

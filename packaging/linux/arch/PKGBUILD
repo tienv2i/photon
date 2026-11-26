@@ -19,5 +19,6 @@ package() {
   local src_root="${_srcdir:-$startdir/../../..}"
   cd "$src_root"
   python3 scripts/install.py install --skip-build --prefix "$pkgdir/usr"
+  rm -f "$pkgdir/usr/share/applications/mimeinfo.cache" "$pkgdir/usr/share/icons/hicolor/icon-theme.cache"
   sed -i "s|$pkgdir/usr|/usr|g" "$pkgdir/usr/share/applications/"*.desktop
 }

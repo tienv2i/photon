@@ -21,6 +21,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install build & packaging dependencies
         run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config clang lld \
@@ -37,6 +38,7 @@ jobs:
           PKG_DIR="$PWD/dist/deb-root"
           mkdir -p "$PKG_DIR/DEBIAN"
           python3 scripts/install.py install --skip-build --prefix "$PKG_DIR/usr"
+          rm -f "$PKG_DIR/usr/share/applications/mimeinfo.cache" "$PKG_DIR/usr/share/icons/hicolor/icon-theme.cache"
           sed -i "s|$PKG_DIR/usr|/usr|g" "$PKG_DIR/usr/share/applications/"*.desktop
           cat > "$PKG_DIR/DEBIAN/control" <<EOF
           Package: photon
@@ -104,6 +106,7 @@ jobs:
           fi
           STAGE="$PWD/dist/rpm-stage"
           python3 scripts/install.py install --skip-build --prefix "$STAGE/usr"
+          rm -f "$STAGE/usr/share/applications/mimeinfo.cache" "$STAGE/usr/share/icons/hicolor/icon-theme.cache"
           sed -i "s|$STAGE/usr|/usr|g" "$STAGE/usr/share/applications/"*.desktop
           mkdir -p "$HOME/rpmbuild"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
           cat > "$HOME/rpmbuild/SPECS/photon.spec" <<EOF
@@ -168,6 +171,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Flatpak & build bundle
         run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils
           flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo

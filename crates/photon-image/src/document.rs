@@ -4321,4 +4321,102 @@ mod tests {
         assert!((i16::from(moved_px[1]) - 150).abs() <= 1);
         assert!((i16::from(moved_px[2]) - 200).abs() <= 1);
     }
+
+    #[test]
+    fn hsv_adjustment_respects_selection_and_layer_targets() {
+        let base = RgbaImage::from_pixel(16, 16, Rgba([220, 40, 40, 255]));
+        let mut doc = EditorDocument::from_rgba(PathBuf::from("hsv_sel.png"), base);
+        let top_img = RgbaImage::from_pixel(16, 16, Rgba([40, 200, 40, 255]));
+        doc.apply_layer_op(LayerOperation::AddImage {
+            name: "Top".to_owned(),
+            offset_x: 0,
+            offset_y: 0,
+            pixels: Arc::new(top_img),
+        })
+        .unwrap();
+
+        let mut sel_rect = vec![0u8; 16 * 16];
+        for y in 4..10 {
+            for x in 4..10 {
+                sel_rect[y * 16 + x] = 255;
+            }
+        }
+        doc.stack
+            .selection
+            .combine(&sel_rect, SelectionBooleanOp::Replace);
+
+        let hsv = HsvAdjustment {
+            hue: 120.0,
+            saturation: 0.0,
+            value: 0.0,
+        };
+
+        // 1. ActiveLayer + selection_only = true: only top layer inside [4..10, 4..10] shifts hue.
+        assert!(
+            doc.apply_with_selection(EditOp::AdjustHsv(hsv), ApplyTarget::ActiveLayer, true)
+                .unwrap()
+        );
+        assert_eq!(
+            doc.stack().layers[0].pixels.get_pixel(6, 6).0,
+            [220, 40, 40, 255]
+        );
+        assert_eq!(
+            doc.stack().layers[1].pixels.get_pixel(1, 1).0,
+            [40, 200, 40, 255]
+        );
+        assert_ne!(
+            doc.stack().layers[1].pixels.get_pixel(6, 6).0,
+            [40, 200, 40, 255]
+        );
+
+        // Undo, then ActiveLayer + selection_only = false: outside selection also shifts.
+        assert!(doc.undo().unwrap());
+        assert!(
+            doc.apply_with_selection(EditOp::AdjustHsv(hsv), ApplyTarget::ActiveLayer, false)
+                .unwrap()
+        );
+        assert_ne!(
+            doc.stack().layers[1].pixels.get_pixel(1, 1).0,
+            [40, 200, 40, 255]
+        );
+        assert_eq!(
+            doc.stack().layers[0].pixels.get_pixel(6, 6).0,
+            [220, 40, 40, 255]
+        );
+
+        // Undo, then WholeImage + selection_only = true: both layers shift inside selection only.
+        assert!(doc.undo().unwrap());
+        assert!(
+            doc.apply_with_selection(EditOp::AdjustHsv(hsv), ApplyTarget::WholeImage, true)
+                .unwrap()
+        );
+        assert_eq!(
+            doc.stack().layers[0].pixels.get_pixel(1, 1).0,
+            [220, 40, 40, 255]
+        );
+        assert_ne!(
+            doc.stack().layers[0].pixels.get_pixel(6, 6).0,
+            [220, 40, 40, 255]
+        );
+        assert_eq!(
+            doc.stack().layers[1].pixels.get_pixel(1, 1).0,
+            [40, 200, 40, 255]
+        );
+        assert_ne!(
+            doc.stack().layers[1].pixels.get_pixel(6, 6).0,
+            [40, 200, 40, 255]
+        );
+
+        // Undo, then NewLayer + selection_only = true: new layer is transparent outside selection.
+        assert!(doc.undo().unwrap());
+        assert!(
+            doc.apply_with_selection(EditOp::AdjustHsv(hsv), ApplyTarget::NewLayer, true)
+                .unwrap()
+        );
+        assert_eq!(doc.stack().layers.len(), 3);
+        let new_layer = &doc.stack().layers[2];
+        assert_eq!(new_layer.pixels.get_pixel(1, 1).0[3], 0);
+        assert_eq!(new_layer.pixels.get_pixel(6, 6).0[3], 255);
+        assert_ne!(new_layer.pixels.get_pixel(6, 6).0, [40, 200, 40, 255]);
+    }
 }

@@ -44,15 +44,28 @@ use photon_viewer_canvas::{ViewerCanvasEvent, ViewerImageFrame};
 static CORE_HANDLE: OnceLock<CoreHandle<ViewerCore>> = OnceLock::new();
 static BG_RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 static GPU_BACKEND: OnceLock<String> = OnceLock::new();
+static CLEANUP_PATHS: OnceLock<(std::path::PathBuf, std::path::PathBuf)> = OnceLock::new();
 
 pub fn init_globals(
     core: CoreHandle<ViewerCore>,
     bg_rt: tokio::runtime::Handle,
     gpu_backend: String,
+    socket_path: std::path::PathBuf,
+    reg_path: std::path::PathBuf,
 ) {
     let _ = CORE_HANDLE.set(core);
     let _ = BG_RUNTIME.set(bg_rt);
     let _ = GPU_BACKEND.set(gpu_backend);
+    let _ = CLEANUP_PATHS.set((socket_path, reg_path));
+}
+
+fn fast_exit() -> ! {
+    if let Some((sock, reg)) = CLEANUP_PATHS.get() {
+        let _ = std::fs::remove_file(sock);
+        let _ = std::fs::remove_file(reg);
+    }
+    photon_storage::logging::log_shutdown();
+    std::process::exit(0);
 }
 
 fn spawn_bg<F, T>(f: F) -> impl Future<Output = T> + Send + 'static
@@ -291,11 +304,10 @@ pub fn update(app: &mut ViewerApp, message: Message) -> Task<Message> {
             app.window_id = Some(id);
             app.report_ui_tree_task()
         }
-        Message::WindowCloseRequested(_id) => iced::exit(),
+        Message::WindowCloseRequested(_id) => fast_exit(),
         Message::WindowClosed(id) => {
             if app.window_id == Some(id) {
-                app.window_id = None;
-                return iced::exit();
+                fast_exit();
             }
             Task::none()
         }
@@ -336,13 +348,20 @@ pub fn update(app: &mut ViewerApp, message: Message) -> Task<Message> {
             if let photon_protocol::EventKind::UiActionRequested { target_id, .. } = ev.kind
                 && target_id == "app.exit"
             {
-                return iced::exit();
+                fast_exit();
             }
             Task::none()
         }
         Message::FrameDecoded { path, frame } => {
             app.decoding_frames.remove(&path);
             if let Ok(frame) = frame {
+                tracing::info!(
+                    target: "photon::viewer",
+                    path = %path,
+                    width = frame.width,
+                    height = frame.height,
+                    "viewer frame decoded"
+                );
                 app.image_sizes
                     .insert(path.clone(), (frame.width, frame.height));
                 if app.frame_cache.len() >= 12 {
@@ -706,7 +725,7 @@ impl ViewerApp {
                             );
                         }
                         keyboard::Key::Character("w") | keyboard::Key::Character("q") => {
-                            return iced::exit();
+                            fast_exit();
                         }
                         keyboard::Key::Character("0") => {
                             self.zoom = 1.0;
@@ -725,7 +744,7 @@ impl ViewerApp {
                         } else if self.is_fullscreen {
                             return self.toggle_fullscreen();
                         } else {
-                            return iced::exit();
+                            fast_exit();
                         }
                     }
                     Key::Named(Named::F11) => return self.toggle_fullscreen(),
@@ -777,7 +796,7 @@ impl ViewerApp {
                             self.pan_y = 0.0;
                         }
                         "q" | "Q" => {
-                            return iced::exit();
+                            fast_exit();
                         }
                         _ => {}
                     },
@@ -1034,7 +1053,10 @@ impl ViewerApp {
                 enabled: true,
                 visible: true,
                 bounds: None,
-                value: Some(format!("{:.2}", self.zoom)),
+                value: Some(match &self.viewer_frame {
+                    Some(f) => format!("{:.2} ({}x{})", self.zoom, f.width, f.height),
+                    None => format!("{:.2}", self.zoom),
+                }),
             }],
         };
         let core = self.core.clone();

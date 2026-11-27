@@ -176,7 +176,11 @@ fn main() {
         }
     }
 
-    app::init_globals(handle, bg_rt, gpu_backend);
+    let reg_path = paths
+        .runtime_dir
+        .join("viewers")
+        .join(format!("v-{pid}.json"));
+    app::init_globals(handle, bg_rt, gpu_backend, socket_path, reg_path);
 
     if let Err(err) = iced::daemon(app::boot, app::update, app::view)
         .settings(iced::Settings {

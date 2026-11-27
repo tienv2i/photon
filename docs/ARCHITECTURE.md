@@ -16,7 +16,7 @@ The workspace is organized into three explicit layers:
 
 ## Startup, Shutdown & GPU Optimizations
 - **Linux `WGPU_BACKEND=vulkan` Default**: Each GUI app sets `WGPU_BACKEND=vulkan` on Linux when unset and hardware acceleration is enabled, avoiding dual Vulkan + EGL/GLES initialization and teardown overhead on Wayland.
-- **Non-Blocking `BG_RUNTIME` Decode**: Blocking image/thumbnail decode jobs run on an external Tokio runtime (`BG_RUNTIME`) rather than `iced`'s internal runtime so `window::close` / `iced::exit()` returns immediately without waiting for abandoned decode tasks.
+- **Non-Blocking `BG_RUNTIME` Decode & Direct `iced::exit()`**: Blocking image/thumbnail decode jobs run on an external Tokio runtime (`BG_RUNTIME`) rather than `iced`'s internal runtime, and single-window close handlers (`WindowCloseRequested`, `Ctrl+W`, `Esc`, `app.exit`) call `iced::exit()` directly without duplicate `Event::Window` listeners or `window::close` round-trips.
 - **Dedicated `photon-viewer-canvas`**: Compiles and warms up only a single minimal textured-quad WGSL shader (single/dual spread, zoom/pan/rotate, adjustments, AA/denoise, marquee), keeping Viewer first-launch warm-up minimal.
 
 ## UI, Panel & Dialog Architecture

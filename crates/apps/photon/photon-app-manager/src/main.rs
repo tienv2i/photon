@@ -151,7 +151,7 @@ fn main() {
             }
         });
         let gpu_backend = if use_software_renderer
-            || std::env::var("ICED_BACKEND").ok().as_deref() == Some("tiny-skia")
+            || std::env::var("ICED_BACKEND").ok().as_deref() != Some("wgpu")
         {
             "tiny-skia"
         } else {
@@ -174,16 +174,8 @@ fn main() {
         rt.block_on(std::future::pending::<()>());
     });
 
-    if use_software_renderer {
+    if use_software_renderer || std::env::var_os("ICED_BACKEND").is_none() {
         unsafe { std::env::set_var("ICED_BACKEND", "tiny-skia") };
-    } else {
-        if std::env::var_os("ICED_BACKEND").is_none() {
-            unsafe { std::env::set_var("ICED_BACKEND", "wgpu") };
-        }
-        #[cfg(target_os = "linux")]
-        if std::env::var_os("WGPU_BACKEND").is_none() {
-            unsafe { std::env::set_var("WGPU_BACKEND", "vulkan") };
-        }
     }
 
     app::init_globals(handle, bg_rt, gpu_backend);

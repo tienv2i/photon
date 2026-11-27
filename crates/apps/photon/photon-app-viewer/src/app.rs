@@ -707,12 +707,8 @@ impl ViewerApp {
         }
         Task::perform(
             spawn_bg(move || {
-                let frame = decode_rgba(&path).map(|(w, h, rgba)| ViewerImageFrame {
-                    key: path.clone(),
-                    revision: 1,
-                    width: w,
-                    height: h,
-                    rgba: Arc::new(rgba),
+                let frame = decode_rgba(&path).map(|(w, h, rgba)| {
+                    ViewerImageFrame::from_rgba(path.clone(), 1, w, h, Arc::new(rgba))
                 });
                 (path, frame)
             }),

@@ -79,7 +79,7 @@ See [docs/PLUGINS.md](docs/PLUGINS.md) for wire protocols, model lookup paths, a
 | `photon-plugins` | Process-isolated NDJSON & `jsonl-stdio` plugin discovery and execution bridge | Yes |
 | `photon-ipc` | Photon IPC bindings over `fw-ipc` + multi-viewer instance registry | Yes |
 | `photon-app-common` | Shared CLI parser, launch routing, image file dialogs, and window activation | Yes |
-| `photon-viewer-canvas` | Lightweight `wgpu` canvas for Viewer (`Single` & `Double` spread, single minimal WGSL shader) | `iced` + `wgpu` |
+| `photon-viewer-canvas` | Lightweight 2D `iced::widget::Canvas` for Viewer (`Single` & `Double` spread, runs on `tiny-skia` & `wgpu` with zero WGSL shaders) | `iced` UI |
 | `photon-canvas` | Full Editor `wgpu 27` `ImageCanvasProgram`, Stage 1/Stage 2 WGSL pipeline, vector/brush/selection overlays | `iced` + `wgpu` |
 | `photon-browser` | Browser workspace UI, file grid/list/details views, Open Folder quick toolbar, batch dialogs | `iced` UI |
 | `photon-viewer` | Viewer workspace UI, spread/webtoon layout, filmstrip, quality options, view adjustments | `iced` UI |

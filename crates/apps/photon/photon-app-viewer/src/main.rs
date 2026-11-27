@@ -146,7 +146,7 @@ fn main() {
             }
         };
         let gpu_backend = if use_software_renderer
-            || std::env::var("ICED_BACKEND").ok().as_deref() == Some("tiny-skia")
+            || std::env::var("ICED_BACKEND").ok().as_deref() != Some("wgpu")
         {
             "tiny-skia"
         } else {
@@ -165,13 +165,13 @@ fn main() {
     if let Some(path) = initial_viewer_path {
         bg_rt.spawn_blocking(move || {
             let frame = app::decode_rgba(&path).map(|(w, h, rgba)| {
-                photon_viewer_canvas::ViewerImageFrame {
-                    key: path.clone(),
-                    revision: 1,
-                    width: w,
-                    height: h,
-                    rgba: std::sync::Arc::new(rgba),
-                }
+                photon_viewer_canvas::ViewerImageFrame::from_rgba(
+                    path.clone(),
+                    1,
+                    w,
+                    h,
+                    std::sync::Arc::new(rgba),
+                )
             });
             let _ = predecode_tx.send(Some((path, frame)));
         });
@@ -183,16 +183,8 @@ fn main() {
         rt.block_on(std::future::pending::<()>());
     });
 
-    if use_software_renderer {
+    if use_software_renderer || std::env::var_os("ICED_BACKEND").is_none() {
         unsafe { std::env::set_var("ICED_BACKEND", "tiny-skia") };
-    } else {
-        if std::env::var_os("ICED_BACKEND").is_none() {
-            unsafe { std::env::set_var("ICED_BACKEND", "wgpu") };
-        }
-        #[cfg(target_os = "linux")]
-        if std::env::var_os("WGPU_BACKEND").is_none() {
-            unsafe { std::env::set_var("WGPU_BACKEND", "vulkan") };
-        }
     }
 
     let reg_path = paths

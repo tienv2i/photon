@@ -8,16 +8,16 @@ The workspace is organized into three explicit layers:
 1. **Framework (`crates/framework/*`)**: `fw-protocol`, `fw-storage`, `fw-runtime`, `fw-ipc`, `fw-cli`, `fw-dialogs`, `fw-ui`, `fw-panels`, `fw-shell` — domain-agnostic building blocks with zero `photon-*` dependencies (verified by `crates/apps/notes`, a standalone `notes` + `notesctl` app built purely on `fw-*`).
 2. **Components (`crates/components/*`)**: `comp-file-browser` (filesystem profile detection via `libc::statfs` + 0-stat NTFS-aware `scan_dir_fast`).
 3. **Apps (`crates/apps/photon/*` & `crates/apps/notes`)**:
-   - **`photon-app-viewer` (`photon-viewer`)**: owns `ViewerCore` (`fw_runtime::AppCore`) + `ViewerApp` (`iced::daemon`) + dedicated `photon-viewer-canvas` (single minimal WGSL textured-quad shader, zero Editor/Browser/Plugin dependencies).
-   - **`photon-app-manager` (`photon-manager`)**: owns `ManagerCore` (`fw_runtime::AppCore`) + `ManagerApp` (`iced::daemon`) + `photon-browser`, and hosts `--headless` IPC mode.
-   - **`photon-app-editor` (`photon-editor`)**: owns `EditorCore` (`fw_runtime::AppCore`) + `EditorApp` (`iced::daemon`) + `photon-editor` + `photon-canvas`.
+   - **`photon-app-viewer` (`photon-viewer`)**: owns `ViewerCore` (`fw_runtime::AppCore`) + `ViewerApp` (`iced::daemon`) + dedicated `photon-viewer-canvas` (2D `Canvas` running on `tiny-skia` by default with zero GPU/WGSL warm-up, zero Editor/Browser/Plugin dependencies).
+   - **`photon-app-manager` (`photon-manager`)**: owns `ManagerCore` (`fw_runtime::AppCore`) + `ManagerApp` (`iced::daemon`) + `photon-browser`, running on `tiny-skia` by default and hosting `--headless` IPC mode.
+   - **`photon-app-editor` (`photon-editor`)**: owns `EditorCore` (`fw_runtime::AppCore`) + `EditorApp` (`iced::daemon`) + `photon-editor` + `photon-canvas` (`wgpu` GPU pipeline).
    - **`photon-desktop` (`photon`)**: thin CLI dispatcher forwarding GUI and `--headless` invocations to the standalone app binaries.
    - **`photon-cli` (`photonctl`)**: built on `fw-cli` for IPC dispatch, queries, `debug` trace/replay, and MCP stdio serving.
 
-## Startup, Shutdown & GPU Optimizations
-- **Linux `WGPU_BACKEND=vulkan` Default**: Each GUI app sets `WGPU_BACKEND=vulkan` on Linux when unset and hardware acceleration is enabled, avoiding dual Vulkan + EGL/GLES initialization and teardown overhead on Wayland.
-- **Non-Blocking `BG_RUNTIME` Decode & Direct `iced::exit()`**: Blocking image/thumbnail decode jobs run on an external Tokio runtime (`BG_RUNTIME`) rather than `iced`'s internal runtime, and single-window close handlers (`WindowCloseRequested`, `Ctrl+W`, `Esc`, `app.exit`) call `iced::exit()` directly without duplicate `Event::Window` listeners or `window::close` round-trips.
-- **Dedicated `photon-viewer-canvas`**: Compiles and warms up only a single minimal textured-quad WGSL shader (single/dual spread, zoom/pan/rotate, adjustments, AA/denoise, marquee), keeping Viewer first-launch warm-up minimal.
+## Startup, Shutdown & Renderer Strategy
+- **Renderer Per App**: `photon-manager` and `photon-viewer` default to `ICED_BACKEND=tiny-skia` (CPU 2D rasterizer, avoiding Vulkan/WGSL warm-up and swapchain teardown on frequent open/close), while `photon-editor` defaults to `wgpu` (`WGPU_BACKEND=vulkan` on Linux) for 60fps shader adjustments and canvas overlays.
+- **Pre-Decode & Fast Exit**: `photon-viewer` pre-decodes the initial image on `BG_RUNTIME` before `iced::daemon` opens the window, and uses `fast_exit()` (cleaning `v-<pid>.sock`/`.json` + `log_shutdown()`) for instant exit; `photon-manager` and `photon-editor` offload blocking tasks to `BG_RUNTIME` and exit directly via `iced::exit()`.
+- **Dedicated `photon-viewer-canvas`**: Uses `iced::widget::Canvas` (`draw_image` + 2D marquee/rotation) so Viewer runs identically on `tiny-skia` and `wgpu` with zero WGSL shaders.
 
 ## UI, Panel & Dialog Architecture
 - **Layering**: `photon-desktop` composes `photon-ui` (tokens, controls, menus, toolbars, `CurveGraphProgram`), `photon-dialogs` (OS pickers, `DialogManager<DesktopDialogId>`, `OverlayMode::{DimmedFrosted, Cutout, Floating}`), `photon-panels` (`SidebarOrderState`, `DraggablePanelHeaderSpec`, `sidebar_panel`, `sidebar_dock`), `photon-canvas`, and the 3 workspace UI crates (`photon-browser`, `photon-viewer`, `photon-editor`), while keeping all domain mutations routed through `CoreHandle::dispatch`.

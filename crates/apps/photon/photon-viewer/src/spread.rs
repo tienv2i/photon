@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use fw_ui::theme::canvas_backdrop_style;
-use iced::widget::{Shader, container};
+use iced::widget::{Canvas, container};
 use iced::{Element, Fill};
 use photon_protocol::Language;
 use photon_viewer_canvas::{ViewerCanvasEvent, ViewerCanvasProgram, ViewerCanvasTool};
@@ -20,7 +20,7 @@ pub(crate) fn build_viewer_double_panes<'a>(
     let right_path = right_slot.map(|(_, p)| p.to_owned());
 
     let canvas: Element<'_, ViewerMessage> = Element::from(
-        Shader::new(ViewerCanvasProgram {
+        Canvas::new(ViewerCanvasProgram {
             frame: state.viewer_frame.cloned(),
             pair_frame: state.viewer_pair_frame.cloned(),
             dual_gap_px: gap,

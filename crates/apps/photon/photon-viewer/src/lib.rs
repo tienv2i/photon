@@ -33,7 +33,7 @@ use fw_ui::theme::{
 };
 use fw_ui::tooltip::{TooltipPosition, with_tooltip_pos};
 use fw_ui::typography::text;
-use iced::widget::{Shader, column, container, responsive, row, rule, scrollable, stack};
+use iced::widget::{Canvas, column, container, responsive, row, rule, scrollable, stack};
 use iced::{Alignment, Element, Fill, Length};
 use photon_i18n::tr;
 use photon_protocol::{Command, Theme, ViewerRightPanel, ViewerViewMode};
@@ -100,7 +100,7 @@ pub fn build_viewer_view<'a>(state: ViewerViewState<'a>) -> Element<'a, ViewerMe
         match viewer_mode {
             ViewerViewMode::Single => {
                 let canvas: Element<'_, ViewerMessage> = Element::from(
-                    Shader::new(ViewerCanvasProgram {
+                    Canvas::new(ViewerCanvasProgram {
                         frame: state.viewer_frame.cloned(),
                         pair_frame: None,
                         dual_gap_px: 0.0,

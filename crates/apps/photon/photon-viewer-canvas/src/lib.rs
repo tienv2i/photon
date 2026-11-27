@@ -1,18 +1,15 @@
-//! Dedicated lightweight GPU canvas for Photon Viewer (`Single` & `Double` spread modes).
+//! Dedicated lightweight 2D canvas for Photon Viewer (`Single` & `Double` spread modes).
 //!
-//! Contains zero Editor state (no layers, brushes, vector overlays, crop, or selection masks),
-//! compiling and warming up only a single minimal textured-quad WGSL shader.
-
-mod gpu;
+//! Built on `iced::widget::canvas::Program` (`draw_image`), running natively on both
+//! `tiny-skia` (CPU, zero GPU/shader warm-up) and `wgpu` with zero WGSL shaders.
 
 use std::sync::Arc;
 
 use iced::mouse::{self, Cursor};
-use iced::widget::shader::{self, Action};
-use iced::{Event, Point, Rectangle};
+use iced::widget::canvas::{self, Action, Frame, Geometry, Path, Stroke};
+use iced::widget::image as iced_image;
+use iced::{Color, Event, Point, Rectangle, Renderer, Theme, Vector};
 use photon_protocol::{CanvasAntiAliasingMode, ColorAdjustments, ViewportDenoiseMode};
-
-use gpu::ViewerQuadPrimitive;
 
 #[derive(Debug, Clone)]
 pub struct ViewerImageFrame {
@@ -21,6 +18,28 @@ pub struct ViewerImageFrame {
     pub width: u32,
     pub height: u32,
     pub rgba: Arc<Vec<u8>>,
+    pub handle: iced_image::Handle,
+}
+
+impl ViewerImageFrame {
+    pub fn from_rgba(
+        key: String,
+        revision: u64,
+        width: u32,
+        height: u32,
+        rgba: Arc<Vec<u8>>,
+    ) -> Self {
+        let handle =
+            iced_image::Handle::from_rgba(width.max(1), height.max(1), rgba.as_ref().clone());
+        Self {
+            key,
+            revision,
+            width,
+            height,
+            rgba,
+            handle,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -137,7 +156,7 @@ impl ViewerCanvasProgram {
         }
     }
 
-    fn screen_to_image_uv(&self, pos: Point, bounds: Rectangle) -> Option<[f32; 2]> {
+    fn fit_rect(&self, bounds: Rectangle) -> Option<(f32, f32, f32, f32, f32, f32)> {
         let (doc_w, doc_h) = self.effective_doc_size()?;
         let turns = self.quarter_turns % 4;
         let (rot_w, rot_h) = if turns % 2 == 1 {
@@ -149,10 +168,16 @@ impl ViewerCanvasProgram {
         let scale = (fit * self.zoom.max(0.02)).max(0.0001);
         let disp_w = rot_w * scale;
         let disp_h = rot_h * scale;
-        let origin_x = bounds.x + (bounds.width - disp_w) * 0.5 + self.pan_x;
-        let origin_y = bounds.y + (bounds.height - disp_h) * 0.5 + self.pan_y;
-        let u = (pos.x - origin_x) / disp_w;
-        let v = (pos.y - origin_y) / disp_h;
+        let origin_x = (bounds.width - disp_w) * 0.5 + self.pan_x;
+        let origin_y = (bounds.height - disp_h) * 0.5 + self.pan_y;
+        Some((origin_x, origin_y, disp_w, disp_h, doc_w, doc_h))
+    }
+
+    fn screen_to_image_uv(&self, pos: Point, bounds: Rectangle) -> Option<[f32; 2]> {
+        let (origin_x, origin_y, disp_w, disp_h, _, _) = self.fit_rect(bounds)?;
+        let turns = self.quarter_turns % 4;
+        let u = (pos.x - (bounds.x + origin_x)) / disp_w;
+        let v = (pos.y - (bounds.y + origin_y)) / disp_h;
         if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
             return None;
         }
@@ -172,42 +197,98 @@ impl ViewerCanvasProgram {
     }
 }
 
-impl shader::Program<ViewerCanvasEvent> for ViewerCanvasProgram {
+impl canvas::Program<ViewerCanvasEvent> for ViewerCanvasProgram {
     type State = ViewerCanvasState;
-    type Primitive = ViewerQuadPrimitive;
 
-    fn draw(&self, state: &Self::State, _cursor: Cursor, bounds: Rectangle) -> Self::Primitive {
-        let marquee_rect = match (state.marquee_start, state.marquee_current) {
-            (Some(a), Some(b)) => {
-                let x = a.x.min(b.x) - bounds.x;
-                let y = a.y.min(b.y) - bounds.y;
-                let w = (b.x - a.x).abs();
-                let h = (b.y - a.y).abs();
-                if w >= 2.0 && h >= 2.0 {
-                    Some([x, y, w, h])
-                } else {
-                    None
-                }
-            }
-            _ => None,
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+
+        let bg = if let Some([r, g, b]) = self.viewport_bg {
+            Color::from_rgb8(r, g, b)
+        } else if self.dark_theme {
+            Color::from_rgb(0.09, 0.095, 0.11)
+        } else {
+            Color::from_rgb(0.93, 0.935, 0.945)
         };
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), bg);
 
-        ViewerQuadPrimitive {
-            frame: self.frame.clone(),
-            pair_frame: self.pair_frame.clone(),
-            dual_gap_px: self.dual_gap_px,
-            zoom: self.zoom,
-            pan_x: self.pan_x,
-            pan_y: self.pan_y,
-            adjustments: self.adjustments,
-            dark_theme: self.dark_theme,
-            quarter_turns: self.quarter_turns,
-            viewport_bg: self.viewport_bg,
-            aa_mode: self.aa_mode,
-            denoise_mode: self.denoise_mode,
-            marquee_rect,
-            bounds_size: [bounds.width.max(1.0), bounds.height.max(1.0)],
+        if let Some(primary) = &self.frame
+            && let Some((ox, oy, disp_w, disp_h, doc_w, doc_h)) = self.fit_rect(bounds)
+        {
+            let turns = self.quarter_turns % 4;
+            let cx = ox + disp_w * 0.5;
+            let cy = oy + disp_h * 0.5;
+            let scale = if turns % 2 == 1 {
+                disp_w / doc_h.max(1.0)
+            } else {
+                disp_w / doc_w.max(1.0)
+            };
+
+            frame.with_save(|f| {
+                f.translate(Vector::new(cx, cy));
+                if turns != 0 {
+                    f.rotate(f32::from(turns) * std::f32::consts::FRAC_PI_2);
+                }
+                let unrot_w = doc_w * scale;
+                let unrot_h = doc_h * scale;
+                let top_left = Point::new(-unrot_w * 0.5, -unrot_h * 0.5);
+
+                if let Some(pair) = &self.pair_frame {
+                    let (_, target_h, left_doc_w, gap_doc) = dual_spread_geometry(
+                        (primary.width, primary.height),
+                        (pair.width, pair.height),
+                        self.dual_gap_px,
+                    );
+                    let lw = left_doc_w * scale;
+                    let lh = target_h * scale;
+                    let gap = gap_doc * scale;
+                    let rw = (unrot_w - lw - gap).max(1.0);
+                    f.draw_image(
+                        Rectangle::new(top_left, iced::Size::new(lw, lh)),
+                        canvas::Image::new(primary.handle.clone()),
+                    );
+                    f.draw_image(
+                        Rectangle::new(
+                            Point::new(top_left.x + lw + gap, top_left.y),
+                            iced::Size::new(rw, lh),
+                        ),
+                        canvas::Image::new(pair.handle.clone()),
+                    );
+                } else {
+                    f.draw_image(
+                        Rectangle::new(top_left, iced::Size::new(unrot_w, unrot_h)),
+                        canvas::Image::new(primary.handle.clone()),
+                    );
+                }
+            });
         }
+
+        if let (Some(a), Some(b)) = (state.marquee_start, state.marquee_current) {
+            let x = a.x.min(b.x) - bounds.x;
+            let y = a.y.min(b.y) - bounds.y;
+            let w = (b.x - a.x).abs();
+            let h = (b.y - a.y).abs();
+            if w >= 2.0 && h >= 2.0 {
+                let rect_p = Point::new(x, y);
+                let rect_s = iced::Size::new(w, h);
+                frame.fill_rectangle(rect_p, rect_s, Color::from_rgba(0.28, 0.58, 0.98, 0.16));
+                frame.stroke(
+                    &Path::rectangle(rect_p, rect_s),
+                    Stroke::default()
+                        .with_color(Color::from_rgb(0.28, 0.58, 0.98))
+                        .with_width(1.5),
+                );
+            }
+        }
+
+        vec![frame.into_geometry()]
     }
 
     fn update(

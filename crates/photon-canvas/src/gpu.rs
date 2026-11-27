@@ -8,8 +8,8 @@ use iced::wgpu;
 use iced::widget::shader::{Pipeline, Primitive, Viewport};
 use image::{DynamicImage, RgbaImage};
 use photon_protocol::{
-    BlendMode, CanvasAntiAliasingMode, ColorAdjustments, GradientKind, GradientRepeat,
-    ViewportDenoiseMode,
+    BlendMode, CanvasAntiAliasingMode, ColorAdjustments, ColorBalanceAdjustment, GradientKind,
+    GradientRepeat, HsvAdjustment, ViewportDenoiseMode,
 };
 
 use crate::{CpuImageFrame, CpuMaskFrame, GradientPreview, OverlayVertex, TransformPreview};
@@ -33,7 +33,10 @@ pub struct ImageQuadPrimitive {
     pub pan_x: f32,
     pub pan_y: f32,
     pub adjustments: ColorAdjustments,
+    pub hsv: HsvAdjustment,
+    pub balance: ColorBalanceAdjustment,
     pub adj_selection_only: bool,
+    pub adj_active_layer_only: bool,
     pub dark_theme: bool,
     pub crop_rect: Option<[f32; 4]>,
     pub quarter_turns: u8,
@@ -106,12 +109,17 @@ pub(crate) struct Uniforms {
     pub transform_cos_sin: [f32; 2],
     pub transform_has_base: f32,
     pub adj_selection_only: f32,
-    pub _pad3: [f32; 2],
+    pub adj_active_layer_only: f32,
+    pub _pad3: f32,
     pub gradient_line: [f32; 4],
     pub gradient_params: [f32; 4],
     pub gradient_meta: [f32; 4],
     pub gradient_stop_colors: [[f32; 4]; 12],
     pub gradient_stop_pos: [[f32; 4]; 3],
+    pub hsv_adj: [f32; 4],
+    pub cb_shadows: [f32; 4],
+    pub cb_midtones: [f32; 4],
+    pub cb_highlights: [f32; 4],
 }
 
 impl Uniforms {
@@ -226,12 +234,17 @@ struct Uniforms {
     transform_cos_sin: vec2<f32>,
     transform_has_base: f32,
     adj_selection_only: f32,
-    _pad3: vec2<f32>,
+    adj_active_layer_only: f32,
+    _pad3: f32,
     gradient_line: vec4<f32>,
     gradient_params: vec4<f32>,
     gradient_meta: vec4<f32>,
     gradient_stop_colors: array<vec4<f32>, 12>,
     gradient_stop_pos: array<vec4<f32>, 3>,
+    hsv_adj: vec4<f32>,
+    cb_shadows: vec4<f32>,
+    cb_midtones: vec4<f32>,
+    cb_highlights: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -392,6 +405,72 @@ fn apply_curve_lut(rgb: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
 }
 
+fn apply_hsv_adj(in_rgb: vec3<f32>) -> vec3<f32> {
+    let dh = clamp(u.hsv_adj.x, -180.0, 180.0);
+    let ds = clamp(u.hsv_adj.y, -1.0, 1.0);
+    let dv = clamp(u.hsv_adj.z, -1.0, 1.0);
+    if (abs(dh) < 1e-4 && abs(ds) < 1e-4 && abs(dv) < 1e-4) {
+        return in_rgb;
+    }
+    let cmax = max(in_rgb.r, max(in_rgb.g, in_rgb.b));
+    let cmin = min(in_rgb.r, min(in_rgb.g, in_rgb.b));
+    let delta = cmax - cmin;
+    var hue: f32 = 0.0;
+    if (delta >= 1e-5) {
+        if (abs(cmax - in_rgb.r) < 1e-5) {
+            hue = 60.0 * (((in_rgb.g - in_rgb.b) / delta) % 6.0);
+        } else if (abs(cmax - in_rgb.g) < 1e-5) {
+            hue = 60.0 * (((in_rgb.b - in_rgb.r) / delta) + 2.0);
+        } else {
+            hue = 60.0 * (((in_rgb.r - in_rgb.g) / delta) + 4.0);
+        }
+    }
+    if (hue < 0.0) { hue = hue + 360.0; }
+    var sat = select(delta / cmax, 0.0, cmax < 1e-5);
+    var val = cmax;
+    hue = (hue + dh) % 360.0;
+    if (hue < 0.0) { hue = hue + 360.0; }
+    sat = clamp(select(sat * (1.0 + ds), sat + (1.0 - sat) * ds, ds >= 0.0), 0.0, 1.0);
+    val = clamp(select(val * (1.0 + dv), val + (1.0 - val) * dv, dv >= 0.0), 0.0, 1.0);
+    let c = val * sat;
+    let x = c * (1.0 - abs(((hue / 60.0) % 2.0) - 1.0));
+    let m = val - c;
+    var rgb = vec3<f32>(0.0);
+    if (hue < 60.0) { rgb = vec3<f32>(c, x, 0.0); }
+    else if (hue < 120.0) { rgb = vec3<f32>(x, c, 0.0); }
+    else if (hue < 180.0) { rgb = vec3<f32>(0.0, c, x); }
+    else if (hue < 240.0) { rgb = vec3<f32>(0.0, x, c); }
+    else if (hue < 300.0) { rgb = vec3<f32>(x, 0.0, c); }
+    else { rgb = vec3<f32>(c, 0.0, x); }
+    return clamp(rgb + vec3<f32>(m), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn apply_color_balance_adj(in_rgb: vec3<f32>) -> vec3<f32> {
+    let sh = clamp(u.cb_shadows.xyz, vec3<f32>(-1.0), vec3<f32>(1.0));
+    let md = clamp(u.cb_midtones.xyz, vec3<f32>(-1.0), vec3<f32>(1.0));
+    let hi = clamp(u.cb_highlights.xyz, vec3<f32>(-1.0), vec3<f32>(1.0));
+    if (dot(sh, sh) + dot(md, md) + dot(hi, hi) < 1e-8) {
+        return in_rgb;
+    }
+    let lum = clamp(dot(in_rgb, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+    let a = 0.25;
+    let b = 0.333;
+    let scale = 0.7;
+    let ws = clamp((lum - b) / -a + 0.5, 0.0, 1.0) * scale;
+    let wm = clamp((lum - b) / a + 0.5, 0.0, 1.0) * clamp((lum + b - 1.0) / -a + 0.5, 0.0, 1.0) * scale;
+    let wh = clamp((lum + b - 1.0) / a + 0.5, 0.0, 1.0) * scale;
+    var rgb = clamp(in_rgb + sh * ws + md * wm + hi * wh, vec3<f32>(0.0), vec3<f32>(1.0));
+    if (u.cb_highlights.w > 0.5) {
+        let l1 = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        rgb = clamp(rgb + vec3<f32>(lum - l1), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    return rgb;
+}
+
+fn apply_all_adjustments(in_rgb: vec3<f32>) -> vec3<f32> {
+    return apply_curve_lut(apply_color_balance_adj(apply_hsv_adj(apply_color_and_light(in_rgb))));
+}
+
 fn doc_px_to_transform_local(doc_px: vec2<f32>) -> vec2<f32> {
     let piv_local = u.transform_pivot * u.transform_layer_size;
     let piv_world = u.transform_layer_offset + piv_local + u.transform_translate;
@@ -468,17 +547,27 @@ fn sample_transform_layer(local_px: vec2<f32>) -> vec4<f32> {
     );
 }
 
-fn sample_transform_overlay(doc_px: vec2<f32>, base_texel: vec4<f32>) -> vec4<f32> {
+fn sample_transform_overlay(doc_px: vec2<f32>, primary_uv: vec2<f32>, base_texel: vec4<f32>) -> vec4<f32> {
     let local_px = doc_px_to_transform_local(doc_px);
     let layer_s = sample_transform_layer(local_px);
     if (layer_s.a <= 1e-5) {
         return base_texel;
     }
+    var layer_rgb = layer_s.rgb;
+    if (u.adj_active_layer_only > 0.5) {
+        let adj_l = apply_all_adjustments(layer_s.rgb);
+        if (u.adj_selection_only > 0.5 && u.has_selection > 0.5) {
+            let sel_w = clamp(sample_sel_mask_at(primary_uv), 0.0, 1.0);
+            layer_rgb = mix(layer_s.rgb, adj_l, sel_w);
+        } else {
+            layer_rgb = adj_l;
+        }
+    }
     let out_a = layer_s.a + base_texel.a * (1.0 - layer_s.a);
     if (out_a <= 1e-5) {
         return vec4<f32>(0.0);
     }
-    let out_rgb = (layer_s.rgb * layer_s.a + base_texel.rgb * base_texel.a * (1.0 - layer_s.a)) / out_a;
+    let out_rgb = (layer_rgb * layer_s.a + base_texel.rgb * base_texel.a * (1.0 - layer_s.a)) / out_a;
     return vec4<f32>(out_rgb, out_a);
 }
 
@@ -536,13 +625,16 @@ fn sample_processed_image(
                 base_texel = sample_denoised_image(primary_uv);
             }
             let doc_px = primary_uv * u.image_size;
-            texel = sample_transform_overlay(doc_px, base_texel);
+            texel = sample_transform_overlay(doc_px, primary_uv, base_texel);
         } else {
             texel = sample_denoised_image(primary_uv);
         }
     }
 
-    let adj_rgb = apply_curve_lut(apply_color_and_light(texel.rgb));
+    if (u.transform_active > 0.5 && u.adj_active_layer_only > 0.5) {
+        return mix(backdrop, texel.rgb, texel.a);
+    }
+    let adj_rgb = apply_all_adjustments(texel.rgb);
     var final_rgb = adj_rgb;
     if (u.adj_selection_only > 0.5 && u.has_selection > 0.5) {
         let sel_w = clamp(sample_sel_mask_at(primary_uv), 0.0, 1.0);
@@ -1739,12 +1831,36 @@ impl Primitive for ImageQuadPrimitive {
             transform_cos_sin,
             transform_has_base,
             adj_selection_only: if self.adj_selection_only { 1.0 } else { 0.0 },
-            _pad3: [0.0; 2],
+            adj_active_layer_only: if self.adj_active_layer_only { 1.0 } else { 0.0 },
+            _pad3: 0.0,
             gradient_line,
             gradient_params,
             gradient_meta,
             gradient_stop_colors,
             gradient_stop_pos,
+            hsv_adj: [self.hsv.hue, self.hsv.saturation, self.hsv.value, 0.0],
+            cb_shadows: [
+                self.balance.shadows[0],
+                self.balance.shadows[1],
+                self.balance.shadows[2],
+                0.0,
+            ],
+            cb_midtones: [
+                self.balance.midtones[0],
+                self.balance.midtones[1],
+                self.balance.midtones[2],
+                0.0,
+            ],
+            cb_highlights: [
+                self.balance.highlights[0],
+                self.balance.highlights[1],
+                self.balance.highlights[2],
+                if self.balance.preserve_luminosity {
+                    1.0
+                } else {
+                    0.0
+                },
+            ],
         };
 
         let target_buf = self

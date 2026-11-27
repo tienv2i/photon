@@ -2141,7 +2141,7 @@ fn transform_single_layer_once(
 ///
 /// Uses an O(1) zero-copy fast path for unmodified single-layer normal images without mask or backdrop.
 pub fn composite_stack(stack: &LayerStack) -> Arc<RgbaImage> {
-    if stack.layers.len() == 1 && stack.background.is_none() {
+    if stack.layers.len() == 1 && stack.background.is_none() && stack.selection.floating.is_none() {
         let l = &stack.layers[0];
         if l.visible
             && (l.opacity - 1.0).abs() < 1e-4
@@ -2198,8 +2198,51 @@ fn composite_stack_inner(stack: &LayerStack, exclude_layer_id: Option<u64>) -> A
         } else {
             blend_layer_onto(&mut canvas, layer);
         }
+        if let Some(fl) = &stack.selection.floating
+            && fl.layer_id == layer.id
+        {
+            blend_rgba_onto(&mut canvas, &fl.pixels, fl.offset_x, fl.offset_y);
+        }
     }
     Arc::new(canvas)
+}
+
+fn blend_rgba_onto(canvas: &mut RgbaImage, src: &RgbaImage, ox: i32, oy: i32) {
+    let (cw, ch) = canvas.dimensions();
+    let (sw, sh) = src.dimensions();
+    for sy in 0..sh {
+        let cy = oy + sy as i32;
+        if cy < 0 || cy >= ch as i32 {
+            continue;
+        }
+        for sx in 0..sw {
+            let cx = ox + sx as i32;
+            if cx < 0 || cx >= cw as i32 {
+                continue;
+            }
+            let sp = src.get_pixel(sx, sy).0;
+            if sp[3] == 0 {
+                continue;
+            }
+            let dp = canvas.get_pixel_mut(cx as u32, cy as u32);
+            let sa = f32::from(sp[3]) / 255.0;
+            let da = f32::from(dp.0[3]) / 255.0;
+            let out_a = sa + da * (1.0 - sa);
+            if out_a > 1e-5 {
+                let mix = |s: u8, d: u8| -> u8 {
+                    ((f32::from(s) * sa + f32::from(d) * da * (1.0 - sa)) / out_a)
+                        .round()
+                        .clamp(0.0, 255.0) as u8
+                };
+                *dp = Rgba([
+                    mix(sp[0], dp.0[0]),
+                    mix(sp[1], dp.0[1]),
+                    mix(sp[2], dp.0[2]),
+                    (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
+                ]);
+            }
+        }
+    }
 }
 
 fn blend_layer_clipped_onto(canvas: &mut RgbaImage, layer: &Layer, base: &Layer) {

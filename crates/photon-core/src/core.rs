@@ -1848,10 +1848,9 @@ impl Core {
                 shape_ids,
             } => {
                 let selection_bounds = self.editor.as_ref().and_then(|doc| {
-                    doc.stack()
-                        .selection
-                        .bounds
-                        .map(|[x0, y0, x1, y1]| [x0 as f32, y0 as f32, x1 as f32, y1 as f32])
+                    doc.stack().selection.bounds.map(|[x0, y0, bw, bh]| {
+                        [x0 as f32, y0 as f32, (x0 + bw) as f32, (y0 + bh) as f32]
+                    })
                 });
                 self.apply_layer_op(LayerOperation::AlignObjects {
                     op: *op,

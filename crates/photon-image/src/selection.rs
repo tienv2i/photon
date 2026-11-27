@@ -17,6 +17,14 @@ pub struct SelectionSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloatingSelection {
+    pub layer_id: u64,
+    pub pixels: Arc<RgbaImage>,
+    pub offset_x: i32,
+    pub offset_y: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedSelectionChannel {
     pub id: u64,
     pub name: String,
@@ -36,6 +44,7 @@ pub struct SelectionMask {
     pub quick_mask_active: bool,
     pub saved_selections: Vec<SavedSelectionChannel>,
     pub next_saved_id: u64,
+    pub floating: Option<FloatingSelection>,
 }
 
 impl SelectionMask {
@@ -49,6 +58,7 @@ impl SelectionMask {
             quick_mask_active: false,
             saved_selections: Vec::new(),
             next_saved_id: 1,
+            floating: None,
         }
     }
 
@@ -63,6 +73,7 @@ impl SelectionMask {
             quick_mask_active: false,
             saved_selections: Vec::new(),
             next_saved_id: 1,
+            floating: None,
         }
     }
 
@@ -308,6 +319,7 @@ impl SelectionMask {
             quick_mask_active: self.quick_mask_active,
             saved_selections: Vec::new(),
             next_saved_id: 1,
+            floating: None,
         }
     }
 
@@ -349,6 +361,7 @@ impl SelectionMask {
             quick_mask_active: self.quick_mask_active,
             saved_selections: Vec::new(),
             next_saved_id: 1,
+            floating: None,
         }
     }
 
@@ -382,6 +395,7 @@ impl SelectionMask {
             quick_mask_active: self.quick_mask_active,
             saved_selections: Vec::new(),
             next_saved_id: 1,
+            floating: None,
         }
     }
 
@@ -408,6 +422,7 @@ impl SelectionMask {
             quick_mask_active: self.quick_mask_active,
             saved_selections: Vec::new(),
             next_saved_id: 1,
+            floating: None,
         }
     }
 }

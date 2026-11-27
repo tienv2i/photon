@@ -3994,20 +3994,17 @@ fn update_inner(state: &mut PhotonGui, message: Message) -> Task<Message> {
         Message::EditorFrameLoaded(frame) => {
             if let (Some(prev_rev), Some(f)) = (state.pending_preview_commit_rev, frame.as_ref())
                 && f.revision > prev_rev
+                && (!matches!(
+                    state.editor_ui.tool,
+                    EditorTool::Transform | EditorTool::Pointer
+                ) || state.transform_preview.is_none())
             {
                 state.pending_preview_commit_rev = None;
                 state.editor_ui.transform_spec = LayerTransformSpec::default();
                 state.editor_ui.rotate_angle = 0.0;
                 state.editor_ui.gradient_draft = None;
-                if !matches!(
-                    state.editor_ui.tool,
-                    EditorTool::Transform | EditorTool::Pointer
-                ) {
-                    state.transform_preview = None;
-                    state.transform_layer_id = None;
-                } else if let Some(tp) = &mut state.transform_preview {
-                    tp.spec = LayerTransformSpec::default();
-                }
+                state.transform_preview = None;
+                state.transform_layer_id = None;
             }
             state.editor_histogram = frame
                 .as_ref()

@@ -37,12 +37,13 @@ pub enum EditorToolGroup {
     Shape,
     Nav,
     Ai,
+    Transform,
 }
 
 impl EditorToolGroup {
     pub const fn tools(self) -> &'static [EditorTool] {
         match self {
-            Self::Move => &[EditorTool::Pointer, EditorTool::Transform],
+            Self::Move => &[EditorTool::Pointer],
             Self::Marquee => &[
                 EditorTool::MarqueeRect,
                 EditorTool::MarqueeEllipse,
@@ -76,6 +77,7 @@ impl EditorToolGroup {
                 EditorTool::Watermark,
                 EditorTool::Caption,
             ],
+            Self::Transform => &[EditorTool::Transform],
         }
     }
 
@@ -88,6 +90,7 @@ impl EditorToolGroup {
             Self::Fill | Self::Pen => 4,
             Self::Text | Self::Shape => 5,
             Self::Nav | Self::Ai => 6,
+            Self::Transform => 7,
         }
     }
 
@@ -107,6 +110,7 @@ impl EditorToolGroup {
             Self::Shape => ui.shape_subtool,
             Self::Nav => ui.nav_subtool,
             Self::Ai => ui.ai_subtool,
+            Self::Transform => EditorTool::Transform,
         }
     }
 

@@ -61,7 +61,8 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
             state.active_menu = None;
             state.context_menu = None;
             if let Some(ed) = &state.snapshot.meta.editor {
-                if let Some(active) = ed.layers.iter().find(|l| l.id == ed.active_layer_id)
+                let active_layer_id = ed.active_layer_id;
+                if let Some(active) = ed.layers.iter().find(|l| l.id == active_layer_id)
                     && let Some(effect) = &active.effect
                 {
                     match effect {
@@ -75,6 +76,17 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
                 close_all_adjustment_dialogs(state);
                 state.editor_ui.adjust_popup_tab = Some(tab);
                 open_dialog_window(state, adjustment_dialog_id(tab));
+                if state.editor_ui.apply_target == ApplyTarget::ActiveLayer
+                    && state.transform_preview.is_none()
+                {
+                    return Task::batch([
+                        load_editor_transform_frames_task(
+                            state.core.clone(),
+                            Some(active_layer_id),
+                        ),
+                        sync_ui_tree_task(state),
+                    ]);
+                }
                 return sync_ui_tree_task(state);
             }
             Task::none()
@@ -162,7 +174,7 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
                 state.editor_ui.shape_subtool = tool;
             } else if tool.is_fill_group() {
                 state.editor_ui.fill_subtool = tool;
-            } else if matches!(tool, EditorTool::Pointer | EditorTool::Transform) {
+            } else if tool == EditorTool::Pointer {
                 state.editor_ui.move_subtool = tool;
             } else if matches!(tool, EditorTool::Crop | EditorTool::RotateAngle) {
                 state.editor_ui.crop_subtool = tool;
@@ -752,6 +764,16 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
         }
         Message::EditorSetApplyTarget(target) => {
             state.editor_ui.apply_target = target;
+            if target == ApplyTarget::ActiveLayer
+                && state.editor_ui.adjust_popup_tab.is_some()
+                && state.transform_preview.is_none()
+                && let Some(ed) = &state.snapshot.meta.editor
+            {
+                return load_editor_transform_frames_task(
+                    state.core.clone(),
+                    Some(ed.active_layer_id),
+                );
+            }
             Task::none()
         }
         Message::EditorSetHsvHue(v) => {
@@ -1399,6 +1421,7 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
                 state.editor_ui.tool,
                 EditorTool::Transform | EditorTool::Pointer
             ) && state.editor_ui.smart_paste.is_none()
+                && state.editor_ui.adjust_popup_tab.is_none()
             {
                 return Task::none();
             }
@@ -1414,6 +1437,15 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
                 .is_some_and(|ed| ed.pixel_revision == frames.pixel_revision);
             if !rev_matches {
                 return Task::none();
+            }
+            if state
+                .pending_preview_commit_rev
+                .is_some_and(|prev_rev| frames.pixel_revision > prev_rev)
+            {
+                state.pending_preview_commit_rev = None;
+                state.editor_ui.transform_spec = LayerTransformSpec::default();
+                state.editor_ui.rotate_angle = 0.0;
+                state.editor_ui.gradient_draft = None;
             }
             let sel_rev = state
                 .snapshot
@@ -1745,9 +1777,12 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
             };
             let spec = sp.to_transform_spec();
             state.editor_ui.transform_spec = LayerTransformSpec::default();
-            state.transform_preview = None;
-            state.transform_layer_id = None;
             if !spec.is_identity() {
+                if let Some(tp) = &mut state.transform_preview {
+                    tp.spec = spec;
+                    state.pending_preview_commit_rev =
+                        state.editor_frame.as_ref().map(|f| f.revision);
+                }
                 return dispatch_to_core(
                     state.core.clone(),
                     Command::EditorTransformLayer {
@@ -1756,6 +1791,8 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
                     },
                 );
             }
+            state.transform_preview = None;
+            state.transform_layer_id = None;
             sync_ui_tree_task(state)
         }
         Message::SmartPasteDismiss => {

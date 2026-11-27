@@ -41,6 +41,10 @@ pub fn adjust_color_and_light(src: &RgbaImage, adj: &ColorAdjustments) -> RgbaIm
     dst.par_chunks_exact_mut(4)
         .zip(src.as_raw().par_chunks_exact(4))
         .for_each(|(d, s)| {
+            if s[3] == 0 {
+                d.copy_from_slice(&[0, 0, 0, 0]);
+                return;
+            }
             let mut r = (s[0] as f32 / 255.0) * exposure_mul;
             let mut g = (s[1] as f32 / 255.0) * exposure_mul;
             let mut b = (s[2] as f32 / 255.0) * exposure_mul;
@@ -195,6 +199,10 @@ pub fn adjust_curves(src: &RgbaImage, curves: &CurvesAdjustment) -> RgbaImage {
     dst.par_chunks_exact_mut(4)
         .zip(src.as_raw().par_chunks_exact(4))
         .for_each(|(d, s)| {
+            if s[3] == 0 {
+                d.copy_from_slice(&[0, 0, 0, 0]);
+                return;
+            }
             d[0] = lut_rgb[usize::from(lut_r[usize::from(s[0])])];
             d[1] = lut_rgb[usize::from(lut_g[usize::from(s[1])])];
             d[2] = lut_rgb[usize::from(lut_b[usize::from(s[2])])];
@@ -214,6 +222,10 @@ pub fn adjust_hsv(src: &RgbaImage, adj: &HsvAdjustment) -> RgbaImage {
     dst.par_chunks_exact_mut(4)
         .zip(src.as_raw().par_chunks_exact(4))
         .for_each(|(d, s)| {
+            if s[3] == 0 {
+                d.copy_from_slice(&[0, 0, 0, 0]);
+                return;
+            }
             let r = f64::from(s[0]) / 255.0;
             let g = f64::from(s[1]) / 255.0;
             let b = f64::from(s[2]) / 255.0;
@@ -308,6 +320,10 @@ pub fn color_balance(src: &RgbaImage, adj: &ColorBalanceAdjustment) -> RgbaImage
     dst.par_chunks_exact_mut(4)
         .zip(src.as_raw().par_chunks_exact(4))
         .for_each(|(d, s)| {
+            if s[3] == 0 {
+                d.copy_from_slice(&[0, 0, 0, 0]);
+                return;
+            }
             let r0 = f64::from(s[0]) / 255.0;
             let g0 = f64::from(s[1]) / 255.0;
             let b0 = f64::from(s[2]) / 255.0;

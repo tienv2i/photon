@@ -357,6 +357,7 @@ impl EditorDocument {
     }
 
     pub fn select_layer(&mut self, id: u64) -> Result<bool, ImageError> {
+        self.commit_floating_selection();
         self.stack.select(id)
     }
 
@@ -376,6 +377,9 @@ impl EditorDocument {
     ) -> Result<bool, ImageError> {
         if self.live_stroke.is_some() {
             let _ = self.live_stroke_end(true);
+        }
+        if !matches!(op, EditOp::TransformLayer { .. }) && self.stack.selection.floating.is_some() {
+            self.commit_floating_selection();
         }
 
         if let EditOp::Layer(ref layer_op) = op {
@@ -1874,16 +1878,19 @@ impl EditorDocument {
     }
 
     pub fn select_all(&mut self) {
+        self.commit_floating_selection();
         self.stack.selection.select_all();
         self.selection_revision += 1;
     }
 
     pub fn deselect(&mut self) {
+        self.commit_floating_selection();
         self.stack.selection.deselect();
         self.selection_revision += 1;
     }
 
     pub fn reselect(&mut self) -> bool {
+        self.commit_floating_selection();
         let ok = self.stack.selection.reselect();
         if ok {
             self.selection_revision += 1;
@@ -1892,11 +1899,13 @@ impl EditorDocument {
     }
 
     pub fn invert_selection(&mut self) {
+        self.commit_floating_selection();
         self.stack.selection.invert();
         self.selection_revision += 1;
     }
 
     pub fn select_shape(&mut self, shape: &SelectionShape, op: SelectionBooleanOp) {
+        self.commit_floating_selection();
         let (w, h) = (self.stack.canvas_width, self.stack.canvas_height);
         let active = self.stack.active_layer();
         let incoming = rasterize_shape(
@@ -1911,6 +1920,7 @@ impl EditorDocument {
     }
 
     pub fn modify_selection(&mut self, op: SelectionModifyOp) {
+        self.commit_floating_selection();
         self.stack.selection.modify(op, &self.current);
         self.selection_revision += 1;
     }
@@ -1933,6 +1943,7 @@ impl EditorDocument {
     }
 
     pub fn load_selection(&mut self, id: u64, op: SelectionBooleanOp, invert: bool) -> bool {
+        self.commit_floating_selection();
         let ok = self.stack.selection.load_selection(id, op, invert);
         if ok {
             self.selection_revision += 1;
@@ -1949,6 +1960,7 @@ impl EditorDocument {
     }
 
     pub fn select_from_layer_alpha(&mut self, op: SelectionBooleanOp) {
+        self.commit_floating_selection();
         let (cw, ch) = (self.stack.canvas_width, self.stack.canvas_height);
         let active = self.stack.active_layer();
         let (lw, lh) = active.dimensions();
@@ -2100,6 +2112,23 @@ impl EditorDocument {
         )
     }
 
+    pub fn commit_floating_selection(&mut self) -> bool {
+        let Some(fl) = self.stack.selection.floating.take() else {
+            return false;
+        };
+        if let Some(idx) = self.stack.index_of(fl.layer_id) {
+            merge_rgba_into_layer(
+                &mut self.stack.layers[idx],
+                &fl.pixels,
+                fl.offset_x,
+                fl.offset_y,
+            );
+            self.current = crate::layer::composite_stack(&self.stack);
+            self.pixel_revision += 1;
+        }
+        true
+    }
+
     fn transform_selected_pixels(&mut self, layer_idx: usize, transform: &LayerTransformSpec) {
         let Some([bx, by, bw, bh]) = self.stack.selection.bounds else {
             return;
@@ -2107,129 +2136,69 @@ impl EditorDocument {
         if bw == 0 || bh == 0 {
             return;
         }
-        let layer = &mut self.stack.layers[layer_idx];
-        let (lw, lh) = layer.dimensions();
-        let ox = layer.offset_x;
-        let oy = layer.offset_y;
-
-        let mut extracted = RgbaImage::from_pixel(bw, bh, Rgba([0, 0, 0, 0]));
-        let mut base = (*layer.pixels).clone();
-
-        for sy in 0..bh {
-            let cy = by as i32 + sy as i32;
-            let ly = cy - oy;
-            if ly < 0 || ly >= lh as i32 {
-                continue;
-            }
-            for sx in 0..bw {
-                let cx = bx as i32 + sx as i32;
-                let lx = cx - ox;
-                if lx < 0 || lx >= lw as i32 {
-                    continue;
-                }
-                let sel_a = self.stack.selection.alpha_at(cx, cy);
-                if sel_a == 0 {
-                    continue;
-                }
-                let p = base.get_pixel(lx as u32, ly as u32).0;
-                let ex_a = ((u16::from(p[3]) * u16::from(sel_a) + 127) / 255) as u8;
-                extracted.put_pixel(sx, sy, Rgba([p[0], p[1], p[2], ex_a]));
-
-                let keep = 255 - u16::from(sel_a);
-                let rem_a = ((u16::from(p[3]) * keep + 127) / 255) as u8;
-                let dst_px = base.get_pixel_mut(lx as u32, ly as u32);
-                if rem_a == 0 {
-                    dst_px.0 = [0, 0, 0, 0];
-                } else {
-                    dst_px.0[3] = rem_a;
-                }
-            }
+        let target_layer_id = self.stack.layers[layer_idx].id;
+        if let Some(existing) = self.stack.selection.floating.as_ref()
+            && existing.layer_id != target_layer_id
+        {
+            self.commit_floating_selection();
         }
 
-        let (transformed, dx, dy) = pixels::transform_rgba_affine(&extracted, transform);
-        let tx = bx as i32 + dx;
-        let ty = by as i32 + dy;
-        let (tw, th) = transformed.dimensions();
+        if let Some(fl) = self.stack.selection.floating.as_mut()
+            && fl.layer_id == target_layer_id
+        {
+            let (transformed, dx, dy) = pixels::transform_rgba_affine(&fl.pixels, transform);
+            fl.offset_x += dx;
+            fl.offset_y += dy;
+            fl.pixels = Arc::new(transformed);
+        } else {
+            let layer = &mut self.stack.layers[layer_idx];
+            let (lw, lh) = layer.dimensions();
+            let ox = layer.offset_x;
+            let oy = layer.offset_y;
 
-        // Expand layer bounds if the transformed selection extends outside existing layer bounds.
-        let new_ox = ox.min(tx);
-        let new_oy = oy.min(ty);
-        let new_right = (ox + lw as i32).max(tx + tw as i32);
-        let new_bottom = (oy + lh as i32).max(ty + th as i32);
-        let new_w = (new_right - new_ox).max(1) as u32;
-        let new_h = (new_bottom - new_oy).max(1) as u32;
+            let mut extracted = RgbaImage::from_pixel(bw, bh, Rgba([0, 0, 0, 0]));
+            let mut base = (*layer.pixels).clone();
 
-        let mut merged = RgbaImage::from_pixel(new_w, new_h, Rgba([0, 0, 0, 0]));
-        image::imageops::replace(
-            &mut merged,
-            &base,
-            i64::from(ox - new_ox),
-            i64::from(oy - new_oy),
-        );
-        let place_x = tx - new_ox;
-        let place_y = ty - new_oy;
-        for py in 0..th {
-            let my = place_y + py as i32;
-            if my < 0 || my >= new_h as i32 {
-                continue;
-            }
-            for px in 0..tw {
-                let mx = place_x + px as i32;
-                if mx < 0 || mx >= new_w as i32 {
+            for sy in 0..bh {
+                let cy = by as i32 + sy as i32;
+                let ly = cy - oy;
+                if ly < 0 || ly >= lh as i32 {
                     continue;
                 }
-                let src_px = transformed.get_pixel(px, py).0;
-                if src_px[3] == 0 {
-                    continue;
-                }
-                let dst_px = merged.get_pixel_mut(mx as u32, my as u32);
-                let sa = f32::from(src_px[3]) / 255.0;
-                let da = f32::from(dst_px.0[3]) / 255.0;
-                let out_a = sa + da * (1.0 - sa);
-                if out_a > 1e-5 {
-                    let mix = |s: u8, d: u8| -> u8 {
-                        ((f32::from(s) * sa + f32::from(d) * da * (1.0 - sa)) / out_a)
-                            .round()
-                            .clamp(0.0, 255.0) as u8
-                    };
-                    *dst_px = Rgba([
-                        mix(src_px[0], dst_px.0[0]),
-                        mix(src_px[1], dst_px.0[1]),
-                        mix(src_px[2], dst_px.0[2]),
-                        (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
-                    ]);
+                for sx in 0..bw {
+                    let cx = bx as i32 + sx as i32;
+                    let lx = cx - ox;
+                    if lx < 0 || lx >= lw as i32 {
+                        continue;
+                    }
+                    let sel_a = self.stack.selection.alpha_at(cx, cy);
+                    if sel_a == 0 {
+                        continue;
+                    }
+                    let p = base.get_pixel(lx as u32, ly as u32).0;
+                    let ex_a = ((u16::from(p[3]) * u16::from(sel_a) + 127) / 255) as u8;
+                    extracted.put_pixel(sx, sy, Rgba([p[0], p[1], p[2], ex_a]));
+
+                    let keep = 255 - u16::from(sel_a);
+                    let rem_a = ((u16::from(p[3]) * keep + 127) / 255) as u8;
+                    let dst_px = base.get_pixel_mut(lx as u32, ly as u32);
+                    if rem_a == 0 {
+                        dst_px.0 = [0, 0, 0, 0];
+                    } else {
+                        dst_px.0[3] = rem_a;
+                    }
                 }
             }
+            layer.pixels = Arc::new(base);
+
+            let (transformed, dx, dy) = pixels::transform_rgba_affine(&extracted, transform);
+            self.stack.selection.floating = Some(crate::selection::FloatingSelection {
+                layer_id: target_layer_id,
+                pixels: Arc::new(transformed),
+                offset_x: bx as i32 + dx,
+                offset_y: by as i32 + dy,
+            });
         }
-        if new_w != lw || new_h != lh || new_ox != ox || new_oy != oy {
-            let shift_x = (ox - new_ox) as usize;
-            let shift_y = (oy - new_oy) as usize;
-            if let Some(old_mask) = &layer.mask
-                && old_mask.len() == (lw as usize) * (lh as usize)
-            {
-                let mut padded_mask = vec![0u8; (new_w as usize) * (new_h as usize)];
-                for row in 0..(lh as usize) {
-                    let src_start = row * (lw as usize);
-                    let dst_start = (shift_y + row) * (new_w as usize) + shift_x;
-                    padded_mask[dst_start..dst_start + (lw as usize)]
-                        .copy_from_slice(&old_mask[src_start..src_start + (lw as usize)]);
-                }
-                layer.mask = Some(Arc::new(padded_mask));
-            }
-            if let Some(old_orig) = &layer.original {
-                let mut padded_orig = RgbaImage::from_pixel(new_w, new_h, Rgba([0, 0, 0, 0]));
-                image::imageops::replace(
-                    &mut padded_orig,
-                    old_orig.as_ref(),
-                    i64::from(ox - new_ox),
-                    i64::from(oy - new_oy),
-                );
-                layer.original = Some(Arc::new(padded_orig));
-            }
-        }
-        layer.pixels = Arc::new(merged);
-        layer.offset_x = new_ox;
-        layer.offset_y = new_oy;
 
         // Transform the selection mask to match the transformed pixels.
         let (cw, ch) = (self.stack.canvas_width, self.stack.canvas_height);
@@ -2264,6 +2233,92 @@ impl EditorDocument {
         self.stack.selection.alpha = Arc::new(next_canvas_sel);
         self.stack.selection.recompute_bounds();
     }
+}
+
+fn merge_rgba_into_layer(layer: &mut Layer, src: &RgbaImage, tx: i32, ty: i32) {
+    let (lw, lh) = layer.dimensions();
+    let ox = layer.offset_x;
+    let oy = layer.offset_y;
+    let (tw, th) = src.dimensions();
+
+    let new_ox = ox.min(tx);
+    let new_oy = oy.min(ty);
+    let new_right = (ox + lw as i32).max(tx + tw as i32);
+    let new_bottom = (oy + lh as i32).max(ty + th as i32);
+    let new_w = (new_right - new_ox).max(1) as u32;
+    let new_h = (new_bottom - new_oy).max(1) as u32;
+
+    let mut merged = RgbaImage::from_pixel(new_w, new_h, Rgba([0, 0, 0, 0]));
+    image::imageops::replace(
+        &mut merged,
+        layer.pixels.as_ref(),
+        i64::from(ox - new_ox),
+        i64::from(oy - new_oy),
+    );
+    let place_x = tx - new_ox;
+    let place_y = ty - new_oy;
+    for py in 0..th {
+        let my = place_y + py as i32;
+        if my < 0 || my >= new_h as i32 {
+            continue;
+        }
+        for px in 0..tw {
+            let mx = place_x + px as i32;
+            if mx < 0 || mx >= new_w as i32 {
+                continue;
+            }
+            let src_px = src.get_pixel(px, py).0;
+            if src_px[3] == 0 {
+                continue;
+            }
+            let dst_px = merged.get_pixel_mut(mx as u32, my as u32);
+            let sa = f32::from(src_px[3]) / 255.0;
+            let da = f32::from(dst_px.0[3]) / 255.0;
+            let out_a = sa + da * (1.0 - sa);
+            if out_a > 1e-5 {
+                let mix = |s: u8, d: u8| -> u8 {
+                    ((f32::from(s) * sa + f32::from(d) * da * (1.0 - sa)) / out_a)
+                        .round()
+                        .clamp(0.0, 255.0) as u8
+                };
+                *dst_px = Rgba([
+                    mix(src_px[0], dst_px.0[0]),
+                    mix(src_px[1], dst_px.0[1]),
+                    mix(src_px[2], dst_px.0[2]),
+                    (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
+                ]);
+            }
+        }
+    }
+    if new_w != lw || new_h != lh || new_ox != ox || new_oy != oy {
+        let shift_x = (ox - new_ox) as usize;
+        let shift_y = (oy - new_oy) as usize;
+        if let Some(old_mask) = &layer.mask
+            && old_mask.len() == (lw as usize) * (lh as usize)
+        {
+            let mut padded_mask = vec![0u8; (new_w as usize) * (new_h as usize)];
+            for row in 0..(lh as usize) {
+                let src_start = row * (lw as usize);
+                let dst_start = (shift_y + row) * (new_w as usize) + shift_x;
+                padded_mask[dst_start..dst_start + (lw as usize)]
+                    .copy_from_slice(&old_mask[src_start..src_start + (lw as usize)]);
+            }
+            layer.mask = Some(Arc::new(padded_mask));
+        }
+        if let Some(old_orig) = &layer.original {
+            let mut padded_orig = RgbaImage::from_pixel(new_w, new_h, Rgba([0, 0, 0, 0]));
+            image::imageops::replace(
+                &mut padded_orig,
+                old_orig.as_ref(),
+                i64::from(ox - new_ox),
+                i64::from(oy - new_oy),
+            );
+            layer.original = Some(Arc::new(padded_orig));
+        }
+    }
+    layer.pixels = Arc::new(merged);
+    layer.offset_x = new_ox;
+    layer.offset_y = new_oy;
 }
 
 fn render_drawing_op(
@@ -4328,6 +4383,7 @@ mod tests {
         })
         .unwrap();
 
+        doc.commit_floating_selection();
         let layer = doc.stack().active_layer();
         assert_eq!((layer.offset_x, layer.offset_y), (4, 4));
         assert_eq!(layer.dimensions(), (26, 26));
@@ -4361,7 +4417,58 @@ mod tests {
         // Redo re-applies selection transform cleanly
         assert!(doc.redo().unwrap());
         assert_eq!(doc.selection().bounds, Some([4, 4, 8, 8]));
+        doc.commit_floating_selection();
         assert_eq!(doc.stack().active_layer().dimensions(), (26, 26));
+
+        // 3. Moving a selection multiple times on the same layer preserves intermediate pixels
+        let mut multi_img = RgbaImage::new(60, 20);
+        for y in 0..20 {
+            for x in 0..20 {
+                multi_img.put_pixel(x, y, Rgba([255, 0, 0, 255]));
+            }
+            for x in 20..40 {
+                multi_img.put_pixel(x, y, Rgba([0, 255, 0, 255]));
+            }
+            for x in 40..60 {
+                multi_img.put_pixel(x, y, Rgba([0, 0, 255, 255]));
+            }
+        }
+        let mut mdoc = EditorDocument::from_rgba(PathBuf::from("multi_move.png"), multi_img);
+        mdoc.select_shape(
+            &SelectionShape::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+                feather: 0.0,
+                anti_alias: false,
+            },
+            SelectionBooleanOp::Replace,
+        );
+        // 1st move: Red floats over Green [20..40]
+        mdoc.apply(EditOp::TransformLayer {
+            layer_id: None,
+            transform: LayerTransformSpec {
+                translate_x: 20.0,
+                translate_y: 0.0,
+                ..LayerTransformSpec::default()
+            },
+        })
+        .unwrap();
+        assert_eq!(mdoc.current.get_pixel(30, 10).0, [255, 0, 0, 255]);
+        // 2nd move: Red floats over Blue [40..60]; Green [20..40] underneath must still be intact!
+        mdoc.apply(EditOp::TransformLayer {
+            layer_id: None,
+            transform: LayerTransformSpec {
+                translate_x: 20.0,
+                translate_y: 0.0,
+                ..LayerTransformSpec::default()
+            },
+        })
+        .unwrap();
+        assert_eq!(mdoc.current.get_pixel(50, 10).0, [255, 0, 0, 255]);
+        assert_eq!(mdoc.current.get_pixel(30, 10).0, [0, 255, 0, 255]);
+        assert_eq!(mdoc.current.get_pixel(10, 10).0[3], 0);
 
         // 2. Feathered selection + scale/rotate + fractional edge RGB preservation
         let solid = RgbaImage::from_pixel(32, 32, Rgba([100, 150, 200, 255]));

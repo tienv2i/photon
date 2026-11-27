@@ -304,11 +304,15 @@ pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMe
     } else {
         state.editor_ui.effective_canvas_tool()
     };
-    let transform_preview = if !adjust_open
-        && (matches!(
-            state.editor_ui.tool,
-            EditorTool::Transform | EditorTool::Pointer
-        ) || state.editor_ui.smart_paste.is_some())
+    let adj_active_layer_only = adjust_open
+        && state.editor_ui.apply_target == photon_protocol::ApplyTarget::ActiveLayer
+        && state.transform_preview.is_some();
+    let transform_preview = if adj_active_layer_only
+        || (!adjust_open
+            && (matches!(
+                state.editor_ui.tool,
+                EditorTool::Transform | EditorTool::Pointer
+            ) || state.editor_ui.smart_paste.is_some()))
     {
         state.transform_preview.cloned()
     } else {
@@ -337,6 +341,16 @@ pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMe
     } else {
         ed.adjustments
     };
+    let preview_hsv = if preview_enabled && adjust_open {
+        state.editor_ui.hsv
+    } else {
+        photon_protocol::HsvAdjustment::default()
+    };
+    let preview_balance = if preview_enabled && adjust_open {
+        state.editor_ui.balance
+    } else {
+        photon_protocol::ColorBalanceAdjustment::default()
+    };
     let preview_curve_lut = if preview_enabled {
         state.curve_lut
     } else {
@@ -357,8 +371,11 @@ pub fn build_editor_view<'a>(state: EditorViewState<'a>) -> Element<'a, EditorMe
             pan_x: state.pan_x,
             pan_y: state.pan_y,
             adjustments: preview_adjustments,
+            hsv: preview_hsv,
+            balance: preview_balance,
             adj_selection_only: state.editor_ui.adjust_popup_tab.is_some()
                 && state.editor_ui.apply_to_selection,
+            adj_active_layer_only,
             dark_theme: dark,
             crop_rect: state.crop_uv,
             crop_aspect: state.editor_ui.crop_aspect,
@@ -844,20 +861,23 @@ fn build_tool_rail(state: EditorViewState<'_>, lang: Language) -> Element<'_, Ed
             group_btn(EditorToolGroup::Ai)
         ]
         .spacing(4),
-        row![tool_rail_button_tipped(
-            Icon::QuickMask,
-            state
-                .snapshot
-                .meta
-                .editor
-                .as_ref()
-                .is_some_and(|e| e.selection.quick_mask_active),
-            true,
-            Some(EditorMessage::Dispatch(
-                Command::EditorSelectToggleQuickMask
-            )),
-            tr(lang, "tooltip-tool-quick-mask"),
-        ),]
+        row![
+            group_btn(EditorToolGroup::Transform),
+            tool_rail_button_tipped(
+                Icon::QuickMask,
+                state
+                    .snapshot
+                    .meta
+                    .editor
+                    .as_ref()
+                    .is_some_and(|e| e.selection.quick_mask_active),
+                true,
+                Some(EditorMessage::Dispatch(
+                    Command::EditorSelectToggleQuickMask
+                )),
+                tr(lang, "tooltip-tool-quick-mask"),
+            ),
+        ]
         .spacing(4),
     ]
     .spacing(4)

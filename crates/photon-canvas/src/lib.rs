@@ -19,9 +19,9 @@ use iced::mouse;
 use iced::widget::shader::{self, Action};
 use iced::{Event, Rectangle};
 use photon_protocol::{
-    BlendMode, CanvasAntiAliasingMode, ColorAdjustments, DrawShapeKind, GradientKind,
-    GradientRepeat, GradientStop, LayerTransformSpec, VectorHandleKind, VectorLayerData,
-    VectorNodeMode, VectorPathNode, ViewportDenoiseMode,
+    BlendMode, CanvasAntiAliasingMode, ColorAdjustments, ColorBalanceAdjustment, DrawShapeKind,
+    GradientKind, GradientRepeat, GradientStop, HsvAdjustment, LayerTransformSpec,
+    VectorHandleKind, VectorLayerData, VectorNodeMode, VectorPathNode, ViewportDenoiseMode,
 };
 
 pub use gpu::{ImageQuadPrimitive, ImageShaderPipeline, MAX_GPU_TEXTURE_DIM};
@@ -412,7 +412,10 @@ pub struct ImageCanvasProgram {
     pub pan_x: f32,
     pub pan_y: f32,
     pub adjustments: ColorAdjustments,
+    pub hsv: HsvAdjustment,
+    pub balance: ColorBalanceAdjustment,
     pub adj_selection_only: bool,
+    pub adj_active_layer_only: bool,
     pub dark_theme: bool,
     pub crop_rect: Option<[f32; 4]>,
     pub crop_aspect: Option<f32>,
@@ -470,7 +473,10 @@ impl Default for ImageCanvasProgram {
             pan_x: 0.0,
             pan_y: 0.0,
             adjustments: ColorAdjustments::default(),
+            hsv: HsvAdjustment::default(),
+            balance: ColorBalanceAdjustment::default(),
             adj_selection_only: false,
+            adj_active_layer_only: false,
             dark_theme: true,
             crop_rect: None,
             crop_aspect: None,
@@ -3140,8 +3146,14 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
             (0.0, [0.0; 4])
         };
         let (overlay_lines, overlay_tris) = self.build_vector_overlay(state, cursor, bounds);
-        let transform_preview = if self.tool == CanvasTool::Transform
-            || (self.tool == CanvasTool::Pointer && state.moving_layer)
+        let transform_preview = if self.adj_active_layer_only
+            || self.tool == CanvasTool::Transform
+            || (self.tool == CanvasTool::Pointer
+                && (state.moving_layer
+                    || self
+                        .transform_preview
+                        .as_ref()
+                        .is_some_and(|tp| !tp.spec.is_identity())))
         {
             self.effective_transform_preview(state)
         } else {
@@ -3164,7 +3176,10 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
             pan_x: self.pan_x,
             pan_y: self.pan_y,
             adjustments: self.adjustments,
+            hsv: self.hsv,
+            balance: self.balance,
             adj_selection_only: self.adj_selection_only,
+            adj_active_layer_only: self.adj_active_layer_only,
             dark_theme: self.dark_theme,
             crop_rect: self
                 .crop_rect
@@ -4381,7 +4396,7 @@ mod tests {
     #[test]
     fn uniforms_16_byte_alignment_and_size() {
         use std::mem::{offset_of, size_of};
-        assert_eq!(size_of::<gpu::Uniforms>(), 592);
+        assert_eq!(size_of::<gpu::Uniforms>(), 656);
         assert_eq!(size_of::<gpu::Uniforms>() % 16, 0);
         // vec4<f32> fields must be 16-byte aligned
         assert_eq!(offset_of!(gpu::Uniforms, crop_rect) % 16, 0);

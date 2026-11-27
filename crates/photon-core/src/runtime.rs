@@ -564,6 +564,33 @@ fn build_editor_transform_frames(
         None
     };
 
+    if let Some(fl) = &stack.selection.floating
+        && fl.layer_id == target_id
+    {
+        let mut tmp_stack = stack.clone();
+        tmp_stack.selection.floating = None;
+        let base = composite_stack(&tmp_stack);
+        let (fw, fh) = fl.pixels.dimensions();
+        let mut layer_rgba = fl.pixels.as_raw().clone();
+        if opacity < 1.0 - 1e-4 {
+            for px in layer_rgba.chunks_exact_mut(4) {
+                px[3] = (f32::from(px[3]) * opacity).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        return Some(EditorTransformFrames {
+            pixel_revision: doc.pixel_revision,
+            layer_id: target_id,
+            canvas_width: stack.canvas_width,
+            canvas_height: stack.canvas_height,
+            base_rgba_excluding_active: base.as_raw().clone(),
+            active_layer_rgba: layer_rgba,
+            offset_x: fl.offset_x,
+            offset_y: fl.offset_y,
+            layer_width: fw,
+            layer_height: fh,
+        });
+    }
+
     if stack.selection.has_selection()
         && target_id == stack.active_layer_id
         && let Some([bx, by, bw, bh]) = stack.selection.bounds

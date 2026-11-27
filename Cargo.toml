@@ -5,6 +5,7 @@ members = [
     "crates/framework/fw-storage",
     "crates/framework/fw-runtime",
     "crates/framework/fw-ipc",
+    "crates/framework/fw-cli",
     "crates/framework/fw-shell",
     "crates/framework/fw-ui",
     "crates/framework/fw-panels",
@@ -14,17 +15,19 @@ members = [
     "crates/apps/photon/photon-storage",
     "crates/apps/photon/photon-i18n",
     "crates/apps/photon/photon-image",
-    "crates/apps/photon/photon-core",
     "crates/apps/photon/photon-plugins",
     "crates/apps/photon/photon-ipc",
     "crates/apps/photon/photon-canvas",
     "crates/apps/photon/photon-browser",
     "crates/apps/photon/photon-viewer",
+    "crates/apps/photon/photon-viewer-canvas",
     "crates/apps/photon/photon-editor",
     "crates/apps/photon/photon-cli",
+    "crates/apps/photon/photon-app-common",
     "crates/apps/photon/photon-desktop",
     "crates/apps/photon/photon-app-manager",
     "crates/apps/photon/photon-app-viewer",
+    "crates/apps/notes",
     "crates/apps/photon/photon-app-editor",
 ]
 
@@ -39,6 +42,7 @@ fw-protocol = { path = "crates/framework/fw-protocol" }
 fw-storage = { path = "crates/framework/fw-storage" }
 fw-runtime = { path = "crates/framework/fw-runtime" }
 fw-ipc = { path = "crates/framework/fw-ipc" }
+fw-cli = { path = "crates/framework/fw-cli" }
 fw-shell = { path = "crates/framework/fw-shell" }
 fw-ui = { path = "crates/framework/fw-ui" }
 fw-panels = { path = "crates/framework/fw-panels" }
@@ -48,13 +52,14 @@ photon-protocol = { path = "crates/apps/photon/photon-protocol" }
 photon-storage = { path = "crates/apps/photon/photon-storage" }
 photon-i18n = { path = "crates/apps/photon/photon-i18n" }
 photon-image = { path = "crates/apps/photon/photon-image" }
-photon-core = { path = "crates/apps/photon/photon-core" }
 photon-plugins = { path = "crates/apps/photon/photon-plugins" }
 photon-ipc = { path = "crates/apps/photon/photon-ipc" }
 photon-canvas = { path = "crates/apps/photon/photon-canvas" }
 photon-browser = { path = "crates/apps/photon/photon-browser" }
 photon-viewer = { path = "crates/apps/photon/photon-viewer" }
+photon-viewer-canvas = { path = "crates/apps/photon/photon-viewer-canvas" }
 photon-editor = { path = "crates/apps/photon/photon-editor" }
+photon-app-common = { path = "crates/apps/photon/photon-app-common" }
 
 arboard = "3"
 clap = { version = "4", features = ["derive", "env"] }

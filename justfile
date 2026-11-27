@@ -13,7 +13,7 @@ test *args:
     cargo test --workspace {{args}}
 
 test-core:
-    cargo test -p photon-protocol -p photon-storage -p photon-i18n -p photon-image -p photon-core -p photon-ipc -p photon-cli
+    cargo test -p photon-protocol -p photon-storage -p photon-i18n -p photon-image -p photon-ipc -p photon-cli
 
 fmt-check:
     cargo fmt --all -- --check

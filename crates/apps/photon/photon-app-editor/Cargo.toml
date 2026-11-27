@@ -10,4 +10,23 @@ name = "photon-editor"
 path = "src/main.rs"
 
 [dependencies]
-photon-desktop = { path = "../photon-desktop" }
+clap = { workspace = true }
+fw-dialogs = { workspace = true }
+fw-panels = { workspace = true }
+fw-protocol = { workspace = true }
+fw-runtime = { workspace = true }
+fw-shell = { workspace = true }
+fw-ui = { workspace = true }
+iced = { workspace = true }
+image = { workspace = true }
+photon-app-common = { workspace = true }
+photon-canvas = { workspace = true }
+photon-editor = { workspace = true }
+photon-i18n = { workspace = true }
+photon-image = { workspace = true }
+photon-ipc = { workspace = true }
+photon-protocol = { workspace = true }
+photon-storage = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

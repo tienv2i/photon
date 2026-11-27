@@ -6,13 +6,14 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use photon_core::replay_journal_in_sandbox;
+use fw_cli::{next_req_id, parse_envelope as fw_parse_envelope, print_ipc_response, print_json};
 use photon_ipc::{IpcRequest, IpcResponse, send_once, subscribe_stream};
 use photon_protocol::{
     ClientKind, Command, Envelope, EventKind, PROTOCOL_VERSION, Query, Workspace, protocol_schemas,
 };
 use photon_storage::logging::read_log_lines;
 use photon_storage::{AppPaths, Config, Journal, UiState};
+use serde::{Deserialize, Serialize};
 
 #[derive(Parser)]
 #[command(
@@ -402,7 +403,7 @@ async fn run_debug(
                     now_nanos()
                 ))
             });
-            let report = replay_journal_in_sandbox(&journal_path, &sandbox, stop_on_error)?;
+            let report = replay_journal_in_sandbox(&journal_path, &sandbox, stop_on_error).await?;
             print_json(
                 &serde_json::to_value(&report).unwrap_or_default(),
                 pretty_flag,
@@ -477,64 +478,8 @@ async fn print_query(socket: &Path, query: Query, json_flag: bool) -> Result<(),
     print_ipc_response(&resp, json_flag)
 }
 
-fn print_ipc_response(resp: &IpcResponse, json_flag: bool) -> Result<(), String> {
-    match resp {
-        IpcResponse::Command { response } => {
-            print_json(
-                &serde_json::to_value(response).unwrap_or_default(),
-                json_flag,
-            );
-            if response.ok {
-                Ok(())
-            } else {
-                Err(response
-                    .error
-                    .as_ref()
-                    .map(|e| format!("{}: {}", e.code, e.message))
-                    .unwrap_or_else(|| "command failed".to_owned()))
-            }
-        }
-        IpcResponse::Query { data } => {
-            print_json(data, json_flag);
-            Ok(())
-        }
-        IpcResponse::Event { event } => {
-            print_json(&serde_json::to_value(event).unwrap_or_default(), json_flag);
-            Ok(())
-        }
-        IpcResponse::Error { error } => {
-            print_json(&serde_json::to_value(error).unwrap_or_default(), json_flag);
-            Err(format!("{}: {}", error.code, error.message))
-        }
-    }
-}
-
-fn print_json(value: &serde_json::Value, compact: bool) {
-    let out = if compact {
-        serde_json::to_string(value)
-    } else {
-        serde_json::to_string_pretty(value)
-    };
-    println!("{}", out.unwrap_or_else(|_| "{}".to_owned()));
-}
-
 fn parse_envelope(raw: &str, expected_revision: Option<u64>) -> Result<Envelope, String> {
-    if let Ok(mut env) = serde_json::from_str::<Envelope>(raw) {
-        if expected_revision.is_some() {
-            env.expected_revision = expected_revision;
-        }
-        return Ok(env);
-    }
-    let command: Command =
-        serde_json::from_str(raw).map_err(|e| format!("invalid Command or Envelope JSON: {e}"))?;
-    let mut env = Envelope::new(next_req_id("cli"), ClientKind::Cli, command);
-    env.protocol = PROTOCOL_VERSION;
-    env.expected_revision = expected_revision;
-    Ok(env)
-}
-
-fn next_req_id(prefix: &str) -> String {
-    format!("{prefix}-{}-{}", std::process::id(), now_nanos())
+    fw_parse_envelope(raw, PROTOCOL_VERSION, expected_revision)
 }
 
 fn now_nanos() -> u128 {
@@ -542,6 +487,133 @@ fn now_nanos() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplayStepResult {
+    original_id: String,
+    command: String,
+    original_ok: bool,
+    replay_ok: bool,
+    original_revision: u64,
+    replay_revision: u64,
+    skipped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplayReport {
+    journal_path: String,
+    sandbox_dir: String,
+    total_records: usize,
+    replayed: usize,
+    skipped: usize,
+    divergences: usize,
+    final_revision: u64,
+    steps: Vec<ReplayStepResult>,
+}
+
+async fn replay_journal_in_sandbox(
+    journal_path: &Path,
+    sandbox_dir: &Path,
+    stop_on_error: bool,
+) -> Result<ReplayReport, String> {
+    let records = Journal::read_records::<Command>(journal_path, None)
+        .map_err(|e| format!("failed to read journal {}: {e}", journal_path.display()))?;
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("photon-manager")))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("photon-manager"));
+    let sock = AppPaths::for_sandbox(sandbox_dir).socket_path.clone();
+    let mut child = std::process::Command::new(&exe)
+        .arg("--headless")
+        .env("PHOTON_SANDBOX_DIR", sandbox_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("failed to spawn {}: {e}", exe.display()))?;
+
+    for _ in 0..50 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    }
+
+    let mut steps = Vec::with_capacity(records.len());
+    let mut replayed = 0usize;
+    let mut skipped = 0usize;
+    let mut divergences = 0usize;
+    let mut last_rev = 0u64;
+
+    for record in records {
+        if !record.command.is_replayable() {
+            skipped += 1;
+            steps.push(ReplayStepResult {
+                original_id: record.id,
+                command: record.command_name,
+                original_ok: record.ok,
+                replay_ok: record.ok,
+                original_revision: record.revision,
+                replay_revision: last_rev,
+                skipped: true,
+                error: None,
+            });
+            continue;
+        }
+        let env = Envelope::new(
+            format!("replay-{}", record.id),
+            ClientKind::Replay,
+            record.command,
+        );
+        let resp = send_once(&sock, &IpcRequest::Dispatch { envelope: env }).await?;
+        let (replay_ok, replay_revision, error) = match resp {
+            IpcResponse::Command { response } => (
+                response.ok,
+                response.revision,
+                response.error.map(|e| e.message),
+            ),
+            IpcResponse::Error { error } => (false, last_rev, Some(error.message)),
+            _ => (false, last_rev, Some("unexpected response".to_owned())),
+        };
+        last_rev = replay_revision;
+        replayed += 1;
+        if replay_ok != record.ok {
+            divergences += 1;
+        }
+        steps.push(ReplayStepResult {
+            original_id: record.id,
+            command: record.command_name,
+            original_ok: record.ok,
+            replay_ok,
+            original_revision: record.revision,
+            replay_revision,
+            skipped: false,
+            error,
+        });
+        if stop_on_error && !replay_ok {
+            break;
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    Ok(ReplayReport {
+        journal_path: journal_path.display().to_string(),
+        sandbox_dir: sandbox_dir.display().to_string(),
+        total_records: steps.len(),
+        replayed,
+        skipped,
+        divergences,
+        final_revision: last_rev,
+        steps,
+    })
 }
 
 #[cfg(test)]

@@ -3,25 +3,21 @@
 ## Invariant Flow
 `iced/wgpu GUI | photonctl CLI | Local IPC | MCP | Replay -> Envelope -> CoreRuntime (Tokio Actor) -> Core Handlers -> AppState + Storage -> watch/broadcast -> Adapters`
 
-## Workspace Crates (16)
-| Crate | Responsibility | GUI/GPU Free? |
-|---|---|---|
-| `photon-protocol` | `Envelope`, `Command`, `Query`, `Event`, `CommandResponse`, `UiText`, `LayoutState`, `PluginManifest`, `LayerTransformSpec`, `VectorLayerData`/`TextLayerData`/`TransformEachSpec`/`VectorBlendSpec`, JSON Schema (`schemars`) | Yes |
-| `photon-storage` | `AppIdentity` (`Dev`/`Prod`/`Sandbox`), `AppPaths` (XDG), atomic `Config`, `Journal` (`commands.jsonl`), `tracing` daily JSONL logs | Yes |
-| `photon-i18n` | Embedded Fluent `.ftl` (`en-US`, `vi-VN`) + `UiText` translator + key/placeholder parity test | Yes |
-| `photon-image` | Image probing, RGBA decode, thumbnails, `.ora`/`.psd`/`.kra`/`.icns`/RAW/SVG/JXL/`libopenjp2`/`libheif`/`avif-native` codecs, `ArchiveSession` (`.cbz`/`.zip`/`.pdf`), `EditorDocument`, raster/vector/text `Layer`s, masks/`SelectionMask`, `healing`, `drawing`, `vector` (`TransformEach`, `VectorBlend`, `usvg`/`fontdb` text rasterization), `denoise_rgba`, affine transform, atomic `file~` backup save | Yes |
-| `photon-core` | Authoritative `Core` state machine, `CoreRuntime` (Tokio `mpsc` + `watch` + `broadcast`), pixel clipboard (`NewFromClipboard`, `SmartPaste`), `ArchiveSession` (`ensure_archive_page_for_path`) & `rasterize_for_translate` orchestration (covering `.jp2`, `.pnm`, `.jxl`, `.avif`, `.heic`, `.svg`, `.psd`, RAW), plugin dispatch, batch runner, sandbox `replay` engine | Yes |
-| `photon-plugins` | Process-isolated NDJSON (`PhotonNdjsonV1`) & `jsonl-stdio` (`JsonlStdioV1`) plugin discovery, normalized plugin/action labels, `resolve_models_dir_for`, path-traversal-safe validation, and execution bridge | Yes |
-| `photon-ipc` | Secure local IPC (`$XDG_RUNTIME_DIR/photon[-dev]/control.sock` `0600` on Unix) with NDJSON request/response & event stream | Yes |
-| `photon-dialogs` | Native OS pickers (`rfd`) + movable/8-way resizable `DialogManager` frames and `DimmedFrosted` / `Cutout` / `Floating` overlays | UI Kit only (no Core dep) |
-| `photon-ui` | Reusable pure-`iced` Design System & UI Kit (`theme` with `pick_list_style`, `typography` live UI/Font scale & Display Font, SVG `icons`, `curve_editor`, `button`, `menu` with bottom-anchored flip & L3+ cascading `with_context_menu_and_submenus`, `panel` 2-line slider+steppers, `dialog` theme bridge, `toolbar`, `grid`, `table`, `editor`, `splitter`, `tooltip`) | UI Kit only (no Core dep) |
-| `photon-panels` | Unified dockable, collapsible, closable, drag-reorderable sidebar panel system (`SidebarOrderState`, `DraggablePanelHeaderSpec`, `PanelFrameSpec`, `PanelSplitter`) | UI Kit only (no Core dep) |
-| `photon-canvas` | `wgpu 27` `ImageCanvasProgram`, Stage 1/Stage 2 WGSL pipeline, GPU vector/path-node & text overlays, Sobel+Dijkstra `magnetic_snap`, `HealingBrush` & live `TransformPreview` | `iced` + `wgpu` |
-| `photon-browser` | Browser workspace UI, file grid/list/details views, Edit/clipboard/plugins menus, and batch resize/crop/convert dialogs | `iced` UI |
-| `photon-viewer` | Viewer workspace UI, spread/webtoon layout, filmstrip, auto-hiding edge nav, quality options, and view adjustments dock | `iced` UI |
-| `photon-editor` | Editor workspace UI, tool rail (including Path Select, Pen, Shape, Text), tool options card, Vector menu, tab context menu, canvas scrollbars & zoom controls, layers/adjustments docks, and splitters | `iced` UI |
-| `photon-cli` | `photonctl` binary: control commands, `debug` suite, and `mcp` JSON-RPC stdio server | Yes |
-| `photon-desktop` | `photon` binary: `iced 0.14` (`daemon` + multi-window) shell, live UI/Font scale & GNOME fractional scaling support, menus, dialogs (`ManagePlugins`, `PluginParams`, `AdjustDenoise`, `TransformEach`, `VectorBlend`), semantic UI inspector, and `--headless` mode | GUI binary |
+## Workspace Layers & Crates
+The workspace is organized into three explicit layers:
+1. **Framework (`crates/framework/*`)**: `fw-protocol`, `fw-storage`, `fw-runtime`, `fw-ipc`, `fw-cli`, `fw-dialogs`, `fw-ui`, `fw-panels`, `fw-shell` — domain-agnostic building blocks with zero `photon-*` dependencies (verified by `crates/apps/notes`, a standalone `notes` + `notesctl` app built purely on `fw-*`).
+2. **Components (`crates/components/*`)**: `comp-file-browser` (filesystem profile detection via `libc::statfs` + 0-stat NTFS-aware `scan_dir_fast`).
+3. **Apps (`crates/apps/photon/*` & `crates/apps/notes`)**:
+   - **`photon-app-viewer` (`photon-viewer`)**: owns `ViewerCore` (`fw_runtime::AppCore`) + `ViewerApp` (`iced::daemon`) + dedicated `photon-viewer-canvas` (single minimal WGSL textured-quad shader, zero Editor/Browser/Plugin dependencies).
+   - **`photon-app-manager` (`photon-manager`)**: owns `ManagerCore` (`fw_runtime::AppCore`) + `ManagerApp` (`iced::daemon`) + `photon-browser`, and hosts `--headless` IPC mode.
+   - **`photon-app-editor` (`photon-editor`)**: owns `EditorCore` (`fw_runtime::AppCore`) + `EditorApp` (`iced::daemon`) + `photon-editor` + `photon-canvas`.
+   - **`photon-desktop` (`photon`)**: thin CLI dispatcher forwarding GUI and `--headless` invocations to the standalone app binaries.
+   - **`photon-cli` (`photonctl`)**: built on `fw-cli` for IPC dispatch, queries, `debug` trace/replay, and MCP stdio serving.
+
+## Startup, Shutdown & GPU Optimizations
+- **Linux `WGPU_BACKEND=vulkan` Default**: Each GUI app sets `WGPU_BACKEND=vulkan` on Linux when unset and hardware acceleration is enabled, avoiding dual Vulkan + EGL/GLES initialization and teardown overhead on Wayland.
+- **Non-Blocking `BG_RUNTIME` Decode**: Blocking image/thumbnail decode jobs run on an external Tokio runtime (`BG_RUNTIME`) rather than `iced`'s internal runtime so `window::close` / `iced::exit()` returns immediately without waiting for abandoned decode tasks.
+- **Dedicated `photon-viewer-canvas`**: Compiles and warms up only a single minimal textured-quad WGSL shader (single/dual spread, zoom/pan/rotate, adjustments, AA/denoise, marquee), keeping Viewer first-launch warm-up minimal.
 
 ## UI, Panel & Dialog Architecture
 - **Layering**: `photon-desktop` composes `photon-ui` (tokens, controls, menus, toolbars, `CurveGraphProgram`), `photon-dialogs` (OS pickers, `DialogManager<DesktopDialogId>`, `OverlayMode::{DimmedFrosted, Cutout, Floating}`), `photon-panels` (`SidebarOrderState`, `DraggablePanelHeaderSpec`, `sidebar_panel`, `sidebar_dock`), `photon-canvas`, and the 3 workspace UI crates (`photon-browser`, `photon-viewer`, `photon-editor`), while keeping all domain mutations routed through `CoreHandle::dispatch`.

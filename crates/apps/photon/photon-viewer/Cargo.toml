@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 iced = { workspace = true }
-photon-canvas = { workspace = true }
+photon-viewer-canvas = { workspace = true }
 photon-i18n = { workspace = true }
 fw-panels = { workspace = true }
 photon-protocol = { workspace = true }

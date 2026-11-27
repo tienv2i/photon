@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
-photon-core = { workspace = true }
+fw-cli = { workspace = true }
 photon-ipc = { workspace = true }
 photon-protocol = { workspace = true }
 photon-storage = { workspace = true }

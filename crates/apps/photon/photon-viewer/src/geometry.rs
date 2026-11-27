@@ -89,7 +89,8 @@ pub fn viewer_double_fit_geometries(
 ) -> DoubleSpreadScreenGeometry {
     let (spread_w, spread_h, left_disp_w, gap_doc, right_disp_w) = match right_size {
         Some(r) => {
-            let (sw, sh, lw, gap) = photon_canvas::dual_spread_geometry(left_size, r, dual_gap_px);
+            let (sw, sh, lw, gap) =
+                photon_viewer_canvas::dual_spread_geometry(left_size, r, dual_gap_px);
             let rw = (sw - lw - gap).max(1.0);
             (sw, sh, lw, gap, rw)
         }

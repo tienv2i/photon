@@ -35,9 +35,9 @@ use fw_ui::tooltip::{TooltipPosition, with_tooltip_pos};
 use fw_ui::typography::text;
 use iced::widget::{Shader, column, container, responsive, row, rule, scrollable, stack};
 use iced::{Alignment, Element, Fill, Length};
-use photon_canvas::{CanvasTool, ImageCanvasProgram};
 use photon_i18n::tr;
 use photon_protocol::{Command, Theme, ViewerRightPanel, ViewerViewMode};
+use photon_viewer_canvas::{ViewerCanvasProgram, ViewerCanvasTool};
 
 use edge_nav::EdgeNavButtonProgram;
 use sidebar::{
@@ -60,11 +60,11 @@ pub fn build_viewer_view<'a>(state: ViewerViewState<'a>) -> Element<'a, ViewerMe
                 state.translate.mode,
                 ViewerTranslateMode::Translate | ViewerTranslateMode::OcrOnly
             )) {
-        CanvasTool::MarqueeRect
+        ViewerCanvasTool::MarqueeRect
     } else if state.translate.active && state.translate.mode == ViewerTranslateMode::Pan {
-        CanvasTool::Hand
+        ViewerCanvasTool::Hand
     } else {
-        CanvasTool::Pointer
+        ViewerCanvasTool::Pointer
     };
 
     let has_any_image = state.viewer_frame.is_some() || !state.snapshot.viewer_images.is_empty();
@@ -100,36 +100,20 @@ pub fn build_viewer_view<'a>(state: ViewerViewState<'a>) -> Element<'a, ViewerMe
         match viewer_mode {
             ViewerViewMode::Single => {
                 let canvas: Element<'_, ViewerMessage> = Element::from(
-                    Shader::new(ImageCanvasProgram {
+                    Shader::new(ViewerCanvasProgram {
                         frame: state.viewer_frame.cloned(),
                         pair_frame: None,
                         dual_gap_px: 0.0,
-                        compare_frame: None,
                         zoom: state.zoom,
                         pan_x: state.pan_x,
                         pan_y: state.pan_y,
                         adjustments: state.viewer_adj,
                         dark_theme: dark,
-                        crop_rect: None,
-                        crop_aspect: None,
                         quarter_turns: state.viewer_quarter_turns,
                         tool: canvas_tool,
-                        preview_angle_rad: 0.0,
-                        preview_fill: [0.0; 4],
-                        canvas_bg: None,
                         viewport_bg: state.viewport_background,
-                        compare_mode: 0,
-                        compare_split_x: 0.5,
-                        brush_radius_px: 0.0,
-                        selection_mask: None,
-                        has_selection: false,
-                        quick_mask_active: false,
-                        marching_ants_phase: 0.0,
-                        restrict_pan_to_hand: false,
-                        stabilizer_radius: 0.0,
                         aa_mode: state.aa_mode,
                         denoise_mode: state.denoise_mode,
-                        ..Default::default()
                     })
                     .width(Fill)
                     .height(Fill),

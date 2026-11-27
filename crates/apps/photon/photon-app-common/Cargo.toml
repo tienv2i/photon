@@ -1,0 +1,15 @@
+[package]
+name = "photon-app-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clap = { workspace = true }
+fw-dialogs = { workspace = true }
+fw-shell = { workspace = true }
+photon-ipc = { workspace = true }
+photon-protocol = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

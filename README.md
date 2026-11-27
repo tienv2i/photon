@@ -49,26 +49,47 @@ Nine standalone MIT-licensed plugin crates are included under `plugins/`:
 
 See [docs/PLUGINS.md](docs/PLUGINS.md) for wire protocols, model lookup paths, and plugin packaging details.
 
-## Workspace Crates (16)
+## Workspace Crates
 
+### Framework Layer (`crates/framework/*`)
 | Crate | Responsibility | GUI/GPU Free? |
 |---|---|---|
-| `photon-protocol` | `Envelope`, `Command`, `Query`, `Event`, `CommandResponse`, `UiText`, `LayoutState`, `PluginManifest`, `LayerTransformSpec`, JSON Schema (`schemars`) | Yes |
-| `photon-storage` | `AppIdentity` (`Dev`/`Prod`/`Sandbox`), `AppPaths` (XDG), atomic `Config`, `Journal` (`commands.jsonl`), daily JSONL logs | Yes |
+| `fw-protocol` | Generic `Envelope`, `CommandResponse`, `UiText`, `ProtocolCommand`, `ProtocolError` | Yes |
+| `fw-storage` | Generic `AppBranding`, `AppIdentity`, `AppPaths`, `Journal`, daily JSONL logs | Yes |
+| `fw-runtime` | Domain-agnostic Tokio `AppCore` actor runtime (`mpsc` + `watch` + `broadcast`) | Yes |
+| `fw-ipc` | Generic NDJSON local IPC server & client (`bind_socket`, `serve`, `send_once`, `subscribe_stream`) | Yes |
+| `fw-cli` | Generic CLI JSON/IPC output helpers and MCP JSON-RPC 2.0 stdio server (`serve_mcp_stdio`) | Yes |
+| `fw-dialogs` | Native OS pickers (`rfd`) + movable, 8-way resizable `DialogManager` frames and overlays | `iced` UI |
+| `fw-ui` | Pure-`iced` design system (`PaletteTokens`, typography, SVG `icons`, `curve_editor`, `button`, `menu`, `toolbar`, `grid`, `table`, `editor`, `splitter`) | `iced` UI |
+| `fw-panels` | Unified dockable, collapsible, closable, drag-reorderable sidebar panels | `iced` UI |
+| `fw-shell` | Launch locks (`flock`), platform window activation helpers | Yes |
+
+### Components (`crates/components/*`)
+| Crate | Responsibility | GUI/GPU Free? |
+|---|---|---|
+| `comp-file-browser` | Reusable file-browser model & NTFS-aware 0-stat `scan_dir_fast` (`libc::statfs` profile detection) | Yes |
+
+### Photon & Reference Apps (`crates/apps/*`)
+| Crate | Responsibility | GUI/GPU Free? |
+|---|---|---|
+| `photon-protocol` | Photon `Command`, `Query`, `Event`, `UiStateSnapshot`, `LayoutState`, JSON Schema | Yes |
+| `photon-storage` | Photon `AppPaths`, `Config`, `UiState`, `Journal` | Yes |
 | `photon-i18n` | Embedded Fluent `.ftl` (`en-US`, `vi-VN`), `UiText` translator, key & placeholder parity tests | Yes |
-| `photon-image` | Image probing, RGBA decode, thumbnails, `.ora`/`.psd`/RAW/SVG/JXL codecs, `EditorDocument`, layers, masks, `SelectionMask`, `healing`, `drawing`, `denoise_rgba`, affine transforms, atomic `file~` backup save | Yes |
-| `photon-core` | Authoritative `Core` state machine, `CoreRuntime` (Tokio `mpsc` + `watch` + `broadcast`), pixel clipboard, plugin dispatch, batch runner, sandbox `replay` | Yes |
-| `photon-plugins` | Process-isolated NDJSON & `jsonl-stdio` plugin discovery, path-traversal-safe validation, and execution bridge | Yes |
-| `photon-ipc` | Secure local IPC (`$XDG_RUNTIME_DIR/photon[-dev]/control.sock`, `0600` on Unix) with NDJSON request/response & event stream | Yes |
-| `photon-dialogs` | Native OS pickers (`rfd`) + movable, 8-way resizable `DialogManager` frames and `DimmedFrosted` / `Cutout` / `Floating` overlays | `iced` UI |
-| `photon-ui` | Pure-`iced` design system (`PaletteTokens`, typography, SVG `icons`, `curve_editor`, `button`, `menu`, `toolbar`, `grid`, `table`, `editor`, `splitter`) | `iced` UI |
-| `photon-panels` | Unified dockable, collapsible, closable, drag-reorderable sidebar panels (`SidebarOrderState`, `DraggablePanelHeaderSpec`, `PanelSplitter`) | `iced` UI |
-| `photon-canvas` | `wgpu 27` `ImageCanvasProgram`, Stage 1/Stage 2 WGSL pipeline (1D Curve LUT, AA, Denoise, live Transform, `Nearest` `sel_sampler`), vector overlay, `Space+Drag` & `Alt+Click` | `iced` + `wgpu` |
-| `photon-browser` | Browser workspace UI, file grid/list/details views, clipboard/plugins menus, and batch resize/crop/convert dialogs | `iced` UI |
-| `photon-viewer` | Viewer workspace UI, spread/webtoon layout, filmstrip, quality options, and view adjustments dock | `iced` UI |
-| `photon-editor` | Editor workspace UI, tool rail, tool options card, canvas scrollbars & zoom controls, layers/adjustments docks, and splitters | `iced` UI |
-| `photon-cli` | `photonctl` binary: IPC command dispatch, queries, `debug` suite (`logs`, `journal`, `trace`, `ui-tree`, `screenshot`, `replay`), `mcp` stdio server | Yes |
-| `photon-desktop` | `photon` binary: `iced 0.14` `daemon` multi-window shell, menus, dialogs (`ManagePlugins`, `PluginParams`, `AdjustDenoise`), semantic inspector, and `--headless` mode | GUI binary |
+| `photon-image` | Image probing, RGBA decode, thumbnails, `.ora`/`.psd`/RAW/SVG/JXL codecs, `EditorDocument`, layers, masks, transforms | Yes |
+| `photon-plugins` | Process-isolated NDJSON & `jsonl-stdio` plugin discovery and execution bridge | Yes |
+| `photon-ipc` | Photon IPC bindings over `fw-ipc` + multi-viewer instance registry | Yes |
+| `photon-app-common` | Shared CLI parser, launch routing, image file dialogs, and window activation | Yes |
+| `photon-viewer-canvas` | Lightweight `wgpu` canvas for Viewer (`Single` & `Double` spread, single minimal WGSL shader) | `iced` + `wgpu` |
+| `photon-canvas` | Full Editor `wgpu 27` `ImageCanvasProgram`, Stage 1/Stage 2 WGSL pipeline, vector/brush/selection overlays | `iced` + `wgpu` |
+| `photon-browser` | Browser workspace UI, file grid/list/details views, Open Folder quick toolbar, batch dialogs | `iced` UI |
+| `photon-viewer` | Viewer workspace UI, spread/webtoon layout, filmstrip, quality options, view adjustments | `iced` UI |
+| `photon-editor` | Editor workspace UI, tool rail, tool options, layers/adjustments docks, splitters | `iced` UI |
+| `photon-app-manager` | Independent `photon-manager` binary (`ManagerCore` + `ManagerApp` + `--headless` mode) | GUI + Headless |
+| `photon-app-viewer` | Independent `photon-viewer` binary (`ViewerCore` + `ViewerApp` + `photon-viewer-canvas`) | GUI binary |
+| `photon-app-editor` | Independent `photon-editor` binary (`EditorCore` + `EditorApp` + `photon-canvas`) | GUI binary |
+| `photon-cli` | `photonctl` binary built on `fw-cli`: IPC dispatch, queries, `debug` suite, `mcp` stdio server | Yes |
+| `photon-desktop` | `photon` CLI dispatcher binary routing GUI & `--headless` to standalone app binaries | Yes |
+| `notes-app` | Reference `notes` & `notesctl` app built purely on `fw-*` (zero `photon-*` dependencies) | GUI + Headless |
 
 ## Quick Start (`just`)
 

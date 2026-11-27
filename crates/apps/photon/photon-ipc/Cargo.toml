@@ -9,7 +9,6 @@ rust-version.workspace = true
 fw-ipc = { workspace = true }
 fw-protocol = { workspace = true }
 fw-runtime = { workspace = true }
-photon-core = { workspace = true }
 photon-protocol = { workspace = true }
 photon-storage = { workspace = true }
 serde = { workspace = true }

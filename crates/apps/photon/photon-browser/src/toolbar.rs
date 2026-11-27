@@ -401,7 +401,16 @@ pub(crate) fn build_browser_header(state: BrowserViewState<'_>) -> Element<'_, B
         tr(lang, "tooltip-browser-show-hidden"),
     );
 
+    let open_folder_btn = button::labeled_tipped(
+        tr(lang, "action-open-folder"),
+        Some(Icon::FolderOpen),
+        ButtonVariant::Secondary,
+        Some(BrowserMessage::PickFolderDialog),
+        tr(lang, "action-open-folder-dialog"),
+    );
+
     let mut bar = row![
+        open_folder_btn,
         nav_left,
         toolbar_divider(),
         filter_toggle_btn,

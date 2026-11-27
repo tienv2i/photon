@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use photon_core::CoreHandle;
+use fw_runtime::{AppCore, CoreHandle};
 use photon_protocol::{Command, Event, Query};
 
 pub type IpcRequest = fw_ipc::IpcRequest<Command, Query>;
@@ -20,12 +20,18 @@ pub mod transport {
         fw_ipc::transport::bind_socket(socket_path).await
     }
 
-    pub async fn serve_bound(listener: UnixListener, core: CoreHandle) -> std::io::Result<()> {
-        fw_ipc::transport::serve_bound(listener, core.inner().clone()).await
+    pub async fn serve_bound<A>(listener: UnixListener, core: CoreHandle<A>) -> std::io::Result<()>
+    where
+        A: AppCore<Command = Command, Query = Query, Event = Event>,
+    {
+        fw_ipc::transport::serve_bound(listener, core).await
     }
 
-    pub async fn serve(socket_path: &Path, core: CoreHandle) -> std::io::Result<()> {
-        fw_ipc::transport::serve(socket_path, core.inner().clone()).await
+    pub async fn serve<A>(socket_path: &Path, core: CoreHandle<A>) -> std::io::Result<()>
+    where
+        A: AppCore<Command = Command, Query = Query, Event = Event>,
+    {
+        fw_ipc::transport::serve(socket_path, core).await
     }
 
     pub async fn send_once(
@@ -521,11 +527,47 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn serve_bound_answers_queries() {
+        struct MockCore;
+        impl AppCore for MockCore {
+            type State = ();
+            type Command = Command;
+            type Query = Query;
+            type Event = Event;
+            type Custom = ();
+
+            fn snapshot(&self) -> Self::State {}
+            fn revision(&self) -> u64 {
+                0
+            }
+            fn dispatch(
+                &mut self,
+                envelope: fw_protocol::Envelope<Self::Command>,
+            ) -> fw_protocol::CommandResponse {
+                fw_protocol::CommandResponse {
+                    id: envelope.id,
+                    ok: true,
+                    status: fw_protocol::CommandStatus::Completed,
+                    revision: 0,
+                    task_id: None,
+                    message: None,
+                    ui: None,
+                    data: None,
+                    error: None,
+                }
+            }
+            fn query(
+                &self,
+                _query: Self::Query,
+            ) -> Result<serde_json::Value, fw_protocol::ProtocolError> {
+                Ok(serde_json::json!({ "ok": true }))
+            }
+        }
+
         let root = temp_sandbox("serve-bound");
         let sock = root.join("control.sock");
         let listener = bind_socket(&sock).await.unwrap();
 
-        let handle = photon_core::CoreRuntime::spawn(photon_core::Core::for_sandbox(&root));
+        let handle = fw_runtime::CoreRuntime::spawn(MockCore);
         let server = tokio::spawn(serve_bound(listener, handle));
 
         let response = send_once(

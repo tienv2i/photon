@@ -873,6 +873,7 @@ dependencies = [
 name = "comp-file-browser"
 version = "0.0.5-beta"
 dependencies = [
+ "libc",
  "regex-automata",
 ]
 
@@ -1633,6 +1634,17 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "fw-cli"
+version = "0.0.5-beta"
+dependencies = [
+ "fw-ipc",
+ "fw-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -3081,6 +3093,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0676bb32a98c1a483ce53e500a81ad9c3d5b3f7c920c28c24e9cb0980d0b5bc8"
 
 [[package]]
+name = "notes-app"
+version = "0.0.5-beta"
+dependencies = [
+ "clap",
+ "fw-cli",
+ "fw-ipc",
+ "fw-protocol",
+ "fw-runtime",
+ "fw-storage",
+ "fw-ui",
+ "iced",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3678,24 +3708,96 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "photon-app-common"
+version = "0.0.5-beta"
+dependencies = [
+ "clap",
+ "fw-dialogs",
+ "fw-shell",
+ "photon-ipc",
+ "photon-protocol",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "photon-app-editor"
 version = "0.0.5-beta"
 dependencies = [
- "photon-desktop",
+ "clap",
+ "fw-dialogs",
+ "fw-panels",
+ "fw-protocol",
+ "fw-runtime",
+ "fw-shell",
+ "fw-ui",
+ "iced",
+ "image",
+ "photon-app-common",
+ "photon-canvas",
+ "photon-editor",
+ "photon-i18n",
+ "photon-image",
+ "photon-ipc",
+ "photon-protocol",
+ "photon-storage",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "photon-app-manager"
 version = "0.0.5-beta"
 dependencies = [
- "photon-desktop",
+ "arboard",
+ "clap",
+ "comp-file-browser",
+ "fw-dialogs",
+ "fw-panels",
+ "fw-protocol",
+ "fw-runtime",
+ "fw-shell",
+ "fw-ui",
+ "iced",
+ "image",
+ "photon-app-common",
+ "photon-browser",
+ "photon-i18n",
+ "photon-image",
+ "photon-ipc",
+ "photon-protocol",
+ "photon-storage",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "photon-app-viewer"
 version = "0.0.5-beta"
 dependencies = [
- "photon-desktop",
+ "arboard",
+ "clap",
+ "comp-file-browser",
+ "fw-panels",
+ "fw-protocol",
+ "fw-runtime",
+ "fw-shell",
+ "fw-ui",
+ "iced",
+ "image",
+ "photon-app-common",
+ "photon-i18n",
+ "photon-image",
+ "photon-ipc",
+ "photon-protocol",
+ "photon-storage",
+ "photon-viewer",
+ "photon-viewer-canvas",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3726,63 +3828,22 @@ name = "photon-cli"
 version = "0.0.5-beta"
 dependencies = [
  "clap",
- "photon-core",
+ "fw-cli",
  "photon-ipc",
  "photon-protocol",
  "photon-storage",
  "serde",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "photon-core"
-version = "0.0.5-beta"
-dependencies = [
- "fw-protocol",
- "fw-runtime",
- "image",
- "photon-i18n",
- "photon-image",
- "photon-ipc",
- "photon-plugins",
- "photon-protocol",
- "photon-storage",
- "rayon",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
 ]
 
 [[package]]
 name = "photon-desktop"
 version = "0.0.5-beta"
 dependencies = [
- "arboard",
  "clap",
- "fw-dialogs",
- "fw-panels",
- "fw-shell",
- "fw-ui",
- "iced",
- "image",
- "libc",
- "photon-browser",
- "photon-canvas",
- "photon-core",
- "photon-editor",
- "photon-i18n",
- "photon-image",
- "photon-ipc",
- "photon-protocol",
+ "photon-app-common",
  "photon-storage",
- "photon-viewer",
- "regex-automata",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -3833,7 +3894,6 @@ dependencies = [
  "fw-ipc",
  "fw-protocol",
  "fw-runtime",
- "photon-core",
  "photon-protocol",
  "photon-storage",
  "serde",
@@ -3881,8 +3941,16 @@ dependencies = [
  "fw-panels",
  "fw-ui",
  "iced",
- "photon-canvas",
  "photon-i18n",
+ "photon-protocol",
+ "photon-viewer-canvas",
+]
+
+[[package]]
+name = "photon-viewer-canvas"
+version = "0.0.5-beta"
+dependencies = [
+ "iced",
  "photon-protocol",
 ]
 

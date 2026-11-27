@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use fw_panels::SidebarOrderState;
 use iced::widget::{image as iced_image, scrollable};
-use photon_canvas::{CanvasEvent, CpuImageFrame};
 use photon_protocol::{
     CanvasAntiAliasingMode, ColorAdjustments, Command, TranslateProvider, TranslationBlock,
     UiStateSnapshot, ViewerRightPanel, ViewerViewMode, ViewportDenoiseMode, WebtoonFitMode,
 };
+use photon_viewer_canvas::{ViewerCanvasEvent, ViewerImageFrame};
 
 pub type DualSpreadSlots<'a> = (Option<(usize, &'a str)>, Option<(usize, &'a str)>);
 
@@ -123,8 +123,8 @@ impl Default for ViewerTranslateState {
 pub struct ViewerViewState<'a> {
     pub snapshot: &'a UiStateSnapshot,
     pub viewer_mode: ViewerViewMode,
-    pub viewer_frame: Option<&'a CpuImageFrame>,
-    pub viewer_pair_frame: Option<&'a CpuImageFrame>,
+    pub viewer_frame: Option<&'a ViewerImageFrame>,
+    pub viewer_pair_frame: Option<&'a ViewerImageFrame>,
     pub image_sizes: &'a HashMap<String, (u32, u32)>,
     pub thumbnails: &'a HashMap<String, iced_image::Handle>,
     pub viewer_adj: ColorAdjustments,
@@ -166,8 +166,8 @@ pub enum ViewerMessage {
     PickImagesDialog,
     DualStepSpread(isize),
     ZoomStep(f32),
-    Canvas(CanvasEvent),
-    ViewerCanvas(Option<String>, CanvasEvent),
+    Canvas(ViewerCanvasEvent),
+    ViewerCanvas(Option<String>, ViewerCanvasEvent),
     ViewerZoomActual,
     ViewerRotatePreview(i8),
     ToggleFullscreen,

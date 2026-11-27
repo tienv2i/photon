@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use fw_ui::theme::canvas_backdrop_style;
 use iced::widget::{Shader, container};
 use iced::{Element, Fill};
-use photon_canvas::{CanvasEvent, CanvasTool, ImageCanvasProgram};
 use photon_protocol::Language;
+use photon_viewer_canvas::{ViewerCanvasEvent, ViewerCanvasProgram, ViewerCanvasTool};
 
 use crate::types::{DualSpreadSlots, ViewerMessage, ViewerViewState};
 
@@ -12,7 +12,7 @@ pub(crate) fn build_viewer_double_panes<'a>(
     state: ViewerViewState<'a>,
     _lang: Language,
     dark: bool,
-    canvas_tool: CanvasTool,
+    canvas_tool: ViewerCanvasTool,
 ) -> Element<'a, ViewerMessage> {
     let gap = f32::from(state.viewer_manga_page_gap);
     let (left_slot, right_slot) = dual_spread_slots(state);
@@ -20,42 +20,26 @@ pub(crate) fn build_viewer_double_panes<'a>(
     let right_path = right_slot.map(|(_, p)| p.to_owned());
 
     let canvas: Element<'_, ViewerMessage> = Element::from(
-        Shader::new(ImageCanvasProgram {
+        Shader::new(ViewerCanvasProgram {
             frame: state.viewer_frame.cloned(),
             pair_frame: state.viewer_pair_frame.cloned(),
             dual_gap_px: gap,
-            compare_frame: None,
             zoom: state.zoom,
             pan_x: state.pan_x,
             pan_y: state.pan_y,
             adjustments: state.viewer_adj,
             dark_theme: dark,
-            crop_rect: None,
-            crop_aspect: None,
             quarter_turns: state.viewer_quarter_turns,
             tool: canvas_tool,
-            preview_angle_rad: 0.0,
-            preview_fill: [0.0; 4],
-            canvas_bg: None,
             viewport_bg: state.viewport_background,
-            compare_mode: 0,
-            compare_split_x: 0.5,
-            brush_radius_px: 0.0,
-            selection_mask: None,
-            has_selection: false,
-            quick_mask_active: false,
-            marching_ants_phase: 0.0,
-            restrict_pan_to_hand: false,
-            stabilizer_radius: 0.0,
             aa_mode: state.aa_mode,
             denoise_mode: state.denoise_mode,
-            ..Default::default()
         })
         .width(Fill)
         .height(Fill),
     )
     .map(move |ev| match ev {
-        CanvasEvent::ContextMenuRequested { is_right_pair, .. } => {
+        ViewerCanvasEvent::ContextMenuRequested { is_right_pair, .. } => {
             let target = if is_right_pair {
                 right_path.clone().or_else(|| left_path.clone())
             } else {

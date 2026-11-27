@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use fw_ui::icons::Icon;
 use fw_ui::menu::{MenuEntry, MenuItem, menu_panel_entries};
 use iced::Element;
-use photon_canvas::CanvasEvent;
 use photon_i18n::tr;
 use photon_protocol::{CanvasAntiAliasingMode, Command, ViewerViewMode, ViewportDenoiseMode};
+use photon_viewer_canvas::ViewerCanvasEvent;
 
 use crate::types::{ViewerMessage, ViewerViewState};
 
@@ -282,7 +282,7 @@ pub fn build_viewer_zoom_submenu<'a>(
         MenuEntry::Item(
             MenuItem::new(
                 tr(lang, "action-fit"),
-                ViewerMessage::Canvas(CanvasEvent::ResetFit),
+                ViewerMessage::Canvas(ViewerCanvasEvent::ResetFit),
             )
             .icon(Icon::Fit)
             .shortcut("F")

@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use photon_canvas::CpuImageFrame;
 use photon_i18n::tr;
 use photon_protocol::{Language, ViewerViewMode};
+use photon_viewer_canvas::ViewerImageFrame;
 
 use crate::spread::dual_spread_slots;
 use crate::types::ViewerViewState;
@@ -93,7 +93,7 @@ pub fn viewer_status_summary(state: ViewerViewState<'_>, lang: Language) -> Stri
         }
         ViewerViewMode::Double => {
             let (left_slot, right_slot) = dual_spread_slots(state);
-            let dims_str = |path: &str, frame: Option<&CpuImageFrame>| -> Option<String> {
+            let dims_str = |path: &str, frame: Option<&ViewerImageFrame>| -> Option<String> {
                 if let Some(f) = frame {
                     Some(format!("{}×{}", f.width, f.height))
                 } else {

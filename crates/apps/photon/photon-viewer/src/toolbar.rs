@@ -9,9 +9,9 @@ use fw_ui::tooltip::{TooltipPosition, with_tooltip_pos};
 use fw_ui::typography::text;
 use iced::widget::{button as iced_button, container, row, rule};
 use iced::{Alignment, Element, Length};
-use photon_canvas::CanvasEvent;
 use photon_i18n::tr;
 use photon_protocol::{Command, ViewerViewMode, Workspace};
+use photon_viewer_canvas::ViewerCanvasEvent;
 
 use crate::types::{ViewerMessage, ViewerViewState};
 
@@ -151,7 +151,7 @@ pub fn build_viewer_toolbar<'a>(
         button::toolbar_icon(
             Icon::Fit,
             false,
-            has_image.then_some(ViewerMessage::Canvas(CanvasEvent::ResetFit)),
+            has_image.then_some(ViewerMessage::Canvas(ViewerCanvasEvent::ResetFit)),
             Some(tr(lang, "tooltip-viewer-fit")),
         ),
         actual_ratio_btn,

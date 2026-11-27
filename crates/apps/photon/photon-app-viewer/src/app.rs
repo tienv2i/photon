@@ -291,7 +291,7 @@ pub fn update(app: &mut ViewerApp, message: Message) -> Task<Message> {
             app.window_id = Some(id);
             app.report_ui_tree_task()
         }
-        Message::WindowCloseRequested(id) => window::close(id),
+        Message::WindowCloseRequested(_id) => iced::exit(),
         Message::WindowClosed(id) => {
             if app.window_id == Some(id) {
                 app.window_id = None;
@@ -335,9 +335,8 @@ pub fn update(app: &mut ViewerApp, message: Message) -> Task<Message> {
         Message::CoreEventReceived(ev) => {
             if let photon_protocol::EventKind::UiActionRequested { target_id, .. } = ev.kind
                 && target_id == "app.exit"
-                && let Some(id) = app.window_id
             {
-                return window::close(id);
+                return iced::exit();
             }
             Task::none()
         }
@@ -688,22 +687,6 @@ impl ViewerApp {
 
     fn handle_iced_event(&mut self, ev: Event) -> Task<Message> {
         match ev {
-            Event::Window(window::Event::CloseRequested) => {
-                if let Some(id) = self.window_id {
-                    return window::close(id);
-                }
-            }
-            Event::Window(window::Event::Closed) => {
-                if let Some(id) = self.window_id.take() {
-                    let _ = id;
-                    return iced::exit();
-                }
-            }
-            Event::Window(window::Event::Resized(size)) => {
-                if let Some(id) = self.window_id {
-                    return Task::done(Message::WindowResized(id, size));
-                }
-            }
             Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                 self.cursor_pos = Some(position);
             }
@@ -723,9 +706,7 @@ impl ViewerApp {
                             );
                         }
                         keyboard::Key::Character("w") | keyboard::Key::Character("q") => {
-                            if let Some(id) = self.window_id {
-                                return window::close(id);
-                            }
+                            return iced::exit();
                         }
                         keyboard::Key::Character("0") => {
                             self.zoom = 1.0;
@@ -743,8 +724,8 @@ impl ViewerApp {
                             self.context_menu = None;
                         } else if self.is_fullscreen {
                             return self.toggle_fullscreen();
-                        } else if let Some(id) = self.window_id {
-                            return window::close(id);
+                        } else {
+                            return iced::exit();
                         }
                     }
                     Key::Named(Named::F11) => return self.toggle_fullscreen(),
@@ -796,9 +777,7 @@ impl ViewerApp {
                             self.pan_y = 0.0;
                         }
                         "q" | "Q" => {
-                            if let Some(id) = self.window_id {
-                                return window::close(id);
-                            }
+                            return iced::exit();
                         }
                         _ => {}
                     },

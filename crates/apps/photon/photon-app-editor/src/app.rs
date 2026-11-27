@@ -258,7 +258,7 @@ pub fn update(app: &mut EditorApp, message: Message) -> Task<Message> {
             app.window_id = Some(id);
             app.report_ui_tree_task()
         }
-        Message::WindowCloseRequested(id) => window::close(id),
+        Message::WindowCloseRequested(_id) => iced::exit(),
         Message::WindowClosed(id) => {
             if app.window_id == Some(id) {
                 app.window_id = None;
@@ -298,9 +298,8 @@ pub fn update(app: &mut EditorApp, message: Message) -> Task<Message> {
         Message::CoreEventReceived(ev) => {
             if let EventKind::UiActionRequested { target_id, .. } = ev.kind
                 && target_id == "app.exit"
-                && let Some(id) = app.window_id
             {
-                return window::close(id);
+                return iced::exit();
             }
             Task::none()
         }
@@ -500,22 +499,6 @@ impl EditorApp {
 
     fn handle_iced_event(&mut self, ev: Event) -> Task<Message> {
         match ev {
-            Event::Window(window::Event::CloseRequested) => {
-                if let Some(id) = self.window_id {
-                    return window::close(id);
-                }
-            }
-            Event::Window(window::Event::Closed) => {
-                if let Some(id) = self.window_id.take() {
-                    let _ = id;
-                    return iced::exit();
-                }
-            }
-            Event::Window(window::Event::Resized(size)) => {
-                if let Some(id) = self.window_id {
-                    return Task::done(Message::WindowResized(id, size));
-                }
-            }
             Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 if modifiers.command() {
                     match key.as_ref() {
@@ -539,9 +522,7 @@ impl EditorApp {
                             }
                         }
                         keyboard::Key::Character("w") | keyboard::Key::Character("q") => {
-                            if let Some(id) = self.window_id {
-                                return window::close(id);
-                            }
+                            return iced::exit();
                         }
                         _ => {}
                     }

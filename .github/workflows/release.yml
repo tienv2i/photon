@@ -179,7 +179,7 @@ jobs:
             org.freedesktop.Platform//24.08 \
             org.freedesktop.Sdk//24.08 \
             org.freedesktop.Sdk.Extension.rust-stable//24.08
-          flatpak-builder --user --force-clean --repo=flatpak-repo flatpak-build packaging/linux/io.github.tienv2i.Photon.yml
+          flatpak-builder --user --disable-rofiles-fuse --force-clean --repo=flatpak-repo flatpak-build packaging/linux/io.github.tienv2i.Photon.yml
           TAG="${GITHUB_REF_NAME#v}"
           TAG="${TAG:-0.0.1-beta}"
           mkdir -p dist/out

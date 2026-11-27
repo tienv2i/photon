@@ -178,7 +178,7 @@ fn main() {
         unsafe { std::env::set_var("ICED_BACKEND", "tiny-skia") };
     }
 
-    app::init_globals(handle, bg_rt, gpu_backend);
+    app::init_globals(handle, bg_rt, gpu_backend, socket_path);
 
     if let Err(err) = iced::daemon(app::boot, app::update, app::view)
         .settings(iced::Settings {

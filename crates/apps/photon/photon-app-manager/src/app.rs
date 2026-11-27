@@ -40,15 +40,26 @@ use crate::core::{ManagerCore, ManagerCoreCustom};
 static CORE_HANDLE: OnceLock<CoreHandle<ManagerCore>> = OnceLock::new();
 static BG_RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 static GPU_BACKEND: OnceLock<String> = OnceLock::new();
+static CLEANUP_SOCKET: OnceLock<PathBuf> = OnceLock::new();
 
 pub fn init_globals(
     core: CoreHandle<ManagerCore>,
     bg_rt: tokio::runtime::Handle,
     gpu_backend: String,
+    socket_path: PathBuf,
 ) {
     let _ = CORE_HANDLE.set(core);
     let _ = BG_RUNTIME.set(bg_rt);
     let _ = GPU_BACKEND.set(gpu_backend);
+    let _ = CLEANUP_SOCKET.set(socket_path);
+}
+
+fn fast_exit() -> ! {
+    if let Some(sock) = CLEANUP_SOCKET.get() {
+        let _ = std::fs::remove_file(sock);
+    }
+    photon_storage::logging::log_shutdown();
+    std::process::exit(0);
 }
 
 fn spawn_bg<F, T>(f: F) -> impl Future<Output = T> + Send + 'static
@@ -270,11 +281,10 @@ pub fn update(app: &mut ManagerApp, message: Message) -> Task<Message> {
             app.window_id = Some(id);
             app.report_ui_tree_task()
         }
-        Message::WindowCloseRequested(_id) => iced::exit(),
+        Message::WindowCloseRequested(_id) => fast_exit(),
         Message::WindowClosed(id) => {
             if app.window_id == Some(id) {
-                app.window_id = None;
-                return iced::exit();
+                fast_exit();
             }
             Task::none()
         }
@@ -315,7 +325,7 @@ pub fn update(app: &mut ManagerApp, message: Message) -> Task<Message> {
             if let EventKind::UiActionRequested { target_id, .. } = ev.kind
                 && target_id == "app.exit"
             {
-                return iced::exit();
+                fast_exit();
             }
             Task::none()
         }
@@ -624,7 +634,7 @@ impl ManagerApp {
                             self.browser_filter_bar_open = !self.browser_filter_bar_open;
                         }
                         keyboard::Key::Character("w") | keyboard::Key::Character("q") => {
-                            return iced::exit();
+                            fast_exit();
                         }
                         _ => {}
                     }

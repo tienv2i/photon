@@ -173,7 +173,9 @@ jobs:
         run: |
           sudo rm -f /etc/apt/sources.list.d/microsoft*
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils
+          sudo apt-get install -y \
+            flatpak flatpak-builder elfutils librsvg2-common librsvg2-bin \
+            desktop-file-utils appstream appstream-compose
           flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub \
             org.freedesktop.Platform//24.08 \

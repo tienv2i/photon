@@ -1,5 +1,5 @@
 pkgname=photon
-pkgver=0.0.2beta
+pkgver=0.0.3beta
 pkgrel=1
 pkgdesc="Fast, automation-first photo browser, viewer, and non-destructive layered editor"
 arch=('x86_64')

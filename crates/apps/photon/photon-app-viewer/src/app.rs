@@ -41,10 +41,13 @@ use photon_viewer::{
 };
 use photon_viewer_canvas::{ViewerCanvasEvent, ViewerImageFrame};
 
+type PredecodeResult = Option<(String, Result<ViewerImageFrame, String>)>;
+
 static CORE_HANDLE: OnceLock<CoreHandle<ViewerCore>> = OnceLock::new();
 static BG_RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 static GPU_BACKEND: OnceLock<String> = OnceLock::new();
 static CLEANUP_PATHS: OnceLock<(std::path::PathBuf, std::path::PathBuf)> = OnceLock::new();
+static PREDECODE_RX: OnceLock<tokio::sync::watch::Receiver<PredecodeResult>> = OnceLock::new();
 
 pub fn init_globals(
     core: CoreHandle<ViewerCore>,
@@ -52,11 +55,13 @@ pub fn init_globals(
     gpu_backend: String,
     socket_path: std::path::PathBuf,
     reg_path: std::path::PathBuf,
+    predecode_rx: tokio::sync::watch::Receiver<PredecodeResult>,
 ) {
     let _ = CORE_HANDLE.set(core);
     let _ = BG_RUNTIME.set(bg_rt);
     let _ = GPU_BACKEND.set(gpu_backend);
     let _ = CLEANUP_PATHS.set((socket_path, reg_path));
+    let _ = PREDECODE_RX.set(predecode_rx);
 }
 
 fn fast_exit() -> ! {
@@ -223,6 +228,17 @@ pub fn boot() -> (ViewerApp, Task<Message>) {
         translate: ViewerTranslateState::default(),
         cursor_pos: None,
     };
+
+    if let Some(rx) = PREDECODE_RX.get()
+        && let Some((path, Ok(frame))) = rx.borrow().clone()
+    {
+        app.image_sizes
+            .insert(path.clone(), (frame.width, frame.height));
+        app.frame_cache.insert(path.clone(), frame.clone());
+        if app.snapshot.meta.viewer_path.as_deref() == Some(path.as_str()) {
+            app.viewer_frame = Some(frame);
+        }
+    }
 
     let load_task = app.sync_viewer_media();
     let tree_task = app.report_ui_tree_task();
@@ -1083,7 +1099,7 @@ fn launch_sibling_bin(name: &str, args: &[String]) {
         .spawn();
 }
 
-fn decode_rgba(path: &str) -> Result<(u32, u32, Vec<u8>), String> {
+pub(crate) fn decode_rgba(path: &str) -> Result<(u32, u32, Vec<u8>), String> {
     let img = image::ImageReader::open(path)
         .map_err(|e| e.to_string())?
         .with_guessed_format()

@@ -109,12 +109,8 @@ fn main() {
         let _ = core.dispatch(Envelope::new("boot-open", ClientKind::Cli, cmd));
     }
 
-    let initial_viewer_canon = core
-        .snapshot()
-        .meta
-        .viewer_path
-        .as_deref()
-        .map(canonicalize_path_str);
+    let initial_viewer_path = core.snapshot().meta.viewer_path.clone();
+    let initial_viewer_canon = initial_viewer_path.as_deref().map(canonicalize_path_str);
     let hw_accel = core.config.hardware_acceleration;
     let initial_display_font = core.config.layout.display_font;
     let initial_font_scale = core.config.layout.font_scale();
@@ -160,6 +156,29 @@ fn main() {
     };
 
     let bg_rt = rt.handle().clone();
+    let (predecode_tx, mut predecode_rx) = tokio::sync::watch::channel::<
+        Option<(
+            String,
+            Result<photon_viewer_canvas::ViewerImageFrame, String>,
+        )>,
+    >(None);
+    if let Some(path) = initial_viewer_path {
+        bg_rt.spawn_blocking(move || {
+            let frame = app::decode_rgba(&path).map(|(w, h, rgba)| {
+                photon_viewer_canvas::ViewerImageFrame {
+                    key: path.clone(),
+                    revision: 1,
+                    width: w,
+                    height: h,
+                    rgba: std::sync::Arc::new(rgba),
+                }
+            });
+            let _ = predecode_tx.send(Some((path, frame)));
+        });
+        rt.block_on(async {
+            let _ = tokio::time::timeout(Duration::from_millis(150), predecode_rx.changed()).await;
+        });
+    }
     let _rt_keeper = std::thread::spawn(move || {
         rt.block_on(std::future::pending::<()>());
     });
@@ -180,7 +199,14 @@ fn main() {
         .runtime_dir
         .join("viewers")
         .join(format!("v-{pid}.json"));
-    app::init_globals(handle, bg_rt, gpu_backend, socket_path, reg_path);
+    app::init_globals(
+        handle,
+        bg_rt,
+        gpu_backend,
+        socket_path,
+        reg_path,
+        predecode_rx,
+    );
 
     if let Err(err) = iced::daemon(app::boot, app::update, app::view)
         .settings(iced::Settings {

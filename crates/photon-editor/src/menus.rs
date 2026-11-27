@@ -268,6 +268,30 @@ pub fn build_editor_layer_context_menu<'a>(
         ),
         MenuEntry::Item(
             MenuItem::new(
+                tr(lang, "action-layer-merge-selected"),
+                EditorMessage::ContextMenuDispatch(Command::EditorLayerMergeSelected {
+                    ids: state.editor_ui.selected_layer_ids.clone(),
+                }),
+            )
+            .enabled(state.editor_ui.selected_layer_ids.len() >= 2),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-layer-merge-visible"),
+                EditorMessage::ContextMenuDispatch(Command::EditorLayerMergeVisible),
+            )
+            .enabled(ed.layers.iter().filter(|l| l.visible).count() >= 2),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "action-layer-stamp-visible"),
+                EditorMessage::ContextMenuDispatch(Command::EditorLayerStampVisible),
+            )
+            .shortcut("Ctrl+Shift+Alt+E")
+            .enabled(ed.layers.iter().any(|l| l.visible)),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
                 tr(lang, "action-layer-flatten"),
                 EditorMessage::ContextMenuDispatch(Command::EditorLayerFlatten),
             )
@@ -383,6 +407,8 @@ pub fn build_editor_layer_context_menu<'a>(
                     name: None,
                     visible: Some(!layer.visible),
                     locked: None,
+                    clipped_to_below: None,
+                    lock_alpha: None,
                     opacity: None,
                     blend_mode: None,
                     offset_x: None,
@@ -410,6 +436,8 @@ pub fn build_editor_layer_context_menu<'a>(
                     name: None,
                     visible: None,
                     locked: Some(!layer.locked),
+                    clipped_to_below: None,
+                    lock_alpha: None,
                     opacity: None,
                     blend_mode: None,
                     offset_x: None,
@@ -421,6 +449,53 @@ pub fn build_editor_layer_context_menu<'a>(
             } else {
                 Icon::Lock
             }),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(
+                    lang,
+                    if layer.lock_alpha {
+                        "action-layer-unlock-alpha"
+                    } else {
+                        "action-layer-lock-alpha"
+                    },
+                ),
+                EditorMessage::ContextMenuDispatch(Command::EditorLayerSetProps {
+                    id: layer_id,
+                    name: None,
+                    visible: None,
+                    locked: None,
+                    clipped_to_below: None,
+                    lock_alpha: Some(!layer.lock_alpha),
+                    opacity: None,
+                    blend_mode: None,
+                    offset_x: None,
+                    offset_y: None,
+                }),
+            )
+            .icon(if layer.lock_alpha {
+                Icon::Unlock
+            } else {
+                Icon::Lock
+            })
+            .enabled(layer.kind.is_raster()),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(
+                    lang,
+                    if layer.clipped_to_below {
+                        "action-layer-release-clipping-mask"
+                    } else {
+                        "action-layer-create-clipping-mask"
+                    },
+                ),
+                EditorMessage::ContextMenuDispatch(Command::EditorLayerToggleClippingMask {
+                    id: Some(layer_id),
+                }),
+            )
+            .shortcut("Ctrl+Alt+G")
+            .icon(Icon::Layers),
         ),
         MenuEntry::Item(
             MenuItem::new(

@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use image::{Rgba, RgbaImage};
 use photon_protocol::{
-    BlendMode, CanvasAnchor, LayerEffect, LayerKind, LayerSummary, LayerTransformSpec,
-    TextLayerData, TransformEachSpec, UiText, VectorBlendSpec, VectorGeometry, VectorLayerData,
-    VectorPathNode, VectorPathOperation, VectorShape,
+    AlignOp, AlignTarget, BlendMode, CanvasAnchor, DistributeOp, LayerEffect, LayerKind,
+    LayerSummary, LayerTransformSpec, TextLayerData, TransformEachSpec, UiText, VectorBlendSpec,
+    VectorBooleanOp, VectorGeometry, VectorLayerData, VectorPathNode, VectorPathOperation,
+    VectorShape,
 };
 
 use crate::ImageError;
@@ -16,8 +17,8 @@ use crate::vector::{
     add_node_at_closest_point, add_node_on_segment, apply_blend_to_layer,
     apply_transform_each_to_layer, convert_shape_to_path, delete_node, geometry_to_bezier_path,
     join_shapes, move_node_anchor, move_node_handle, render_vector_layer, reverse_shape_path,
-    set_node_mode, set_path_closed, simplify_shape, smooth_shape, split_shape_at_node,
-    toggle_path_closed, transform_shape_once,
+    set_node_mode, set_path_closed, shape_bounds, simplify_shape, smooth_shape,
+    split_shape_at_node, toggle_path_closed, transform_shape_once,
 };
 
 /// One raster, vector, or text layer in a document stack.
@@ -53,6 +54,10 @@ pub struct Layer {
     pub vector_data: Option<VectorLayerData>,
     /// Non-destructive editable text specification when this is a [`LayerKind::Text`] layer.
     pub text_data: Option<TextLayerData>,
+    /// When `true`, this layer's alpha is clipped to the nearest non-clipped base layer below.
+    pub clipped_to_below: bool,
+    /// When `true`, painting/filling on this raster layer preserves existing transparent pixels.
+    pub lock_alpha: bool,
 }
 
 impl Layer {
@@ -77,6 +82,8 @@ impl Layer {
             effect: None,
             vector_data: None,
             text_data: None,
+            clipped_to_below: false,
+            lock_alpha: false,
         }
     }
 
@@ -191,6 +198,8 @@ impl Layer {
             editing_mask: self.editing_mask,
             mask_linked: self.mask_linked,
             effect: self.effect.clone(),
+            clipped_to_below: self.clipped_to_below,
+            lock_alpha: self.lock_alpha,
         }
     }
 }
@@ -246,9 +255,33 @@ pub enum LayerOperation {
         blend_mode: Option<BlendMode>,
         offset_x: Option<i32>,
         offset_y: Option<i32>,
+        clipped_to_below: Option<bool>,
+        lock_alpha: Option<bool>,
+    },
+    ToggleClippingMask {
+        id: u64,
+    },
+    MoveMultiple {
+        ids: Vec<u64>,
+        dx: f32,
+        dy: f32,
+    },
+    DeleteMultiple {
+        ids: Vec<u64>,
+    },
+    DuplicateMultiple {
+        ids: Vec<u64>,
     },
     MergeDown {
         id: u64,
+    },
+    MergeSelected {
+        ids: Vec<u64>,
+    },
+    MergeVisible,
+    StampVisible,
+    FromSelection {
+        cut: bool,
     },
     Flatten,
     SetCanvasBackground {
@@ -342,6 +375,29 @@ pub enum LayerOperation {
     RasterizeLayer {
         id: u64,
     },
+    AlignObjects {
+        op: AlignOp,
+        target: AlignTarget,
+        layer_ids: Vec<u64>,
+        shape_ids: Vec<u64>,
+        selection_bounds: Option<[f32; 4]>,
+    },
+    DistributeObjects {
+        op: DistributeOp,
+        layer_ids: Vec<u64>,
+        shape_ids: Vec<u64>,
+        fixed_gap_px: Option<f32>,
+    },
+    VectorBoolean {
+        layer_id: u64,
+        shape_ids: Vec<u64>,
+        op: VectorBooleanOp,
+    },
+    VectorKnife {
+        layer_id: u64,
+        line_start: [f32; 2],
+        line_end: [f32; 2],
+    },
 }
 
 impl LayerOperation {
@@ -400,8 +456,20 @@ impl LayerOperation {
             | Self::SetMaskEnabled { .. }
             | Self::SetEditingMask { .. }
             | Self::SetMaskLinked { .. } => UiText::new("op_layer_props"),
+            Self::ToggleClippingMask { .. } => UiText::new("op_layer_clipping_mask"),
+            Self::MoveMultiple { .. } => UiText::new("op_layer_move_multiple"),
+            Self::DeleteMultiple { .. } => UiText::new("op_layer_delete_multiple"),
+            Self::DuplicateMultiple { .. } => UiText::new("op_layer_duplicate_multiple"),
             Self::MergeDown { .. } => UiText::new("op_layer_merge_down"),
+            Self::MergeSelected { .. } => UiText::new("op_layer_merge_selected"),
+            Self::MergeVisible => UiText::new("op_layer_merge_visible"),
+            Self::StampVisible => UiText::new("op_layer_stamp_visible"),
+            Self::FromSelection { .. } => UiText::new("op_layer_from_selection"),
             Self::Flatten => UiText::new("op_layer_flatten"),
+            Self::AlignObjects { .. } => UiText::new("op_align_objects"),
+            Self::DistributeObjects { .. } => UiText::new("op_distribute_objects"),
+            Self::VectorBoolean { .. } => UiText::new("op_vector_boolean"),
+            Self::VectorKnife { .. } => UiText::new("op_vector_knife"),
             Self::SetCanvasBackground { .. } => UiText::new("op_canvas_bg"),
             Self::AddMask { .. } => UiText::new("op_mask_add"),
             Self::DeleteMask { .. } => UiText::new("op_mask_delete"),
@@ -612,12 +680,27 @@ impl LayerStack {
                 blend_mode,
                 offset_x,
                 offset_y,
+                clipped_to_below,
+                lock_alpha,
             } => {
                 let Some(idx) = self.index_of(*id) else {
                     return Err(ImageError::coded("layer_not_found"));
                 };
                 let layer = &mut self.layers[idx];
                 let mut changed = false;
+                if let Some(c) = *clipped_to_below
+                    && idx > 0
+                    && layer.clipped_to_below != c
+                {
+                    layer.clipped_to_below = c;
+                    changed = true;
+                }
+                if let Some(la) = *lock_alpha
+                    && layer.lock_alpha != la
+                {
+                    layer.lock_alpha = la;
+                    changed = true;
+                }
                 if let Some(l) = *locked
                     && layer.locked != l
                 {
@@ -721,6 +804,150 @@ impl LayerStack {
                 let kept_id = target.id;
                 self.layers.remove(idx);
                 self.active_layer_id = kept_id;
+                Ok(true)
+            }
+            LayerOperation::MergeSelected { ids } => {
+                let selected: Vec<usize> = self
+                    .layers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| ids.contains(&l.id))
+                    .map(|(i, _)| i)
+                    .collect();
+                if selected.len() < 2 {
+                    return Ok(false);
+                }
+                if selected.iter().any(|&i| self.layers[i].locked) {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                let (cw, ch) = (self.canvas_width, self.canvas_height);
+                let mut merged = RgbaImage::new(cw, ch);
+                for &i in &selected {
+                    blend_layer_onto(&mut merged, &self.layers[i]);
+                }
+                let base_idx = selected[0];
+                let name = self.layers[*selected.last().unwrap()].name.clone();
+                let new_id = self.next_id;
+                self.next_id += 1;
+                for &i in selected.iter().rev() {
+                    self.layers.remove(i);
+                }
+                self.layers
+                    .insert(base_idx, Layer::new(new_id, name, Arc::new(merged)));
+                self.active_layer_id = new_id;
+                Ok(true)
+            }
+            LayerOperation::MergeVisible => {
+                let visible_indices: Vec<usize> = self
+                    .layers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| l.visible)
+                    .map(|(i, _)| i)
+                    .collect();
+                if visible_indices.len() < 2 {
+                    return Ok(false);
+                }
+                if visible_indices.iter().any(|&i| self.layers[i].locked) {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                let (cw, ch) = (self.canvas_width, self.canvas_height);
+                let mut merged = RgbaImage::new(cw, ch);
+                for &i in &visible_indices {
+                    blend_layer_onto(&mut merged, &self.layers[i]);
+                }
+                let base_idx = visible_indices[0];
+                let new_id = self.next_id;
+                self.next_id += 1;
+                for &i in visible_indices.iter().rev() {
+                    self.layers.remove(i);
+                }
+                self.layers
+                    .insert(base_idx, Layer::new(new_id, "Merged", Arc::new(merged)));
+                self.active_layer_id = new_id;
+                Ok(true)
+            }
+            LayerOperation::StampVisible => {
+                let flat = composite_stack(self);
+                let new_id = self.next_id;
+                self.next_id += 1;
+                self.layers.push(Layer::new(new_id, "Stamped", flat));
+                self.active_layer_id = new_id;
+                Ok(true)
+            }
+            LayerOperation::FromSelection { cut } => {
+                if !self.selection.has_selection() {
+                    return Ok(false);
+                }
+                let idx = self.active_index();
+                if *cut && self.layers[idx].locked {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                if *cut && !self.layers[idx].is_raster() {
+                    let _ = self.rasterize_layer(self.layers[idx].id);
+                }
+                let (cw, ch) = (self.canvas_width, self.canvas_height);
+                let src_layer = &self.layers[idx];
+                let (lw, lh) = src_layer.dimensions();
+                let ox = src_layer.offset_x;
+                let oy = src_layer.offset_y;
+                let mut extracted = RgbaImage::new(cw, ch);
+                let src_raw = src_layer.pixels.as_raw();
+                let ext_raw = extracted.as_mut();
+                for y in 0..ch {
+                    let ly = y as i32 - oy;
+                    if ly < 0 || ly >= lh as i32 {
+                        continue;
+                    }
+                    for x in 0..cw {
+                        let lx = x as i32 - ox;
+                        if lx < 0 || lx >= lw as i32 {
+                            continue;
+                        }
+                        let sel_a = self.selection.alpha_at(x as i32, y as i32);
+                        if sel_a == 0 {
+                            continue;
+                        }
+                        let si = ((ly as u32 * lw + lx as u32) * 4) as usize;
+                        let di = ((y * cw + x) * 4) as usize;
+                        ext_raw[di] = src_raw[si];
+                        ext_raw[di + 1] = src_raw[si + 1];
+                        ext_raw[di + 2] = src_raw[si + 2];
+                        ext_raw[di + 3] =
+                            ((u16::from(src_raw[si + 3]) * u16::from(sel_a) + 127) / 255) as u8;
+                    }
+                }
+                if *cut {
+                    let mut cut_img = (*self.layers[idx].pixels).clone();
+                    let cut_raw = cut_img.as_mut();
+                    for y in 0..ch {
+                        let ly = y as i32 - oy;
+                        if ly < 0 || ly >= lh as i32 {
+                            continue;
+                        }
+                        for x in 0..cw {
+                            let lx = x as i32 - ox;
+                            if lx < 0 || lx >= lw as i32 {
+                                continue;
+                            }
+                            let sel_a = self.selection.alpha_at(x as i32, y as i32);
+                            if sel_a == 0 {
+                                continue;
+                            }
+                            let si = ((ly as u32 * lw + lx as u32) * 4) as usize;
+                            let keep = 255 - u16::from(sel_a);
+                            cut_raw[si + 3] =
+                                ((u16::from(cut_raw[si + 3]) * keep + 127) / 255) as u8;
+                        }
+                    }
+                    self.layers[idx].pixels = Arc::new(cut_img);
+                }
+                let new_id = self.next_id;
+                self.next_id += 1;
+                let new_name = format!("{} (Selection)", self.layers[idx].name);
+                self.layers
+                    .insert(idx + 1, Layer::new(new_id, new_name, Arc::new(extracted)));
+                self.active_layer_id = new_id;
                 Ok(true)
             }
             LayerOperation::Flatten => {
@@ -1387,8 +1614,452 @@ impl LayerStack {
                 Ok(true)
             }
             LayerOperation::RasterizeLayer { id } => self.rasterize_layer(*id),
+            LayerOperation::AlignObjects {
+                op,
+                target,
+                layer_ids,
+                shape_ids,
+                selection_bounds,
+            } => self.align_objects(*op, *target, layer_ids, shape_ids, *selection_bounds),
+            LayerOperation::DistributeObjects {
+                op,
+                layer_ids,
+                shape_ids,
+                fixed_gap_px,
+            } => self.distribute_objects(*op, layer_ids, shape_ids, *fixed_gap_px),
+            LayerOperation::VectorBoolean {
+                layer_id,
+                shape_ids,
+                op,
+            } => {
+                let Some(idx) = self.index_of(*layer_id) else {
+                    return Err(ImageError::coded("layer_not_found"));
+                };
+                if self.layers[idx].locked {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                let Some(vdata) = &mut self.layers[idx].vector_data else {
+                    return Err(ImageError::coded("not_a_vector_layer"));
+                };
+                let changed = crate::apply_vector_boolean_to_layer(vdata, shape_ids, *op);
+                if changed {
+                    let (cw, ch) = (self.canvas_width, self.canvas_height);
+                    self.layers[idx].refresh_cached_pixels(cw, ch);
+                }
+                Ok(changed)
+            }
+            LayerOperation::VectorKnife {
+                layer_id,
+                line_start,
+                line_end,
+            } => {
+                let Some(idx) = self.index_of(*layer_id) else {
+                    return Err(ImageError::coded("layer_not_found"));
+                };
+                if self.layers[idx].locked {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                let Some(vdata) = &mut self.layers[idx].vector_data else {
+                    return Err(ImageError::coded("not_a_vector_layer"));
+                };
+                let changed = crate::apply_knife_to_layer(vdata, *line_start, *line_end);
+                if changed {
+                    let (cw, ch) = (self.canvas_width, self.canvas_height);
+                    self.layers[idx].refresh_cached_pixels(cw, ch);
+                }
+                Ok(changed)
+            }
+            LayerOperation::ToggleClippingMask { id } => {
+                let Some(idx) = self.index_of(*id) else {
+                    return Err(ImageError::coded("layer_not_found"));
+                };
+                if idx == 0 {
+                    return Ok(false);
+                }
+                if self.layers[idx].locked {
+                    return Err(ImageError::coded("layer_locked"));
+                }
+                self.layers[idx].clipped_to_below = !self.layers[idx].clipped_to_below;
+                Ok(true)
+            }
+            LayerOperation::MoveMultiple { ids, dx, dy } => {
+                if dx.abs() <= 1e-4 && dy.abs() <= 1e-4 {
+                    return Ok(false);
+                }
+                let (cw, ch) = (self.canvas_width, self.canvas_height);
+                let mut changed = false;
+                for &id in ids {
+                    let Some(idx) = self.index_of(id) else {
+                        continue;
+                    };
+                    if self.layers[idx].locked {
+                        continue;
+                    }
+                    translate_layer_by(&mut self.layers[idx], *dx, *dy, cw, ch);
+                    changed = true;
+                }
+                Ok(changed)
+            }
+            LayerOperation::DeleteMultiple { ids } => {
+                let removable: Vec<usize> = self
+                    .layers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| ids.contains(&l.id) && !l.locked)
+                    .map(|(i, _)| i)
+                    .collect();
+                if removable.is_empty() || removable.len() >= self.layers.len() {
+                    return Ok(false);
+                }
+                for &i in removable.iter().rev() {
+                    self.layers.remove(i);
+                }
+                if self.index_of(self.active_layer_id).is_none()
+                    && let Some(last) = self.layers.last()
+                {
+                    self.active_layer_id = last.id;
+                }
+                Ok(true)
+            }
+            LayerOperation::DuplicateMultiple { ids } => {
+                let mut changed = false;
+                let mut i = 0;
+                while i < self.layers.len() {
+                    if ids.contains(&self.layers[i].id) {
+                        let new_id = self.next_id;
+                        self.next_id += 1;
+                        let mut dup = self.layers[i].clone();
+                        dup.id = new_id;
+                        dup.name = format!("{} copy", dup.name);
+                        self.layers.insert(i + 1, dup);
+                        self.active_layer_id = new_id;
+                        changed = true;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                Ok(changed)
+            }
         }
     }
+
+    fn align_objects(
+        &mut self,
+        op: AlignOp,
+        target: AlignTarget,
+        layer_ids: &[u64],
+        shape_ids: &[u64],
+        selection_bounds: Option<[f32; 4]>,
+    ) -> Result<bool, ImageError> {
+        let (cw, ch) = (self.canvas_width, self.canvas_height);
+        let canvas_bounds = [0.0, 0.0, cw as f32, ch as f32];
+
+        let single_target_id = match layer_ids {
+            [] => Some(self.active_layer_id),
+            [only] => Some(*only),
+            _ => None,
+        };
+        if let Some(tid) = single_target_id
+            && let Some(idx) = self.index_of(tid)
+            && self.layers[idx].is_vector()
+            && (!shape_ids.is_empty()
+                || self.layers[idx]
+                    .vector_data
+                    .as_ref()
+                    .is_some_and(|v| !v.selected_shape_ids.is_empty()))
+        {
+            if self.layers[idx].locked {
+                return Err(ImageError::coded("layer_locked"));
+            }
+            let Some(vdata) = &mut self.layers[idx].vector_data else {
+                return Ok(false);
+            };
+            let target_ids: Vec<u64> = if !shape_ids.is_empty() {
+                shape_ids.to_vec()
+            } else {
+                vdata.selected_shape_ids.clone()
+            };
+            let items: Vec<crate::AlignItem> = vdata
+                .shapes
+                .iter()
+                .filter(|s| target_ids.contains(&s.id))
+                .filter_map(|s| shape_bounds(s).map(|bounds| crate::AlignItem { id: s.id, bounds }))
+                .collect();
+            if items.is_empty() {
+                return Ok(false);
+            }
+            let ref_bounds = match target {
+                AlignTarget::Canvas => canvas_bounds,
+                AlignTarget::Selection => {
+                    if items.len() >= 2 {
+                        crate::union_bounds(&items).unwrap_or(canvas_bounds)
+                    } else {
+                        selection_bounds.unwrap_or(canvas_bounds)
+                    }
+                }
+            };
+            let deltas = crate::compute_align_deltas(&items, op, ref_bounds);
+            let mut changed = false;
+            for (sid, [dx, dy]) in deltas {
+                if (dx.abs() > 1e-4 || dy.abs() > 1e-4)
+                    && let Some(shape) = vdata.shapes.iter_mut().find(|s| s.id == sid)
+                {
+                    translate_vector_shape_by(shape, dx, dy);
+                    changed = true;
+                }
+            }
+            if changed {
+                self.layers[idx].refresh_cached_pixels(cw, ch);
+            }
+            return Ok(changed);
+        }
+
+        let target_layer_ids: Vec<u64> = if !layer_ids.is_empty() {
+            layer_ids.to_vec()
+        } else {
+            vec![self.active_layer_id]
+        };
+        let items: Vec<crate::AlignItem> = target_layer_ids
+            .iter()
+            .filter_map(|&lid| {
+                let idx = self.index_of(lid)?;
+                let layer = &self.layers[idx];
+                if layer.locked {
+                    return None;
+                }
+                layer_content_bounds(layer, cw, ch)
+                    .map(|bounds| crate::AlignItem { id: lid, bounds })
+            })
+            .collect();
+        if items.is_empty() {
+            return Ok(false);
+        }
+        let ref_bounds = match target {
+            AlignTarget::Canvas => canvas_bounds,
+            AlignTarget::Selection => {
+                if items.len() >= 2 {
+                    crate::union_bounds(&items).unwrap_or(canvas_bounds)
+                } else {
+                    selection_bounds.unwrap_or(canvas_bounds)
+                }
+            }
+        };
+        let deltas = crate::compute_align_deltas(&items, op, ref_bounds);
+        let mut changed = false;
+        for (lid, [dx, dy]) in deltas {
+            if (dx.abs() > 1e-4 || dy.abs() > 1e-4)
+                && let Some(idx) = self.index_of(lid)
+                && !self.layers[idx].locked
+            {
+                translate_layer_by(&mut self.layers[idx], dx, dy, cw, ch);
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+
+    fn distribute_objects(
+        &mut self,
+        op: DistributeOp,
+        layer_ids: &[u64],
+        shape_ids: &[u64],
+        fixed_gap_px: Option<f32>,
+    ) -> Result<bool, ImageError> {
+        let (cw, ch) = (self.canvas_width, self.canvas_height);
+        let single_target_id = match layer_ids {
+            [] => Some(self.active_layer_id),
+            [only] => Some(*only),
+            _ => None,
+        };
+        if let Some(tid) = single_target_id
+            && let Some(idx) = self.index_of(tid)
+            && self.layers[idx].is_vector()
+        {
+            if self.layers[idx].locked {
+                return Err(ImageError::coded("layer_locked"));
+            }
+            let Some(vdata) = &mut self.layers[idx].vector_data else {
+                return Ok(false);
+            };
+            let target_ids: Vec<u64> = if !shape_ids.is_empty() {
+                shape_ids.to_vec()
+            } else if !vdata.selected_shape_ids.is_empty() {
+                vdata.selected_shape_ids.clone()
+            } else {
+                vdata.shapes.iter().map(|s| s.id).collect()
+            };
+            let items: Vec<crate::AlignItem> = vdata
+                .shapes
+                .iter()
+                .filter(|s| target_ids.contains(&s.id))
+                .filter_map(|s| shape_bounds(s).map(|bounds| crate::AlignItem { id: s.id, bounds }))
+                .collect();
+            let deltas = crate::compute_distribute_deltas(&items, op, fixed_gap_px);
+            let mut changed = false;
+            for (sid, [dx, dy]) in deltas {
+                if (dx.abs() > 1e-4 || dy.abs() > 1e-4)
+                    && let Some(shape) = vdata.shapes.iter_mut().find(|s| s.id == sid)
+                {
+                    translate_vector_shape_by(shape, dx, dy);
+                    changed = true;
+                }
+            }
+            if changed {
+                self.layers[idx].refresh_cached_pixels(cw, ch);
+            }
+            return Ok(changed);
+        }
+
+        let target_layer_ids: Vec<u64> = if !layer_ids.is_empty() {
+            layer_ids.to_vec()
+        } else {
+            self.layers
+                .iter()
+                .filter(|l| !l.locked && l.visible)
+                .map(|l| l.id)
+                .collect()
+        };
+        let items: Vec<crate::AlignItem> = target_layer_ids
+            .iter()
+            .filter_map(|&lid| {
+                let idx = self.index_of(lid)?;
+                let layer = &self.layers[idx];
+                if layer.locked {
+                    return None;
+                }
+                layer_content_bounds(layer, cw, ch)
+                    .map(|bounds| crate::AlignItem { id: lid, bounds })
+            })
+            .collect();
+        let deltas = crate::compute_distribute_deltas(&items, op, fixed_gap_px);
+        let mut changed = false;
+        for (lid, [dx, dy]) in deltas {
+            if (dx.abs() > 1e-4 || dy.abs() > 1e-4)
+                && let Some(idx) = self.index_of(lid)
+                && !self.layers[idx].locked
+            {
+                translate_layer_by(&mut self.layers[idx], dx, dy, cw, ch);
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+}
+
+fn translate_vector_shape_by(shape: &mut VectorShape, dx: f32, dy: f32) {
+    match &mut shape.geometry {
+        VectorGeometry::Rect { x, y, .. } => {
+            *x += dx;
+            *y += dy;
+        }
+        VectorGeometry::Ellipse { cx, cy, .. } => {
+            *cx += dx;
+            *cy += dy;
+        }
+        VectorGeometry::Polygon { points, .. } => {
+            for p in points {
+                p[0] += dx;
+                p[1] += dy;
+            }
+        }
+        VectorGeometry::Path { nodes, .. } => {
+            for n in nodes {
+                n.anchor[0] += dx;
+                n.anchor[1] += dy;
+                if let Some(hi) = &mut n.handle_in {
+                    hi[0] += dx;
+                    hi[1] += dy;
+                }
+                if let Some(ho) = &mut n.handle_out {
+                    ho[0] += dx;
+                    ho[1] += dy;
+                }
+            }
+        }
+    }
+}
+
+fn layer_content_bounds(layer: &Layer, cw: u32, ch: u32) -> Option<[f32; 4]> {
+    if let Some(vdata) = &layer.vector_data {
+        let items: Vec<crate::AlignItem> = vdata
+            .shapes
+            .iter()
+            .filter_map(|s| shape_bounds(s).map(|bounds| crate::AlignItem { id: s.id, bounds }))
+            .collect();
+        return crate::union_bounds(&items);
+    }
+    if let Some(tdata) = &layer.text_data {
+        return Some(crate::measure_text_bounds(tdata));
+    }
+    let img = &layer.pixels;
+    let (w, h) = img.dimensions();
+    let raw = img.as_raw();
+    let mut min_x = w;
+    let mut min_y = h;
+    let mut max_x = 0_u32;
+    let mut max_y = 0_u32;
+    for y in 0..h {
+        for x in 0..w {
+            if raw[((y * w + x) * 4 + 3) as usize] > 0 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if min_x <= max_x && min_y <= max_y {
+        Some([
+            min_x as f32,
+            min_y as f32,
+            (max_x + 1) as f32,
+            (max_y + 1) as f32,
+        ])
+    } else {
+        Some([0.0, 0.0, cw as f32, ch as f32])
+    }
+}
+
+fn translate_layer_by(layer: &mut Layer, dx: f32, dy: f32, cw: u32, ch: u32) {
+    if let Some(vdata) = &mut layer.vector_data {
+        for s in &mut vdata.shapes {
+            translate_vector_shape_by(s, dx, dy);
+        }
+        layer.refresh_cached_pixels(cw, ch);
+        return;
+    }
+    if let Some(tdata) = &mut layer.text_data {
+        tdata.x += dx;
+        tdata.y += dy;
+        layer.refresh_cached_pixels(cw, ch);
+        return;
+    }
+    let ix = dx.round() as i32;
+    let iy = dy.round() as i32;
+    if ix == 0 && iy == 0 {
+        return;
+    }
+    let (w, h) = layer.pixels.dimensions();
+    let mut dst = RgbaImage::new(w, h);
+    let src_raw = layer.pixels.as_raw();
+    let dst_raw = dst.as_mut();
+    for y in 0..h as i32 {
+        let ny = y + iy;
+        if ny < 0 || ny >= h as i32 {
+            continue;
+        }
+        for x in 0..w as i32 {
+            let nx = x + ix;
+            if nx < 0 || nx >= w as i32 {
+                continue;
+            }
+            let si = ((y as u32 * w + x as u32) * 4) as usize;
+            let di = ((ny as u32 * w + nx as u32) * 4) as usize;
+            dst_raw[di..di + 4].copy_from_slice(&src_raw[si..si + 4]);
+        }
+    }
+    layer.pixels = Arc::new(dst);
 }
 
 fn anchor_pivot_uv(anchor: CanvasAnchor) -> (f32, f32) {
@@ -1484,42 +2155,80 @@ pub fn composite_stack(stack: &LayerStack) -> Arc<RgbaImage> {
             return Arc::clone(&l.pixels);
         }
     }
-    let base_px = match stack.background {
-        Some([r, g, b]) => Rgba([r, g, b, 255]),
-        None => Rgba([0, 0, 0, 0]),
-    };
-    let mut canvas = RgbaImage::from_pixel(
-        stack.canvas_width.max(1),
-        stack.canvas_height.max(1),
-        base_px,
-    );
-    for layer in &stack.layers {
-        if !layer.visible || layer.opacity <= 1e-4 {
-            continue;
-        }
-        blend_layer_onto(&mut canvas, layer);
-    }
-    Arc::new(canvas)
+    composite_stack_inner(stack, None)
 }
 
 /// Composite all visible layers in `stack` except `exclude_layer_id` (used for live GPU Transform preview).
 pub fn composite_stack_excluding(stack: &LayerStack, exclude_layer_id: u64) -> Arc<RgbaImage> {
+    composite_stack_inner(stack, Some(exclude_layer_id))
+}
+
+fn composite_stack_inner(stack: &LayerStack, exclude_layer_id: Option<u64>) -> Arc<RgbaImage> {
+    let cw = stack.canvas_width.max(1);
+    let ch = stack.canvas_height.max(1);
     let base_px = match stack.background {
         Some([r, g, b]) => Rgba([r, g, b, 255]),
         None => Rgba([0, 0, 0, 0]),
     };
-    let mut canvas = RgbaImage::from_pixel(
-        stack.canvas_width.max(1),
-        stack.canvas_height.max(1),
-        base_px,
-    );
-    for layer in &stack.layers {
-        if layer.id == exclude_layer_id || !layer.visible || layer.opacity <= 1e-4 {
+    let mut canvas = RgbaImage::from_pixel(cw, ch, base_px);
+    let mut clip_base_idx: Option<usize> = None;
+
+    for (idx, layer) in stack.layers.iter().enumerate() {
+        if Some(layer.id) == exclude_layer_id {
+            if !layer.clipped_to_below {
+                clip_base_idx = None;
+            }
             continue;
         }
-        blend_layer_onto(&mut canvas, layer);
+        if !layer.clipped_to_below {
+            clip_base_idx = if layer.visible && layer.opacity > 1e-4 {
+                Some(idx)
+            } else {
+                None
+            };
+        }
+        if !layer.visible || layer.opacity <= 1e-4 {
+            continue;
+        }
+        if layer.clipped_to_below {
+            let Some(base_i) = clip_base_idx else {
+                continue;
+            };
+            blend_layer_clipped_onto(&mut canvas, layer, &stack.layers[base_i]);
+        } else {
+            blend_layer_onto(&mut canvas, layer);
+        }
     }
     Arc::new(canvas)
+}
+
+fn blend_layer_clipped_onto(canvas: &mut RgbaImage, layer: &Layer, base: &Layer) {
+    let (cw, ch) = canvas.dimensions();
+    let mut tmp = RgbaImage::new(cw, ch);
+    blend_layer_onto(&mut tmp, layer);
+    let (bw, bh) = base.dimensions();
+    let base_raw = base.pixels.as_raw();
+    let tmp_raw = tmp.as_mut();
+    for y in 0..ch {
+        let by = y as i32 - base.offset_y;
+        for x in 0..cw {
+            let bx = x as i32 - base.offset_x;
+            let ba = if bx >= 0 && by >= 0 && bx < bw as i32 && by < bh as i32 {
+                base_raw[((by as u32 * bw + bx as u32) * 4 + 3) as usize]
+            } else {
+                0
+            };
+            let ti = ((y * cw + x) * 4) as usize;
+            if ba == 0 {
+                tmp_raw[ti + 3] = 0;
+            } else if ba < 255 {
+                tmp_raw[ti + 3] = ((u16::from(tmp_raw[ti + 3]) * u16::from(ba) + 127) / 255) as u8;
+            }
+        }
+    }
+    let mut wrapper = Layer::new(layer.id, &layer.name, Arc::new(tmp));
+    wrapper.blend_mode = layer.blend_mode;
+    blend_layer_onto(canvas, &wrapper);
 }
 
 fn composite_pair(canvas_w: u32, canvas_h: u32, bottom: &Layer, top: &Layer) -> RgbaImage {
@@ -1938,5 +2647,110 @@ mod tests {
                 .expect("vector data")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn clipping_mask_clips_top_layer_to_base_alpha() {
+        let mut base = RgbaImage::from_pixel(4, 4, Rgba([0, 0, 0, 0]));
+        base.put_pixel(1, 1, Rgba([0, 0, 255, 255]));
+        let mut stack = LayerStack::from_single(Arc::new(base));
+        let top = RgbaImage::from_pixel(4, 4, Rgba([255, 0, 0, 255]));
+        stack
+            .apply_op(&LayerOperation::AddImage {
+                name: "Top".into(),
+                offset_x: 0,
+                offset_y: 0,
+                pixels: Arc::new(top),
+            })
+            .unwrap();
+        let top_id = stack.active_layer_id;
+        assert!(
+            stack
+                .apply_op(&LayerOperation::ToggleClippingMask { id: top_id })
+                .unwrap()
+        );
+        let out = composite_stack(&stack);
+        // Inside base opaque pixel: red top layer shows over blue base
+        assert_eq!(out.get_pixel(1, 1).0, [255, 0, 0, 255]);
+        // Outside base opaque pixel: clipped out -> transparent
+        assert_eq!(out.get_pixel(0, 0).0, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn move_delete_duplicate_multiple_layers() {
+        let base = RgbaImage::from_pixel(8, 8, Rgba([10, 10, 10, 255]));
+        let mut stack = LayerStack::from_single(Arc::new(base));
+        let mut img_a = RgbaImage::new(8, 8);
+        img_a.put_pixel(1, 3, Rgba([255, 0, 0, 255]));
+        stack
+            .apply_op(&LayerOperation::AddImage {
+                name: "A".into(),
+                offset_x: 0,
+                offset_y: 0,
+                pixels: Arc::new(img_a),
+            })
+            .unwrap();
+        let a_id = stack.active_layer_id;
+        let mut img_b = RgbaImage::new(8, 8);
+        img_b.put_pixel(1, 3, Rgba([0, 255, 0, 255]));
+        stack
+            .apply_op(&LayerOperation::AddImage {
+                name: "B".into(),
+                offset_x: 0,
+                offset_y: 0,
+                pixels: Arc::new(img_b),
+            })
+            .unwrap();
+        let b_id = stack.active_layer_id;
+
+        assert!(
+            stack
+                .apply_op(&LayerOperation::MoveMultiple {
+                    ids: vec![a_id, b_id],
+                    dx: 3.0,
+                    dy: -2.0,
+                })
+                .unwrap()
+        );
+        assert_eq!(
+            stack
+                .layers
+                .iter()
+                .find(|l| l.id == a_id)
+                .unwrap()
+                .pixels
+                .get_pixel(4, 1)
+                .0,
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            stack
+                .layers
+                .iter()
+                .find(|l| l.id == b_id)
+                .unwrap()
+                .pixels
+                .get_pixel(4, 1)
+                .0,
+            [0, 255, 0, 255]
+        );
+
+        assert!(
+            stack
+                .apply_op(&LayerOperation::DuplicateMultiple {
+                    ids: vec![a_id, b_id],
+                })
+                .unwrap()
+        );
+        assert_eq!(stack.layers.len(), 5);
+
+        assert!(
+            stack
+                .apply_op(&LayerOperation::DeleteMultiple {
+                    ids: vec![a_id, b_id],
+                })
+                .unwrap()
+        );
+        assert_eq!(stack.layers.len(), 3);
     }
 }

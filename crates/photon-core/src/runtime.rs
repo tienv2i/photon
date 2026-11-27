@@ -683,6 +683,8 @@ mod tests {
             name: None,
             visible: None,
             locked: None,
+            clipped_to_below: None,
+            lock_alpha: None,
             opacity: Some(0.5),
             blend_mode: None,
             offset_x: None,

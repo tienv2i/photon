@@ -1679,6 +1679,7 @@ mod tests {
                 editor_tabs: Vec::new(),
                 active_editor_tab_id: None,
                 focus_request_seq: 0,
+                pending_recovery_count: 0,
                 status: UiText::new("ready"),
                 safe_mode: true,
                 active_tasks: Vec::new(),

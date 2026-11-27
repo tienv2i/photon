@@ -86,6 +86,8 @@ pub(crate) fn build_layers_panel<'a>(
                 name: None,
                 visible: None,
                 locked: None,
+                clipped_to_below: None,
+                lock_alpha: None,
                 opacity: None,
                 blend_mode: Some(choice.mode),
                 offset_x: None,
@@ -153,6 +155,8 @@ pub(crate) fn build_layers_panel<'a>(
                     name: None,
                     visible: None,
                     locked: None,
+                    clipped_to_below: None,
+                    lock_alpha: None,
                     opacity: Some(v),
                     blend_mode: None,
                     offset_x: None,
@@ -161,7 +165,53 @@ pub(crate) fn build_layers_panel<'a>(
             },
         );
 
-        props_col = props_col.push(blend_row).push(opacity_row);
+        let toggles_row = row![
+            button::labeled_tipped(
+                tr(lang, "action-layer-lock-alpha"),
+                Some(if layer.lock_alpha {
+                    Icon::Lock
+                } else {
+                    Icon::Unlock
+                }),
+                if layer.lock_alpha {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Secondary
+                },
+                Some(EditorMessage::Dispatch(Command::EditorLayerSetProps {
+                    id: layer_id,
+                    name: None,
+                    visible: None,
+                    locked: None,
+                    clipped_to_below: None,
+                    lock_alpha: Some(!layer.lock_alpha),
+                    opacity: None,
+                    blend_mode: None,
+                    offset_x: None,
+                    offset_y: None,
+                })),
+                tr(lang, "tooltip-layer-lock-alpha"),
+            ),
+            button::labeled_tipped(
+                tr(lang, "action-layer-clipping-mask-short"),
+                Some(Icon::Layers),
+                if layer.clipped_to_below {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Secondary
+                },
+                Some(EditorMessage::Dispatch(
+                    Command::EditorLayerToggleClippingMask { id: Some(layer_id) },
+                )),
+                tr(lang, "tooltip-layer-clipping-mask"),
+            ),
+        ]
+        .spacing(6);
+
+        props_col = props_col
+            .push(blend_row)
+            .push(opacity_row)
+            .push(toggles_row);
 
         if let Some(effect) = &layer.effect {
             let effect_ctrl: Option<Element<'_, EditorMessage>> = match effect {
@@ -394,6 +444,7 @@ pub(crate) fn build_layers_panel<'a>(
     let mut list_col = column![].spacing(4).width(Fill);
     for layer in ed.layers.iter().rev() {
         let is_active = layer.id == ed.active_layer_id;
+        let is_selected = is_active || ui.selected_layer_ids.contains(&layer.id);
         let is_renaming = ui.renaming_layer_id == Some(layer.id);
         let subtitle = if let Some(eff) = &layer.effect {
             let kind = tr(
@@ -421,16 +472,18 @@ pub(crate) fn build_layers_panel<'a>(
                 editing: false,
             })
         } else {
-            EditorMessage::Dispatch(Command::EditorLayerSelect { id: layer.id })
+            EditorMessage::EditorLayerRowClicked(layer.id)
         };
 
         let row_el = layer_row(LayerRowSpec {
             name: layer.name.clone(),
             subtitle,
             kind_badge: layer.kind.badge(),
-            active: is_active,
+            active: is_selected,
             visible: layer.visible,
             locked: layer.locked,
+            clipped_to_below: layer.clipped_to_below,
+            lock_alpha: layer.lock_alpha,
             has_mask: layer.has_mask,
             mask_enabled: layer.mask_enabled,
             mask_linked: layer.mask_linked,
@@ -444,6 +497,8 @@ pub(crate) fn build_layers_panel<'a>(
                 name: None,
                 visible: Some(!layer.visible),
                 locked: None,
+                clipped_to_below: None,
+                lock_alpha: None,
                 opacity: None,
                 blend_mode: None,
                 offset_x: None,
@@ -454,6 +509,8 @@ pub(crate) fn build_layers_panel<'a>(
                 name: None,
                 visible: None,
                 locked: Some(!layer.locked),
+                clipped_to_below: None,
+                lock_alpha: None,
                 opacity: None,
                 blend_mode: None,
                 offset_x: None,
@@ -525,7 +582,24 @@ pub(crate) fn build_layers_panel<'a>(
                 .align_y(Alignment::Center),
             );
         } else {
-            list_col = list_col.push(row_el);
+            let drag_handle = iced::widget::mouse_area(
+                container(text("⋮⋮").size(11).style(|theme| {
+                    let t = PaletteTokens::for_theme(theme);
+                    text::Style {
+                        color: Some(t.text_muted),
+                    }
+                }))
+                .padding([4, 2]),
+            )
+            .on_press(EditorMessage::EditorBeginDragLayer(layer.id))
+            .interaction(iced::mouse::Interaction::Grab);
+            let drop_row = iced::widget::mouse_area(
+                row![drag_handle, container(row_el).width(Fill)]
+                    .spacing(2)
+                    .align_y(Alignment::Center),
+            )
+            .on_release(EditorMessage::EditorDropLayer(layer.id));
+            list_col = list_col.push(drop_row);
         }
     }
 
@@ -606,8 +680,16 @@ pub(crate) fn build_layers_panel<'a>(
         .tooltip(tr(lang, "tooltip-layer-add")),
         LayerActionButton::new(
             Icon::Duplicate,
-            active_layer
-                .map(|l| EditorMessage::Dispatch(Command::EditorLayerDuplicate { id: l.id })),
+            if state.editor_ui.selected_layer_ids.len() >= 2 {
+                Some(EditorMessage::Dispatch(
+                    Command::EditorLayerDuplicateMultiple {
+                        ids: state.editor_ui.selected_layer_ids.clone(),
+                    },
+                ))
+            } else {
+                active_layer
+                    .map(|l| EditorMessage::Dispatch(Command::EditorLayerDuplicate { id: l.id }))
+            },
         )
         .tooltip(tr(lang, "tooltip-layer-duplicate")),
         LayerActionButton::new(
@@ -644,9 +726,17 @@ pub(crate) fn build_layers_panel<'a>(
         .tooltip(tr(lang, "tooltip-layer-flatten")),
         LayerActionButton::new(
             Icon::Trash,
-            active_layer
-                .filter(|_| can_delete)
-                .map(|l| EditorMessage::Dispatch(Command::EditorLayerDelete { id: l.id })),
+            if state.editor_ui.selected_layer_ids.len() >= 2 {
+                (state.editor_ui.selected_layer_ids.len() < ed.layers.len()).then(|| {
+                    EditorMessage::Dispatch(Command::EditorLayerDeleteMultiple {
+                        ids: state.editor_ui.selected_layer_ids.clone(),
+                    })
+                })
+            } else {
+                active_layer
+                    .filter(|_| can_delete)
+                    .map(|l| EditorMessage::Dispatch(Command::EditorLayerDelete { id: l.id }))
+            },
         )
         .tooltip(tr(lang, "tooltip-layer-delete")),
     ]);

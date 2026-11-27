@@ -3596,6 +3596,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "photon-app-editor"
+version = "0.0.2-beta"
+dependencies = [
+ "photon-desktop",
+]
+
+[[package]]
+name = "photon-app-manager"
+version = "0.0.2-beta"
+dependencies = [
+ "photon-desktop",
+]
+
+[[package]]
+name = "photon-app-viewer"
+version = "0.0.2-beta"
+dependencies = [
+ "photon-desktop",
+]
+
+[[package]]
 name = "photon-browser"
 version = "0.0.2-beta"
 dependencies = [

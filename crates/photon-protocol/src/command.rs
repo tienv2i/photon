@@ -487,9 +487,36 @@ pub enum Command {
         offset_x: Option<i32>,
         #[serde(default)]
         offset_y: Option<i32>,
+        #[serde(default)]
+        clipped_to_below: Option<bool>,
+        #[serde(default)]
+        lock_alpha: Option<bool>,
+    },
+    EditorLayerToggleClippingMask {
+        #[serde(default)]
+        id: Option<u64>,
+    },
+    EditorLayerMoveMultiple {
+        ids: Vec<u64>,
+        dx: f32,
+        dy: f32,
+    },
+    EditorLayerDeleteMultiple {
+        ids: Vec<u64>,
+    },
+    EditorLayerDuplicateMultiple {
+        ids: Vec<u64>,
     },
     EditorLayerMergeDown {
         id: u64,
+    },
+    EditorLayerMergeSelected {
+        ids: Vec<u64>,
+    },
+    EditorLayerMergeVisible,
+    EditorLayerStampVisible,
+    EditorLayerFromSelection {
+        cut: bool,
     },
     EditorLayerFlatten,
     EditorSetCanvasBackground {
@@ -565,6 +592,24 @@ pub enum Command {
     EditorSelectionClearPixels,
     EditorSelectionDuplicateLayer,
     EditorCropToSelection,
+    EditorSaveSelection {
+        #[serde(default)]
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_id: Option<u64>,
+        #[serde(default)]
+        op: SelectionBooleanOp,
+    },
+    EditorLoadSelection {
+        id: u64,
+        #[serde(default)]
+        op: SelectionBooleanOp,
+        #[serde(default)]
+        invert: bool,
+    },
+    EditorDeleteSavedSelection {
+        id: u64,
+    },
     EditorAddVectorLayer {
         #[serde(default)]
         name: String,
@@ -613,6 +658,45 @@ pub enum Command {
         #[serde(default)]
         shape_ids: Vec<u64>,
         spec: crate::TransformEachSpec,
+    },
+    EditorAlignObjects {
+        op: crate::AlignOp,
+        #[serde(default)]
+        target: crate::AlignTarget,
+        #[serde(default)]
+        layer_ids: Vec<u64>,
+        #[serde(default)]
+        shape_ids: Vec<u64>,
+    },
+    EditorDistributeObjects {
+        op: crate::DistributeOp,
+        #[serde(default)]
+        layer_ids: Vec<u64>,
+        #[serde(default)]
+        shape_ids: Vec<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fixed_gap_px: Option<f32>,
+    },
+    EditorVectorBoolean {
+        op: crate::VectorBooleanOp,
+        #[serde(default)]
+        layer_id: Option<u64>,
+        #[serde(default)]
+        shape_ids: Vec<u64>,
+    },
+    EditorVectorKnife {
+        #[serde(default)]
+        layer_id: Option<u64>,
+        line_start: [f32; 2],
+        line_end: [f32; 2],
+    },
+    EditorSliceExport {
+        mode: crate::SliceMode,
+        output_dir: String,
+        #[serde(default)]
+        prefix: String,
+        #[serde(default)]
+        format: String,
     },
     EditorVectorBlend {
         #[serde(default)]
@@ -864,6 +948,10 @@ pub enum Command {
         tab_id: u64,
         new_index: usize,
     },
+    EditorRecoverySync,
+    EditorRecoveryRestore,
+    EditorRecoveryDiscard,
+    EditorRecoveryCleanup,
     FocusWindow,
     SaveUiState {
         #[serde(default)]
@@ -951,7 +1039,15 @@ impl Command {
             Self::EditorLayerSelect { .. } => "editor_layer_select",
             Self::EditorLayerReorder { .. } => "editor_layer_reorder",
             Self::EditorLayerSetProps { .. } => "editor_layer_set_props",
+            Self::EditorLayerToggleClippingMask { .. } => "editor_layer_toggle_clipping_mask",
+            Self::EditorLayerMoveMultiple { .. } => "editor_layer_move_multiple",
+            Self::EditorLayerDeleteMultiple { .. } => "editor_layer_delete_multiple",
+            Self::EditorLayerDuplicateMultiple { .. } => "editor_layer_duplicate_multiple",
             Self::EditorLayerMergeDown { .. } => "editor_layer_merge_down",
+            Self::EditorLayerMergeSelected { .. } => "editor_layer_merge_selected",
+            Self::EditorLayerMergeVisible => "editor_layer_merge_visible",
+            Self::EditorLayerStampVisible => "editor_layer_stamp_visible",
+            Self::EditorLayerFromSelection { .. } => "editor_layer_from_selection",
             Self::EditorLayerFlatten => "editor_layer_flatten",
             Self::EditorSetCanvasBackground { .. } => "editor_set_canvas_background",
             Self::EditorHistoryJump { .. } => "editor_history_jump",
@@ -976,6 +1072,9 @@ impl Command {
             Self::EditorSelectionClearPixels => "editor_selection_clear_pixels",
             Self::EditorSelectionDuplicateLayer => "editor_selection_duplicate_layer",
             Self::EditorCropToSelection => "editor_crop_to_selection",
+            Self::EditorSaveSelection { .. } => "editor_save_selection",
+            Self::EditorLoadSelection { .. } => "editor_load_selection",
+            Self::EditorDeleteSavedSelection { .. } => "editor_delete_saved_selection",
             Self::EditorAddVectorLayer { .. } => "editor_add_vector_layer",
             Self::EditorAddVectorShape { .. } => "editor_add_vector_shape",
             Self::EditorUpdateVectorShape { .. } => "editor_update_vector_shape",
@@ -984,6 +1083,11 @@ impl Command {
             Self::EditorConvertShapeToPath { .. } => "editor_convert_shape_to_path",
             Self::EditorVectorPathOp { .. } => "editor_vector_path_op",
             Self::EditorTransformEach { .. } => "editor_transform_each",
+            Self::EditorAlignObjects { .. } => "editor_align_objects",
+            Self::EditorDistributeObjects { .. } => "editor_distribute_objects",
+            Self::EditorVectorBoolean { .. } => "editor_vector_boolean",
+            Self::EditorVectorKnife { .. } => "editor_vector_knife",
+            Self::EditorSliceExport { .. } => "editor_slice_export",
             Self::EditorVectorBlend { .. } => "editor_vector_blend",
             Self::EditorExportVectorSvg { .. } => "editor_export_vector_svg",
             Self::EditorAddTextLayer { .. } => "editor_add_text_layer",
@@ -1037,6 +1141,10 @@ impl Command {
             Self::EditorDuplicateDocument { .. } => "editor_duplicate_document",
             Self::EditorNewFromClipboard { .. } => "editor_new_from_clipboard",
             Self::EditorReorderTab { .. } => "editor_reorder_tab",
+            Self::EditorRecoverySync => "editor_recovery_sync",
+            Self::EditorRecoveryRestore => "editor_recovery_restore",
+            Self::EditorRecoveryDiscard => "editor_recovery_discard",
+            Self::EditorRecoveryCleanup => "editor_recovery_cleanup",
             Self::FocusWindow => "focus_window",
             Self::SaveUiState { .. } => "save_ui_state",
             Self::CancelTask { .. } => "cancel_task",

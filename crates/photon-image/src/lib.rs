@@ -1,6 +1,7 @@
 //! Qt-independent image decoding, header probing, multi-layer compositing,
 //! parallel pixel operations, liquify warps, and non-destructive editor document pipeline.
 
+pub mod align;
 pub mod archive;
 pub mod codec;
 pub mod document;
@@ -14,10 +15,12 @@ pub mod pixels;
 pub mod selection;
 pub mod text;
 pub mod vector;
+pub mod vector_boolean;
 
 use photon_protocol::UiText;
 use thiserror::Error;
 
+pub use align::{AlignItem, compute_align_deltas, compute_distribute_deltas, union_bounds};
 pub use codec::{decode_rgba, generate_thumbnail, probe_dimensions};
 pub use document::{EditOp, EditorDocument, render_single_op, validate_dimensions};
 pub use drawing::{
@@ -43,6 +46,9 @@ pub use vector::{
     reverse_shape_path, set_node_mode, set_path_closed, shape_bounds, simplify_path_nodes,
     simplify_shape, smooth_path_nodes, smooth_shape, split_path_at_node, split_shape_at_node,
     toggle_path_closed, transform_each_shapes, transform_shape_once, vector_layer_to_svg,
+};
+pub use vector_boolean::{
+    apply_knife_to_layer, apply_vector_boolean_to_layer, boolean_polygons, knife_split_polyline,
 };
 
 pub const MAX_IMAGE_DIMENSION: u32 = 32_768;

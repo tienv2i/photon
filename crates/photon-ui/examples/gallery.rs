@@ -157,6 +157,8 @@ fn view(state: &Gallery) -> Element<'_, Msg> {
             active: true,
             visible: true,
             locked: false,
+            clipped_to_below: false,
+            lock_alpha: false,
             has_mask: true,
             mask_enabled: true,
             mask_linked: true,

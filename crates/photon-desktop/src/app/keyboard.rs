@@ -103,6 +103,7 @@ pub(super) fn handle_key_event(state: &mut PhotonGui, ev: iced::keyboard::Event)
             state.dialog_manager.close(&dialog_id_for_in_app(&d));
             return Task::none();
         }
+
         if state.settings_open {
             state.settings_open = false;
             state.settings_confirm_factory_reset = false;
@@ -153,15 +154,6 @@ pub(super) fn handle_key_event(state: &mut PhotonGui, ev: iced::keyboard::Event)
         }
         match state.snapshot.meta.workspace {
             Workspace::Editor => {
-                if state
-                    .snapshot
-                    .meta
-                    .editor
-                    .as_ref()
-                    .is_some_and(|ed| ed.selection.has_selection)
-                {
-                    return dispatch_to_core(state.core.clone(), Command::EditorDeselect);
-                }
                 if state.editor_ui.tool != EditorTool::Pointer {
                     return update(state, Message::EditorSelectTool(EditorTool::Pointer));
                 }
@@ -189,6 +181,47 @@ pub(super) fn handle_key_event(state: &mut PhotonGui, ev: iced::keyboard::Event)
         return update(state, Message::ToggleFullscreen);
     }
 
+    if matches!(key, Key::Named(Named::Enter)) {
+        if state.snapshot.meta.workspace == Workspace::Editor
+            && state.editor_ui.adjust_popup_tab.is_some()
+        {
+            return update(state, Message::EditorCloseAdjustPopup { apply: true });
+        }
+        if let Some(d) = &state.dialog {
+            let msg = match d {
+                InAppDialog::Resize { .. } => Some(Message::ConfirmResize),
+                InAppDialog::CanvasSize { .. } => Some(Message::ConfirmCanvasSize),
+                InAppDialog::NewDocument { .. } => Some(Message::ConfirmNewDocument),
+                InAppDialog::Export { .. } => Some(Message::ConfirmExport),
+                InAppDialog::SelectionModify { .. } => Some(Message::ConfirmSelectionModify),
+                InAppDialog::AdjustDenoise { .. } => Some(Message::ConfirmDenoiseDialog),
+                InAppDialog::SliceImage { .. } => Some(Message::ConfirmSliceImage),
+                InAppDialog::ColorPicker { .. } => Some(Message::ConfirmColorPicker),
+                InAppDialog::NewFolder { .. } => Some(Message::ConfirmNewFolder),
+                InAppDialog::RenameItem { .. } => Some(Message::BrowserConfirmRename),
+                InAppDialog::TransformEach { .. } => {
+                    Some(Message::Editor(EditorMessage::ConfirmTransformEach))
+                }
+                InAppDialog::VectorBlend { .. } => {
+                    Some(Message::Editor(EditorMessage::ConfirmVectorBlend))
+                }
+                InAppDialog::ExportVectorSvg { .. } => {
+                    Some(Message::Editor(EditorMessage::ConfirmExportVectorSvg))
+                }
+                InAppDialog::RecoveryPrompt { .. } => Some(Message::RestoreRecoverySession),
+                InAppDialog::SaveSelection { .. } => Some(Message::ConfirmSaveSelection),
+                InAppDialog::LoadSelection { .. } => Some(Message::ConfirmLoadSelection),
+                InAppDialog::NewGuide { .. } => Some(Message::ConfirmNewGuide),
+                InAppDialog::GridSettings { .. } => Some(Message::ConfirmGridSettings),
+                InAppDialog::Alert { .. } => Some(Message::CloseDialog),
+                _ => None,
+            };
+            if let Some(m) = msg {
+                return update(state, m);
+            }
+        }
+    }
+
     if state.settings_open
         || state.dialog.is_some()
         || (state.snapshot.meta.workspace == Workspace::Editor
@@ -211,6 +244,14 @@ pub(super) fn handle_key_event(state: &mut PhotonGui, ev: iced::keyboard::Event)
         if matches!(key, Key::Named(Named::Enter)) {
             if state.editor_ui.smart_paste.is_some() {
                 return update(state, Message::SmartPasteApply);
+            }
+            if state.crop_uv.is_some() {
+                return update(state, Message::ApplyCrop);
+            }
+            if state.editor_ui.tool == EditorTool::RotateAngle
+                && state.editor_ui.rotate_angle.abs() > 1e-4
+            {
+                return update(state, Message::EditorApplyRotateAngle);
             }
             if state.editor_ui.tool == EditorTool::Transform {
                 return update(state, Message::EditorTransformCommit);
@@ -400,21 +441,7 @@ pub(super) fn handle_key_event(state: &mut PhotonGui, ev: iced::keyboard::Event)
                 return update(state, Message::ToggleBrowserShowHidden);
             }
             Key::Character("q") | Key::Character("Q") => {
-                if is_standalone_viewer() || is_standalone_editor() {
-                    return iced::exit();
-                }
-                let core = state.core.clone();
-                return Task::perform(
-                    async move {
-                        let env = Envelope::new(
-                            format!("gui-ctrlq-{}", std::process::id()),
-                            ClientKind::Gui,
-                            Command::SaveUiState { force: true },
-                        );
-                        let _ = core.dispatch(env).await;
-                    },
-                    |_| Message::ShutdownAfterSave,
-                );
+                return update(state, Message::RequestAppExit);
             }
             Key::Character("1") => {
                 if is_standalone_viewer() || is_standalone_editor() {

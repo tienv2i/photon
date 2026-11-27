@@ -613,6 +613,13 @@ pub(super) fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) 
                 Task::none()
             }
         }
+        "editor.menu.select.save_selection" => update(state, Message::OpenSaveSelectionDialog),
+        "editor.menu.select.load_selection" => update(state, Message::OpenLoadSelectionDialog),
+        "editor.menu.view.rulers" => update(state, Message::Editor(EditorMessage::ToggleRulers)),
+        "editor.menu.view.grid" => update(state, Message::Editor(EditorMessage::ToggleGrid)),
+        "editor.menu.view.grid_settings" => update(state, Message::OpenGridSettingsDialog),
+        "editor.menu.view.guides" => update(state, Message::Editor(EditorMessage::ToggleGuides)),
+        "editor.menu.view.new_guide" => update(state, Message::OpenNewGuideDialog),
         "editor.smart_paste.keep_original" => update(
             state,
             Message::SmartPasteSetMode(SmartPasteFitMode::KeepOriginal),
@@ -1086,6 +1093,8 @@ pub(super) fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) 
                         name: None,
                         visible: Some(!layer.visible),
                         locked: None,
+                        clipped_to_below: None,
+                        lock_alpha: None,
                         opacity: None,
                         blend_mode: None,
                         offset_x: None,
@@ -1099,6 +1108,8 @@ pub(super) fn handle_semantic_ui_action(state: &mut PhotonGui, target_id: &str) 
                         name: None,
                         visible: None,
                         locked: Some(!layer.locked),
+                        clipped_to_below: None,
+                        lock_alpha: None,
                         opacity: None,
                         blend_mode: None,
                         offset_x: None,

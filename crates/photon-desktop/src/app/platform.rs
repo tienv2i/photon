@@ -259,13 +259,25 @@ pub(super) fn canonicalize_path_str(raw: &str) -> PathBuf {
     std::fs::canonicalize(raw).unwrap_or_else(|_| PathBuf::from(raw))
 }
 
-pub(super) fn spawn_detached_exe(args: &[String]) {
+pub(super) fn spawn_sibling_or_self(
+    sibling_bin: &str,
+    sibling_args: &[&str],
+    fallback_args: &[&str],
+) {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    let mut cmd = std::process::Command::new(exe);
-    cmd.args(args)
-        .stdin(std::process::Stdio::null())
+    let sibling = exe.parent().map(|dir| dir.join(sibling_bin));
+    let mut cmd = if let Some(bin) = sibling.filter(|p| p.is_file()) {
+        let mut c = std::process::Command::new(bin);
+        c.args(sibling_args);
+        c
+    } else {
+        let mut c = std::process::Command::new(exe);
+        c.args(fallback_args);
+        c
+    };
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     let _ = cmd.spawn();
@@ -411,9 +423,9 @@ pub(super) fn show_in_browser_or_forward(state: &PhotonGui, target_path: String)
                 }
             }
             if let Some(dir) = parent_dir {
-                spawn_detached_exe(&["browse".to_owned(), dir]);
+                spawn_sibling_or_self("photon-manager", &[&dir], &["browse", &dir]);
             } else {
-                spawn_detached_exe(&["browse".to_owned()]);
+                spawn_sibling_or_self("photon-manager", &[], &["browse"]);
             }
         },
         |()| Message::Noop,
@@ -470,9 +482,9 @@ pub(super) fn forward_or_spawn_browser(browse_dir: Option<String>) -> Task<Messa
                 }
             }
             if let Some(dir) = browse_dir {
-                spawn_detached_exe(&["browse".to_owned(), dir]);
+                spawn_sibling_or_self("photon-manager", &[&dir], &["browse", &dir]);
             } else {
-                spawn_detached_exe(&["browse".to_owned()]);
+                spawn_sibling_or_self("photon-manager", &[], &["browse"]);
             }
         },
         |()| Message::Noop,
@@ -536,7 +548,7 @@ pub(super) fn forward_or_spawn_editor_only() -> Task<Message> {
                     return;
                 }
             }
-            spawn_detached_exe(&["edit".to_owned()]);
+            spawn_sibling_or_self("photon-editor", &[], &["edit"]);
         },
         |()| Message::Noop,
     )
@@ -622,7 +634,7 @@ pub(super) fn open_or_focus_viewer_process(
                     return;
                 }
                 if let Some(first) = paths.into_iter().next() {
-                    spawn_detached_exe(&["--viewer-window".to_owned(), first]);
+                    spawn_sibling_or_self("photon-viewer", &[&first], &["--viewer-window", &first]);
                 }
                 return;
             }
@@ -659,7 +671,7 @@ pub(super) fn open_or_focus_viewer_process(
                     .await;
                     continue;
                 }
-                spawn_detached_exe(&["--viewer-window".to_owned(), raw]);
+                spawn_sibling_or_self("photon-viewer", &[&raw], &["--viewer-window", &raw]);
                 // Hold the per-path lock briefly until the child registers so rapid double-clicks
                 // deduplicate against the new process instead of racing a duplicate window.
                 let deadline = Instant::now() + Duration::from_millis(500);
@@ -712,7 +724,7 @@ pub(super) fn open_in_editor_or_forward(state: &PhotonGui, path: String) -> Task
                 )
                 .await;
             } else {
-                spawn_detached_exe(&["edit".to_owned(), path]);
+                spawn_sibling_or_self("photon-editor", &[&path], &["edit", &path]);
             }
         },
         |_| Message::Noop,

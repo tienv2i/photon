@@ -293,31 +293,39 @@ pub(super) fn build_active_menu(
     state: &PhotonGui,
     _role: WindowRole,
     ws: Workspace,
-) -> Option<(Option<f32>, Element<'_, Message>)> {
+) -> Option<(
+    Option<f32>,
+    f32,
+    Element<'_, Message>,
+    Vec<CascadingSubmenu<'_, Message>>,
+)> {
     let menu = state.active_menu?;
     if menu == ActiveMenu::WorkspaceSwitcher {
-        return Some((None, build_workspace_switcher_menu(state, ws)));
-    }
-    if menu == ActiveMenu::WorkspacePanels {
-        return Some((None, build_workspace_panels_menu(state, ws)));
-    }
-    if ws == Workspace::Editor && menu == ActiveMenu::EditorAddLayer {
         return Some((
             None,
-            build_editor_add_layer_menu(state.editor_view_state())
-                .1
-                .map(Message::Editor),
+            240.0,
+            build_workspace_switcher_menu(state, ws),
+            Vec::new(),
         ));
+    }
+    if menu == ActiveMenu::WorkspacePanels {
+        return Some((
+            None,
+            240.0,
+            build_workspace_panels_menu(state, ws),
+            Vec::new(),
+        ));
+    }
+    if ws == Workspace::Editor && menu == ActiveMenu::EditorAddLayer {
+        let (h, el) = build_editor_add_layer_menu(state.editor_view_state());
+        return Some((None, h, el.map(Message::Editor), Vec::new()));
     }
     if ws == Workspace::Editor
         && let ActiveMenu::EditorToolFlyout(group) = menu
     {
-        return Some((
-            None,
-            build_tool_group_flyout_menu(&state.editor_ui, state.snapshot.meta.language, group)
-                .1
-                .map(Message::Editor),
-        ));
+        let (h, el) =
+            build_tool_group_flyout_menu(&state.editor_ui, state.snapshot.meta.language, group);
+        return Some((None, h, el.map(Message::Editor), Vec::new()));
     }
     let lang = state.snapshot.meta.language;
     let layout = &state.snapshot.meta.layout;
@@ -633,7 +641,9 @@ pub(super) fn build_active_menu(
         (Workspace::Browser, ActiveMenu::BrowserSort) => {
             return Some((
                 None,
+                220.0,
                 build_browser_sort_menu(state.browser_view_state()).map(Message::Browser),
+                Vec::new(),
             ));
         }
         (Workspace::Editor, ActiveMenu::EditorFile) => (
@@ -712,7 +722,29 @@ pub(super) fn build_active_menu(
                         Message::RequestEditorLeave { close_editor: true },
                     )
                     .icon(Icon::Close)
+                    .shortcut("Ctrl+W")
                     .enabled(ed.is_some()),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-close-all"),
+                        Message::EditorRequestCloseTabs(
+                            state
+                                .snapshot
+                                .meta
+                                .editor_tabs
+                                .iter()
+                                .map(|t| t.id)
+                                .collect(),
+                        ),
+                    )
+                    .icon(Icon::Close)
+                    .enabled(!state.snapshot.meta.editor_tabs.is_empty()),
+                ),
+                MenuEntry::Separator,
+                MenuEntry::Item(
+                    MenuItem::new(tr(lang, "action-exit"), Message::RequestAppExit)
+                        .shortcut("Ctrl+Q"),
                 ),
             ],
         ),
@@ -808,9 +840,9 @@ pub(super) fn build_active_menu(
                 ],
             )
         }
-        (Workspace::Editor, ActiveMenu::EditorImage) => (
-            Some(96.0),
-            vec![
+        (Workspace::Editor, ActiveMenu::EditorImage) => {
+            let sub_key = state.active_menu_submenu;
+            let entries = vec![
                 MenuEntry::Item(
                     MenuItem::new(
                         tr(lang, "action-duplicate-image"),
@@ -822,55 +854,12 @@ pub(super) fn build_active_menu(
                 MenuEntry::Separator,
                 MenuEntry::Item(
                     MenuItem::new(
-                        tr(lang, "action-rotate-left"),
-                        Message::Dispatch(Command::EditorRotate {
-                            degrees: -90,
-                            target: state.editor_ui.apply_target,
-                        }),
+                        tr(lang, "menu-image-transform"),
+                        Message::SetMenuSubmenu("image.transform"),
                     )
-                    .icon(Icon::RotateLeft)
-                    .enabled(ed.is_some()),
-                ),
-                MenuEntry::Item(
-                    MenuItem::new(
-                        tr(lang, "action-rotate-right"),
-                        Message::Dispatch(Command::EditorRotate {
-                            degrees: 90,
-                            target: state.editor_ui.apply_target,
-                        }),
-                    )
-                    .icon(Icon::RotateRight)
-                    .enabled(ed.is_some()),
-                ),
-                MenuEntry::Item(
-                    MenuItem::new(
-                        tr(lang, "tool-rotate-angle"),
-                        Message::EditorSelectTool(EditorTool::RotateAngle),
-                    )
-                    .icon(Icon::RotateAngle)
-                    .enabled(ed.is_some()),
-                ),
-                MenuEntry::Separator,
-                MenuEntry::Item(
-                    MenuItem::new(
-                        tr(lang, "action-flip-h"),
-                        Message::Dispatch(Command::EditorFlip {
-                            axis: FlipAxis::Horizontal,
-                            target: state.editor_ui.apply_target,
-                        }),
-                    )
-                    .icon(Icon::FlipH)
-                    .enabled(ed.is_some()),
-                ),
-                MenuEntry::Item(
-                    MenuItem::new(
-                        tr(lang, "action-flip-v"),
-                        Message::Dispatch(Command::EditorFlip {
-                            axis: FlipAxis::Vertical,
-                            target: state.editor_ui.apply_target,
-                        }),
-                    )
-                    .icon(Icon::FlipV)
+                    .icon(Icon::Transform)
+                    .submenu(true)
+                    .on_hover(Message::SetMenuSubmenu("image.transform"))
                     .enabled(ed.is_some()),
                 ),
                 MenuEntry::Separator,
@@ -883,7 +872,7 @@ pub(super) fn build_active_menu(
                 MenuEntry::Item(
                     MenuItem::new(tr(lang, "action-image-size"), Message::OpenResizeDialog)
                         .icon(Icon::Resize)
-                        .shortcut("Ctrl+R")
+                        .shortcut("Ctrl+Alt+I")
                         .enabled(ed.is_some()),
                 ),
                 MenuEntry::Item(
@@ -892,98 +881,803 @@ pub(super) fn build_active_menu(
                         Message::OpenCanvasSizeDialog,
                     )
                     .icon(Icon::CanvasSize)
-                    .shortcut("Ctrl+Shift+R")
+                    .shortcut("Ctrl+Alt+C")
                     .enabled(ed.is_some()),
                 ),
-            ],
-        ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-slice-image"),
+                        Message::OpenSliceImageDialog,
+                    )
+                    .icon(Icon::Crop)
+                    .enabled(ed.is_some()),
+                ),
+            ];
+            let mut submenus = Vec::new();
+            if sub_key == Some("image.transform") {
+                let sub_entries = vec![
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-rotate-left"),
+                            Message::Dispatch(Command::EditorRotate {
+                                degrees: -90,
+                                target: state.editor_ui.apply_target,
+                            }),
+                        )
+                        .icon(Icon::RotateLeft)
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-rotate-right"),
+                            Message::Dispatch(Command::EditorRotate {
+                                degrees: 90,
+                                target: state.editor_ui.apply_target,
+                            }),
+                        )
+                        .icon(Icon::RotateRight)
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "tool-rotate-angle"),
+                            Message::EditorSelectTool(EditorTool::RotateAngle),
+                        )
+                        .icon(Icon::RotateAngle)
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Separator,
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-flip-h"),
+                            Message::Dispatch(Command::EditorFlip {
+                                axis: FlipAxis::Horizontal,
+                                target: state.editor_ui.apply_target,
+                            }),
+                        )
+                        .icon(Icon::FlipH)
+                        .enabled(ed.is_some()),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::new(
+                            tr(lang, "action-flip-v"),
+                            Message::Dispatch(Command::EditorFlip {
+                                axis: FlipAxis::Vertical,
+                                target: state.editor_ui.apply_target,
+                            }),
+                        )
+                        .icon(Icon::FlipV)
+                        .enabled(ed.is_some()),
+                    ),
+                ];
+                let sub_h = photon_ui::menu::estimate_menu_height_with_spacing(&sub_entries);
+                let row_y = photon_ui::menu::estimate_entry_offset_y(&entries, 2);
+                submenus.push(
+                    CascadingSubmenu::new(220.0, sub_h, menu_panel_entries(sub_entries, 220.0))
+                        .parent_row_offset_y(row_y),
+                );
+            }
+            let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+            return Some((
+                Some(96.0),
+                est_h,
+                menu_panel_entries(entries, 230.0),
+                submenus,
+            ));
+        }
         (Workspace::Editor, ActiveMenu::EditorLayer) => {
             let active_id = ed.map(|e| e.active_layer_id).unwrap_or(0);
+            let active_layer = ed.and_then(|e| e.layers.iter().find(|l| l.id == active_id));
             let layer_count = ed.map(|e| e.layers.len()).unwrap_or(0);
+            let visible_count = ed
+                .map(|e| e.layers.iter().filter(|l| l.visible).count())
+                .unwrap_or(0);
+            let has_selection = ed.is_some_and(|e| e.selection.has_selection);
+            let selected_ids = state.editor_ui.selected_layer_ids.clone();
             let active_idx = ed
                 .and_then(|e| e.layers.iter().position(|l| l.id == e.active_layer_id))
                 .unwrap_or(0);
-            (
-                Some(148.0),
-                vec![
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-layer-add"),
-                            Message::Dispatch(Command::EditorLayerAdd {
-                                name: format!("Layer {}", layer_count + 1),
-                            }),
-                        )
-                        .icon(Icon::Plus)
-                        .shortcut("Ctrl+Shift+N")
-                        .enabled(ed.is_some()),
-                    ),
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-layer-duplicate"),
-                            Message::Dispatch(Command::EditorLayerDuplicate { id: active_id }),
-                        )
-                        .icon(Icon::Duplicate)
-                        .shortcut("Ctrl+J")
-                        .enabled(ed.is_some()),
-                    ),
-                    MenuEntry::Separator,
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-layer-merge-down"),
-                            Message::Dispatch(Command::EditorLayerMergeDown { id: active_id }),
-                        )
-                        .shortcut("Ctrl+E")
-                        .enabled(ed.is_some() && active_idx > 0),
-                    ),
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-layer-flatten"),
-                            Message::Dispatch(Command::EditorLayerFlatten),
-                        )
-                        .enabled(ed.is_some() && layer_count > 1),
-                    ),
-                    MenuEntry::Separator,
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-mask-add-reveal"),
-                            Message::Dispatch(Command::EditorLayerMaskAdd {
-                                id: active_id,
-                                reveal_all: true,
-                            }),
-                        )
-                        .icon(Icon::Mask)
-                        .enabled(ed.is_some()),
-                    ),
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-mask-add-hide"),
-                            Message::Dispatch(Command::EditorLayerMaskAdd {
-                                id: active_id,
-                                reveal_all: false,
-                            }),
-                        )
-                        .icon(Icon::Mask)
-                        .enabled(ed.is_some()),
-                    ),
-                    MenuEntry::Separator,
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-layer-delete"),
-                            Message::Dispatch(Command::EditorLayerDelete { id: active_id }),
-                        )
-                        .icon(Icon::Trash)
-                        .enabled(ed.is_some() && layer_count > 1),
-                    ),
-                ],
-            )
+            let sub_key = state.active_menu_submenu;
+            let is_clipped = active_layer.is_some_and(|l| l.clipped_to_below);
+            let is_lock_alpha = active_layer.is_some_and(|l| l.lock_alpha);
+            let is_raster = active_layer.is_some_and(|l| l.kind.is_raster());
+            let has_mask = active_layer.is_some_and(|l| l.has_mask);
+
+            let entries = vec![
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-layer-new-extract"),
+                        Message::SetMenuSubmenu("layer.new"),
+                    )
+                    .icon(Icon::Plus)
+                    .submenu(true)
+                    .on_hover(Message::SetMenuSubmenu("layer.new"))
+                    .enabled(ed.is_some()),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(
+                            lang,
+                            if is_clipped {
+                                "action-layer-release-clipping-mask"
+                            } else {
+                                "action-layer-create-clipping-mask"
+                            },
+                        ),
+                        Message::Dispatch(Command::EditorLayerToggleClippingMask {
+                            id: Some(active_id),
+                        }),
+                    )
+                    .icon(Icon::Layers)
+                    .shortcut("Ctrl+Alt+G")
+                    .enabled(ed.is_some() && active_idx > 0),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(
+                            lang,
+                            if is_lock_alpha {
+                                "action-layer-unlock-alpha"
+                            } else {
+                                "action-layer-lock-alpha"
+                            },
+                        ),
+                        Message::Dispatch(Command::EditorLayerSetProps {
+                            id: active_id,
+                            name: None,
+                            visible: None,
+                            locked: None,
+                            clipped_to_below: None,
+                            lock_alpha: Some(!is_lock_alpha),
+                            opacity: None,
+                            blend_mode: None,
+                            offset_x: None,
+                            offset_y: None,
+                        }),
+                    )
+                    .icon(if is_lock_alpha {
+                        Icon::Unlock
+                    } else {
+                        Icon::Lock
+                    })
+                    .checked(is_lock_alpha)
+                    .enabled(ed.is_some() && is_raster),
+                ),
+                MenuEntry::Separator,
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-layer-merge"),
+                        Message::SetMenuSubmenu("layer.merge"),
+                    )
+                    .icon(Icon::MergeDown)
+                    .submenu(true)
+                    .on_hover(Message::SetMenuSubmenu("layer.merge"))
+                    .enabled(ed.is_some()),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-layer-mask"),
+                        Message::SetMenuSubmenu("layer.mask"),
+                    )
+                    .icon(Icon::Mask)
+                    .submenu(true)
+                    .on_hover(Message::SetMenuSubmenu("layer.mask"))
+                    .enabled(ed.is_some()),
+                ),
+                MenuEntry::Separator,
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-layer-align"),
+                        Message::SetMenuSubmenu("layer.align"),
+                    )
+                    .submenu(true)
+                    .on_hover(Message::SetMenuSubmenu("layer.align"))
+                    .enabled(ed.is_some()),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-layer-distribute"),
+                        Message::SetMenuSubmenu("layer.distribute"),
+                    )
+                    .submenu(true)
+                    .on_hover(Message::SetMenuSubmenu("layer.distribute"))
+                    .enabled(ed.is_some() && layer_count >= 3),
+                ),
+            ];
+
+            let mut submenus = Vec::new();
+            let (sub_entries_opt, parent_idx) = match sub_key {
+                Some("layer.new") => (
+                    Some(vec![
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-layer-add"),
+                                Message::Dispatch(Command::EditorLayerAdd {
+                                    name: format!("Layer {}", layer_count + 1),
+                                }),
+                            )
+                            .icon(Icon::Plus)
+                            .shortcut("Ctrl+Shift+N")
+                            .enabled(ed.is_some()),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-layer-duplicate"),
+                                if selected_ids.len() >= 2 {
+                                    Message::Dispatch(Command::EditorLayerDuplicateMultiple {
+                                        ids: selected_ids.clone(),
+                                    })
+                                } else {
+                                    Message::Dispatch(Command::EditorLayerDuplicate {
+                                        id: active_id,
+                                    })
+                                },
+                            )
+                            .icon(Icon::Duplicate)
+                            .shortcut("Ctrl+J")
+                            .enabled(ed.is_some()),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-layer-via-copy"),
+                                Message::Dispatch(Command::EditorLayerFromSelection { cut: false }),
+                            )
+                            .enabled(ed.is_some() && has_selection),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-layer-via-cut"),
+                                Message::Dispatch(Command::EditorLayerFromSelection { cut: true }),
+                            )
+                            .shortcut("Ctrl+Shift+J")
+                            .enabled(ed.is_some() && has_selection),
+                        ),
+                        MenuEntry::Separator,
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-layer-delete"),
+                                if selected_ids.len() >= 2 {
+                                    Message::Dispatch(Command::EditorLayerDeleteMultiple {
+                                        ids: selected_ids.clone(),
+                                    })
+                                } else {
+                                    Message::Dispatch(Command::EditorLayerDelete { id: active_id })
+                                },
+                            )
+                            .icon(Icon::Trash)
+                            .enabled(
+                                ed.is_some()
+                                    && if selected_ids.len() >= 2 {
+                                        selected_ids.len() < layer_count
+                                    } else {
+                                        layer_count > 1
+                                    },
+                            ),
+                        ),
+                    ]),
+                    0usize,
+                ),
+                Some("layer.merge") => (
+                    Some(vec![
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-layer-merge-down"),
+                                Message::Dispatch(Command::EditorLayerMergeDown { id: active_id }),
+                            )
+                            .shortcut("Ctrl+E")
+                            .enabled(ed.is_some() && active_idx > 0),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-layer-merge-selected"),
+                                Message::Dispatch(Command::EditorLayerMergeSelected {
+                                    ids: selected_ids.clone(),
+                                }),
+                            )
+                            .enabled(ed.is_some() && selected_ids.len() >= 2),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-layer-merge-visible"),
+                                Message::Dispatch(Command::EditorLayerMergeVisible),
+                            )
+                            .enabled(ed.is_some() && visible_count >= 2),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-layer-stamp-visible"),
+                                Message::Dispatch(Command::EditorLayerStampVisible),
+                            )
+                            .shortcut("Ctrl+Shift+Alt+E")
+                            .enabled(ed.is_some() && visible_count >= 1),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-layer-flatten"),
+                                Message::Dispatch(Command::EditorLayerFlatten),
+                            )
+                            .enabled(ed.is_some() && layer_count > 1),
+                        ),
+                    ]),
+                    4usize,
+                ),
+                Some("layer.mask") => (
+                    Some(vec![
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-mask-add-reveal"),
+                                Message::Dispatch(Command::EditorLayerMaskAdd {
+                                    id: active_id,
+                                    reveal_all: true,
+                                }),
+                            )
+                            .icon(Icon::Mask)
+                            .enabled(ed.is_some() && !has_mask),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-mask-add-hide"),
+                                Message::Dispatch(Command::EditorLayerMaskAdd {
+                                    id: active_id,
+                                    reveal_all: false,
+                                }),
+                            )
+                            .icon(Icon::Mask)
+                            .enabled(ed.is_some() && !has_mask),
+                        ),
+                        MenuEntry::Separator,
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-mask-invert"),
+                                Message::Dispatch(Command::EditorLayerMaskInvert { id: active_id }),
+                            )
+                            .enabled(ed.is_some() && has_mask),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-mask-apply"),
+                                Message::Dispatch(Command::EditorLayerMaskApply { id: active_id }),
+                            )
+                            .enabled(ed.is_some() && has_mask),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "action-mask-delete"),
+                                Message::Dispatch(Command::EditorLayerMaskDelete { id: active_id }),
+                            )
+                            .icon(Icon::Trash)
+                            .enabled(ed.is_some() && has_mask),
+                        ),
+                    ]),
+                    5usize,
+                ),
+                Some("layer.align") => (
+                    Some(vec![
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "align-obj-left"),
+                                Message::Editor(EditorMessage::EditorAlignObjects(
+                                    photon_protocol::AlignOp::Left,
+                                )),
+                            )
+                            .enabled(ed.is_some()),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "align-obj-center-h"),
+                                Message::Editor(EditorMessage::EditorAlignObjects(
+                                    photon_protocol::AlignOp::CenterH,
+                                )),
+                            )
+                            .enabled(ed.is_some()),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "align-obj-right"),
+                                Message::Editor(EditorMessage::EditorAlignObjects(
+                                    photon_protocol::AlignOp::Right,
+                                )),
+                            )
+                            .enabled(ed.is_some()),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "align-obj-top"),
+                                Message::Editor(EditorMessage::EditorAlignObjects(
+                                    photon_protocol::AlignOp::Top,
+                                )),
+                            )
+                            .enabled(ed.is_some()),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "align-obj-center-v"),
+                                Message::Editor(EditorMessage::EditorAlignObjects(
+                                    photon_protocol::AlignOp::CenterV,
+                                )),
+                            )
+                            .enabled(ed.is_some()),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "align-obj-bottom"),
+                                Message::Editor(EditorMessage::EditorAlignObjects(
+                                    photon_protocol::AlignOp::Bottom,
+                                )),
+                            )
+                            .enabled(ed.is_some()),
+                        ),
+                    ]),
+                    7usize,
+                ),
+                Some("layer.distribute") => (
+                    Some(vec![
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "distribute-space-h"),
+                                Message::Editor(EditorMessage::EditorDistributeObjects(
+                                    photon_protocol::DistributeOp::SpaceH,
+                                )),
+                            )
+                            .enabled(ed.is_some() && layer_count >= 3),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "distribute-space-v"),
+                                Message::Editor(EditorMessage::EditorDistributeObjects(
+                                    photon_protocol::DistributeOp::SpaceV,
+                                )),
+                            )
+                            .enabled(ed.is_some() && layer_count >= 3),
+                        ),
+                    ]),
+                    8usize,
+                ),
+                _ => (None, 0),
+            };
+            if let Some(sub_entries) = sub_entries_opt {
+                let sub_h = photon_ui::menu::estimate_menu_height_with_spacing(&sub_entries);
+                let row_y = photon_ui::menu::estimate_entry_offset_y(&entries, parent_idx);
+                submenus.push(
+                    CascadingSubmenu::new(230.0, sub_h, menu_panel_entries(sub_entries, 230.0))
+                        .parent_row_offset_y(row_y),
+                );
+            }
+            let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+            return Some((
+                Some(200.0),
+                est_h,
+                menu_panel_entries(entries, 235.0),
+                submenus,
+            ));
         }
-        (Workspace::Editor, ActiveMenu::EditorVector) => (
-            Some(190.0),
-            build_editor_vector_menu_entries(state.editor_view_state())
-                .into_iter()
-                .map(|e| e.map(Message::Editor))
-                .collect(),
-        ),
+        (Workspace::Editor, ActiveMenu::EditorVector) => {
+            let sub_key = state.active_menu_submenu;
+            let has_doc = ed.is_some();
+            let next_idx = ed.map_or(1, |e| e.layers.len() + 1);
+            let vec_data = ed.and_then(|e| e.active_vector_data.as_ref());
+            let has_vector_shape = vec_data.is_some_and(|v| !v.shapes.is_empty());
+            let has_two_shapes = vec_data.is_some_and(|v| v.shapes.len() >= 2);
+            let active_non_raster = ed
+                .and_then(|e| e.layers.iter().find(|l| l.id == e.active_layer_id))
+                .is_some_and(|l| !l.locked && !l.kind.is_raster());
+            let split_idx = state.editor_ui.selected_vector_node.unwrap_or(1);
+
+            let entries = vec![
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-vector-new-layer"),
+                        Message::Dispatch(Command::EditorAddVectorLayer {
+                            name: format!("Vector {next_idx}"),
+                            data: photon_protocol::VectorLayerData::new(),
+                        }),
+                    )
+                    .icon(Icon::BezierPen)
+                    .enabled(has_doc),
+                ),
+                MenuEntry::Separator,
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-vector-path"),
+                        Message::SetMenuSubmenu("vector.path"),
+                    )
+                    .icon(Icon::PathSelect)
+                    .submenu(true)
+                    .on_hover(Message::SetMenuSubmenu("vector.path"))
+                    .enabled(has_vector_shape),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "label-pathfinder"),
+                        Message::SetMenuSubmenu("vector.pathfinder"),
+                    )
+                    .submenu(true)
+                    .on_hover(Message::SetMenuSubmenu("vector.pathfinder"))
+                    .enabled(has_two_shapes),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "label-align-distribute"),
+                        Message::SetMenuSubmenu("vector.align"),
+                    )
+                    .submenu(true)
+                    .on_hover(Message::SetMenuSubmenu("vector.align"))
+                    .enabled(has_vector_shape),
+                ),
+                MenuEntry::Separator,
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-vector-transform-each"),
+                        Message::Editor(EditorMessage::OpenTransformEachDialog),
+                    )
+                    .icon(Icon::Transform)
+                    .enabled(has_doc),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-vector-blend"),
+                        Message::Editor(EditorMessage::OpenVectorBlendDialog),
+                    )
+                    .icon(Icon::Duplicate)
+                    .enabled(has_two_shapes),
+                ),
+                MenuEntry::Separator,
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-layer-rasterize"),
+                        Message::Dispatch(Command::EditorRasterizeLayer { id: None }),
+                    )
+                    .icon(Icon::Layers)
+                    .enabled(active_non_raster),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-vector-export-svg"),
+                        Message::Editor(EditorMessage::OpenExportVectorSvgDialog),
+                    )
+                    .icon(Icon::Export)
+                    .enabled(vec_data.is_some()),
+                ),
+            ];
+
+            let mut submenus = Vec::new();
+            let (sub_entries_opt, parent_idx) = match sub_key {
+                Some("vector.path") => (
+                    Some(vec![
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "menu-vector-convert-to-path"),
+                                Message::Dispatch(Command::EditorConvertShapeToPath {
+                                    layer_id: None,
+                                    shape_id: None,
+                                }),
+                            )
+                            .icon(Icon::PathSelect)
+                            .enabled(has_vector_shape),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "menu-vector-join-path"),
+                                Message::Dispatch(Command::EditorVectorPathOp {
+                                    layer_id: None,
+                                    shape_id: None,
+                                    op: photon_protocol::VectorPathOperation::JoinPaths {
+                                        second_shape_id: None,
+                                        tolerance: 24.0,
+                                    },
+                                }),
+                            )
+                            .enabled(has_two_shapes),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "menu-vector-split-path"),
+                                Message::Dispatch(Command::EditorVectorPathOp {
+                                    layer_id: None,
+                                    shape_id: None,
+                                    op: photon_protocol::VectorPathOperation::SplitAtNode {
+                                        index: split_idx,
+                                    },
+                                }),
+                            )
+                            .enabled(has_vector_shape),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "menu-vector-close-open-path"),
+                                Message::Dispatch(Command::EditorVectorPathOp {
+                                    layer_id: None,
+                                    shape_id: None,
+                                    op: photon_protocol::VectorPathOperation::ToggleClosed,
+                                }),
+                            )
+                            .enabled(has_vector_shape),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "menu-vector-reverse-path"),
+                                Message::Dispatch(Command::EditorVectorPathOp {
+                                    layer_id: None,
+                                    shape_id: None,
+                                    op: photon_protocol::VectorPathOperation::ReversePath,
+                                }),
+                            )
+                            .enabled(has_vector_shape),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "menu-vector-simplify-path"),
+                                Message::Dispatch(Command::EditorVectorPathOp {
+                                    layer_id: None,
+                                    shape_id: None,
+                                    op: photon_protocol::VectorPathOperation::Simplify {
+                                        tolerance: state.editor_ui.vector_simplify_tolerance,
+                                    },
+                                }),
+                            )
+                            .enabled(has_vector_shape),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "menu-vector-smooth-path"),
+                                Message::Dispatch(Command::EditorVectorPathOp {
+                                    layer_id: None,
+                                    shape_id: None,
+                                    op: photon_protocol::VectorPathOperation::Smooth {
+                                        tension: state.editor_ui.vector_smooth_tension,
+                                    },
+                                }),
+                            )
+                            .enabled(has_vector_shape),
+                        ),
+                    ]),
+                    2usize,
+                ),
+                Some("vector.pathfinder") => (
+                    Some(vec![
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "pathfinder-union"),
+                                Message::Dispatch(Command::EditorVectorBoolean {
+                                    op: photon_protocol::VectorBooleanOp::Union,
+                                    layer_id: None,
+                                    shape_ids: Vec::new(),
+                                }),
+                            )
+                            .enabled(has_two_shapes),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "pathfinder-subtract"),
+                                Message::Dispatch(Command::EditorVectorBoolean {
+                                    op: photon_protocol::VectorBooleanOp::Subtract,
+                                    layer_id: None,
+                                    shape_ids: Vec::new(),
+                                }),
+                            )
+                            .enabled(has_two_shapes),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "pathfinder-intersect"),
+                                Message::Dispatch(Command::EditorVectorBoolean {
+                                    op: photon_protocol::VectorBooleanOp::Intersect,
+                                    layer_id: None,
+                                    shape_ids: Vec::new(),
+                                }),
+                            )
+                            .enabled(has_two_shapes),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "pathfinder-exclude"),
+                                Message::Dispatch(Command::EditorVectorBoolean {
+                                    op: photon_protocol::VectorBooleanOp::Exclude,
+                                    layer_id: None,
+                                    shape_ids: Vec::new(),
+                                }),
+                            )
+                            .enabled(has_two_shapes),
+                        ),
+                    ]),
+                    3usize,
+                ),
+                Some("vector.align") => (
+                    Some(vec![
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "align-obj-left"),
+                                Message::Editor(EditorMessage::EditorAlignObjects(
+                                    photon_protocol::AlignOp::Left,
+                                )),
+                            )
+                            .enabled(has_vector_shape),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "align-obj-center-h"),
+                                Message::Editor(EditorMessage::EditorAlignObjects(
+                                    photon_protocol::AlignOp::CenterH,
+                                )),
+                            )
+                            .enabled(has_vector_shape),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "align-obj-right"),
+                                Message::Editor(EditorMessage::EditorAlignObjects(
+                                    photon_protocol::AlignOp::Right,
+                                )),
+                            )
+                            .enabled(has_vector_shape),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "align-obj-top"),
+                                Message::Editor(EditorMessage::EditorAlignObjects(
+                                    photon_protocol::AlignOp::Top,
+                                )),
+                            )
+                            .enabled(has_vector_shape),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "align-obj-center-v"),
+                                Message::Editor(EditorMessage::EditorAlignObjects(
+                                    photon_protocol::AlignOp::CenterV,
+                                )),
+                            )
+                            .enabled(has_vector_shape),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "align-obj-bottom"),
+                                Message::Editor(EditorMessage::EditorAlignObjects(
+                                    photon_protocol::AlignOp::Bottom,
+                                )),
+                            )
+                            .enabled(has_vector_shape),
+                        ),
+                        MenuEntry::Separator,
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "distribute-space-h"),
+                                Message::Editor(EditorMessage::EditorDistributeObjects(
+                                    photon_protocol::DistributeOp::SpaceH,
+                                )),
+                            )
+                            .enabled(has_two_shapes),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "distribute-space-v"),
+                                Message::Editor(EditorMessage::EditorDistributeObjects(
+                                    photon_protocol::DistributeOp::SpaceV,
+                                )),
+                            )
+                            .enabled(has_two_shapes),
+                        ),
+                    ]),
+                    4usize,
+                ),
+                _ => (None, 0),
+            };
+            if let Some(sub_entries) = sub_entries_opt {
+                let sub_h = photon_ui::menu::estimate_menu_height_with_spacing(&sub_entries);
+                let row_y = photon_ui::menu::estimate_entry_offset_y(&entries, parent_idx);
+                submenus.push(
+                    CascadingSubmenu::new(220.0, sub_h, menu_panel_entries(sub_entries, 220.0))
+                        .parent_row_offset_y(row_y),
+                );
+            }
+            let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+            return Some((
+                Some(190.0),
+                est_h,
+                menu_panel_entries(entries, 230.0),
+                submenus,
+            ));
+        }
         (Workspace::Editor, ActiveMenu::EditorFilter) => (
             Some(236.0),
             vec![
@@ -1047,42 +1741,122 @@ pub(super) fn build_active_menu(
             let has_sel = ed.is_some_and(|e| e.selection.has_selection);
             let can_reselect = ed.is_some_and(|e| e.selection.can_reselect);
             let quick_mask = ed.is_some_and(|e| e.selection.quick_mask_active);
-            (
-                Some(152.0),
-                vec![
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-select-all"),
-                            Message::Dispatch(Command::EditorSelectAll),
-                        )
-                        .shortcut("Ctrl+A")
-                        .enabled(ed.is_some()),
-                    ),
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-deselect"),
-                            Message::Dispatch(Command::EditorDeselect),
-                        )
-                        .shortcut("Ctrl+D")
-                        .enabled(has_sel),
-                    ),
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-reselect"),
-                            Message::Dispatch(Command::EditorReselect),
-                        )
-                        .shortcut("Ctrl+Shift+D")
-                        .enabled(can_reselect),
-                    ),
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-select-invert"),
-                            Message::Dispatch(Command::EditorSelectInvert),
-                        )
-                        .shortcut("Ctrl+Shift+I")
-                        .enabled(has_sel),
-                    ),
-                    MenuEntry::Separator,
+            let sub_key = state.active_menu_submenu;
+            let entries = vec![
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-select-all"),
+                        Message::Dispatch(Command::EditorSelectAll),
+                    )
+                    .shortcut("Ctrl+A")
+                    .enabled(ed.is_some()),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-deselect"),
+                        Message::Dispatch(Command::EditorDeselect),
+                    )
+                    .shortcut("Ctrl+D")
+                    .enabled(has_sel),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-reselect"),
+                        Message::Dispatch(Command::EditorReselect),
+                    )
+                    .shortcut("Ctrl+Shift+D")
+                    .enabled(can_reselect),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-select-invert"),
+                        Message::Dispatch(Command::EditorSelectInvert),
+                    )
+                    .shortcut("Ctrl+Shift+I")
+                    .enabled(has_sel),
+                ),
+                MenuEntry::Separator,
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-select-modify"),
+                        Message::SetMenuSubmenu("select.modify"),
+                    )
+                    .submenu(true)
+                    .on_hover(Message::SetMenuSubmenu("select.modify"))
+                    .enabled(has_sel),
+                ),
+                MenuEntry::Separator,
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-select-quick-mask"),
+                        Message::Dispatch(Command::EditorSelectToggleQuickMask),
+                    )
+                    .icon(Icon::QuickMask)
+                    .shortcut("Q")
+                    .checked(quick_mask)
+                    .enabled(ed.is_some()),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-select-from-alpha"),
+                        Message::Dispatch(Command::EditorSelectFromLayerAlpha {
+                            op: state.editor_ui.select_op,
+                        }),
+                    )
+                    .enabled(ed.is_some()),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-select-to-mask"),
+                        Message::Dispatch(Command::EditorSelectionToMask),
+                    )
+                    .enabled(has_sel),
+                ),
+                MenuEntry::Separator,
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-select-duplicate-layer"),
+                        Message::Dispatch(Command::EditorSelectionDuplicateLayer),
+                    )
+                    .enabled(has_sel),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-select-clear-pixels"),
+                        Message::Dispatch(Command::EditorSelectionClearPixels),
+                    )
+                    .shortcut("Del")
+                    .enabled(has_sel),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "action-crop-to-selection"),
+                        Message::Dispatch(Command::EditorCropToSelection),
+                    )
+                    .icon(Icon::Crop)
+                    .enabled(has_sel),
+                ),
+                MenuEntry::Separator,
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-select-save-selection"),
+                        Message::OpenSaveSelectionDialog,
+                    )
+                    .icon(Icon::Save)
+                    .enabled(has_sel),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-select-load-selection"),
+                        Message::OpenLoadSelectionDialog,
+                    )
+                    .icon(Icon::FolderOpen)
+                    .enabled(ed.is_some_and(|e| !e.selection.saved_selections.is_empty())),
+                ),
+            ];
+            let mut submenus = Vec::new();
+            if sub_key == Some("select.modify") {
+                let sub_entries = vec![
                     MenuEntry::Item(
                         MenuItem::new(
                             tr(lang, "action-select-feather"),
@@ -1132,63 +1906,26 @@ pub(super) fn build_active_menu(
                         )
                         .enabled(has_sel),
                     ),
-                    MenuEntry::Separator,
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-select-quick-mask"),
-                            Message::Dispatch(Command::EditorSelectToggleQuickMask),
-                        )
-                        .icon(Icon::QuickMask)
-                        .shortcut("Q")
-                        .checked(quick_mask)
-                        .enabled(ed.is_some()),
-                    ),
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-select-from-alpha"),
-                            Message::Dispatch(Command::EditorSelectFromLayerAlpha {
-                                op: state.editor_ui.select_op,
-                            }),
-                        )
-                        .enabled(ed.is_some()),
-                    ),
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-select-to-mask"),
-                            Message::Dispatch(Command::EditorSelectionToMask),
-                        )
-                        .enabled(has_sel),
-                    ),
-                    MenuEntry::Separator,
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-select-duplicate-layer"),
-                            Message::Dispatch(Command::EditorSelectionDuplicateLayer),
-                        )
-                        .enabled(has_sel),
-                    ),
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-select-clear-pixels"),
-                            Message::Dispatch(Command::EditorSelectionClearPixels),
-                        )
-                        .shortcut("Del")
-                        .enabled(has_sel),
-                    ),
-                    MenuEntry::Item(
-                        MenuItem::new(
-                            tr(lang, "action-crop-to-selection"),
-                            Message::Dispatch(Command::EditorCropToSelection),
-                        )
-                        .icon(Icon::Crop)
-                        .enabled(has_sel),
-                    ),
-                ],
-            )
+                ];
+                let sub_h = photon_ui::menu::estimate_menu_height_with_spacing(&sub_entries);
+                let row_y = photon_ui::menu::estimate_entry_offset_y(&entries, 5);
+                submenus.push(
+                    CascadingSubmenu::new(200.0, sub_h, menu_panel_entries(sub_entries, 200.0))
+                        .parent_row_offset_y(row_y),
+                );
+            }
+            let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+            return Some((
+                Some(152.0),
+                est_h,
+                menu_panel_entries(entries, 230.0),
+                submenus,
+            ));
         }
-        (Workspace::Editor, ActiveMenu::EditorView) => (
-            Some(360.0),
-            vec![
+        (Workspace::Editor, ActiveMenu::EditorView) => {
+            let sub_key = state.active_menu_submenu;
+            let ui = &state.editor_ui;
+            let entries = vec![
                 MenuEntry::Item(
                     MenuItem::new(tr(lang, "action-zoom-in"), Message::ZoomStep(1.25))
                         .icon(Icon::ZoomIn)
@@ -1212,57 +1949,96 @@ pub(super) fn build_active_menu(
                         .shortcut("Ctrl+1"),
                 ),
                 MenuEntry::Separator,
-                MenuEntry::Header(tr(lang, "settings-canvas-aa")),
                 MenuEntry::Item(
                     MenuItem::new(
-                        tr(lang, "aa-mode-crisp"),
-                        Message::SetAntiAliasingMode(CanvasAntiAliasingMode::Crisp),
+                        tr(lang, "menu-view-rulers"),
+                        Message::Editor(EditorMessage::ToggleRulers),
                     )
-                    .checked(layout.canvas_anti_aliasing == CanvasAntiAliasingMode::Crisp),
+                    .icon(Icon::Ruler)
+                    .shortcut("Ctrl+R")
+                    .checked(ui.show_rulers),
                 ),
                 MenuEntry::Item(
                     MenuItem::new(
-                        tr(lang, "aa-mode-smooth"),
-                        Message::SetAntiAliasingMode(CanvasAntiAliasingMode::Smooth),
+                        tr(lang, "menu-view-grid"),
+                        Message::Editor(EditorMessage::ToggleGrid),
                     )
-                    .checked(layout.canvas_anti_aliasing == CanvasAntiAliasingMode::Smooth),
+                    .icon(Icon::Grid)
+                    .shortcut("Ctrl+'")
+                    .checked(ui.show_grid),
                 ),
                 MenuEntry::Item(
                     MenuItem::new(
-                        tr(lang, "aa-mode-high-quality"),
-                        Message::SetAntiAliasingMode(CanvasAntiAliasingMode::HighQuality),
+                        tr(lang, "menu-view-grid-settings"),
+                        Message::OpenGridSettingsDialog,
                     )
-                    .checked(layout.canvas_anti_aliasing == CanvasAntiAliasingMode::HighQuality),
+                    .icon(Icon::Settings),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-view-guides"),
+                        Message::Editor(EditorMessage::ToggleGuides),
+                    )
+                    .icon(Icon::Guide)
+                    .shortcut("Ctrl+;")
+                    .checked(ui.show_guides),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(tr(lang, "menu-view-new-guide"), Message::OpenNewGuideDialog)
+                        .icon(Icon::Plus)
+                        .enabled(ed.is_some()),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-view-lock-guides"),
+                        Message::Editor(EditorMessage::ToggleLockGuides),
+                    )
+                    .icon(Icon::Lock)
+                    .checked(ui.lock_guides),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-view-clear-guides"),
+                        Message::Editor(EditorMessage::ClearGuides),
+                    )
+                    .icon(Icon::Trash)
+                    .enabled(!ui.guides.is_empty()),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-view-snap"),
+                        Message::Editor(EditorMessage::ToggleSnap(
+                            photon_editor::SnapTarget::Master,
+                        )),
+                    )
+                    .icon(Icon::Magnet)
+                    .shortcut("Ctrl+Shift+;")
+                    .checked(ui.snap.enabled),
+                ),
+                MenuEntry::Item(
+                    MenuItem::new(
+                        tr(lang, "menu-view-snap-to"),
+                        Message::SetMenuSubmenu("view.snap_to"),
+                    )
+                    .submenu(true)
+                    .on_hover(Message::SetMenuSubmenu("view.snap_to")),
                 ),
                 MenuEntry::Separator,
-                MenuEntry::Header(tr(lang, "settings-viewport-denoise")),
                 MenuEntry::Item(
                     MenuItem::new(
-                        tr(lang, "denoise-mode-off"),
-                        Message::SetViewportDenoiseMode(ViewportDenoiseMode::Off),
+                        tr(lang, "settings-canvas-aa"),
+                        Message::SetMenuSubmenu("view.aa"),
                     )
-                    .checked(layout.viewport_denoise == ViewportDenoiseMode::Off),
+                    .submenu(true)
+                    .on_hover(Message::SetMenuSubmenu("view.aa")),
                 ),
                 MenuEntry::Item(
                     MenuItem::new(
-                        tr(lang, "denoise-mode-light"),
-                        Message::SetViewportDenoiseMode(ViewportDenoiseMode::Light),
+                        tr(lang, "settings-viewport-denoise"),
+                        Message::SetMenuSubmenu("view.denoise"),
                     )
-                    .checked(layout.viewport_denoise == ViewportDenoiseMode::Light),
-                ),
-                MenuEntry::Item(
-                    MenuItem::new(
-                        tr(lang, "denoise-mode-medium"),
-                        Message::SetViewportDenoiseMode(ViewportDenoiseMode::Medium),
-                    )
-                    .checked(layout.viewport_denoise == ViewportDenoiseMode::Medium),
-                ),
-                MenuEntry::Item(
-                    MenuItem::new(
-                        tr(lang, "denoise-mode-strong"),
-                        Message::SetViewportDenoiseMode(ViewportDenoiseMode::Strong),
-                    )
-                    .checked(layout.viewport_denoise == ViewportDenoiseMode::Strong),
+                    .submenu(true)
+                    .on_hover(Message::SetMenuSubmenu("view.denoise")),
                 ),
                 MenuEntry::Separator,
                 MenuEntry::Item(
@@ -1311,8 +2087,129 @@ pub(super) fn build_active_menu(
                         Icon::Moon
                     }),
                 ),
-            ],
-        ),
+            ];
+            let mut submenus = Vec::new();
+            let (sub_entries_opt, parent_idx) = match sub_key {
+                Some("view.snap_to") => (
+                    Some(vec![
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "snap-to-guides"),
+                                Message::Editor(EditorMessage::ToggleSnap(
+                                    photon_editor::SnapTarget::Guides,
+                                )),
+                            )
+                            .checked(ui.snap.to_guides),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "snap-to-grid"),
+                                Message::Editor(EditorMessage::ToggleSnap(
+                                    photon_editor::SnapTarget::Grid,
+                                )),
+                            )
+                            .checked(ui.snap.to_grid),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "snap-to-canvas"),
+                                Message::Editor(EditorMessage::ToggleSnap(
+                                    photon_editor::SnapTarget::Canvas,
+                                )),
+                            )
+                            .checked(ui.snap.to_canvas),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "snap-to-layers"),
+                                Message::Editor(EditorMessage::ToggleSnap(
+                                    photon_editor::SnapTarget::Layers,
+                                )),
+                            )
+                            .checked(ui.snap.to_layers),
+                        ),
+                    ]),
+                    11usize,
+                ),
+                Some("view.aa") => (
+                    Some(vec![
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "aa-mode-crisp"),
+                                Message::SetAntiAliasingMode(CanvasAntiAliasingMode::Crisp),
+                            )
+                            .checked(layout.canvas_anti_aliasing == CanvasAntiAliasingMode::Crisp),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "aa-mode-smooth"),
+                                Message::SetAntiAliasingMode(CanvasAntiAliasingMode::Smooth),
+                            )
+                            .checked(layout.canvas_anti_aliasing == CanvasAntiAliasingMode::Smooth),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "aa-mode-high-quality"),
+                                Message::SetAntiAliasingMode(CanvasAntiAliasingMode::HighQuality),
+                            )
+                            .checked(
+                                layout.canvas_anti_aliasing == CanvasAntiAliasingMode::HighQuality,
+                            ),
+                        ),
+                    ]),
+                    13usize,
+                ),
+                Some("view.denoise") => (
+                    Some(vec![
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "denoise-mode-off"),
+                                Message::SetViewportDenoiseMode(ViewportDenoiseMode::Off),
+                            )
+                            .checked(layout.viewport_denoise == ViewportDenoiseMode::Off),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "denoise-mode-light"),
+                                Message::SetViewportDenoiseMode(ViewportDenoiseMode::Light),
+                            )
+                            .checked(layout.viewport_denoise == ViewportDenoiseMode::Light),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "denoise-mode-medium"),
+                                Message::SetViewportDenoiseMode(ViewportDenoiseMode::Medium),
+                            )
+                            .checked(layout.viewport_denoise == ViewportDenoiseMode::Medium),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::new(
+                                tr(lang, "denoise-mode-strong"),
+                                Message::SetViewportDenoiseMode(ViewportDenoiseMode::Strong),
+                            )
+                            .checked(layout.viewport_denoise == ViewportDenoiseMode::Strong),
+                        ),
+                    ]),
+                    14usize,
+                ),
+                _ => (None, 0),
+            };
+            if let Some(sub_entries) = sub_entries_opt {
+                let sub_h = photon_ui::menu::estimate_menu_height_with_spacing(&sub_entries);
+                let row_y = photon_ui::menu::estimate_entry_offset_y(&entries, parent_idx);
+                submenus.push(
+                    CascadingSubmenu::new(220.0, sub_h, menu_panel_entries(sub_entries, 220.0))
+                        .parent_row_offset_y(row_y),
+                );
+            }
+            let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+            return Some((
+                Some(360.0),
+                est_h,
+                menu_panel_entries(entries, 235.0),
+                submenus,
+            ));
+        }
         (Workspace::Editor, ActiveMenu::EditorWindow) => (
             Some(364.0),
             vec![
@@ -1536,5 +2433,11 @@ pub(super) fn build_active_menu(
         _ => return None,
     };
 
-    Some((offset, menu_panel_entries(entries, 230.0)))
+    let est_h = photon_ui::menu::estimate_menu_height_with_spacing(&entries);
+    Some((
+        offset,
+        est_h,
+        menu_panel_entries(entries, 230.0),
+        Vec::new(),
+    ))
 }

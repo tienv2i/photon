@@ -35,6 +35,7 @@ photonctl open-folder ~/Pictures
 photonctl edit /path/to/photo.png
 photonctl workspace viewer
 photonctl dispatch '{"type":"editor_rotate","degrees":90,"target":"whole_image"}' --expected-revision 4
+photonctl dispatch '{"type":"editor_save_selection","name":"Hero","op":"replace"}'
 photonctl dispatch '{"type":"plugin_refresh"}'
 photonctl dispatch '{"type":"plugin_run","id":"photon.utils","params":{"action":"utils.strip_exif"}}'
 photonctl query state

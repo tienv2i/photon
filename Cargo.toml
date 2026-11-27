@@ -17,6 +17,9 @@ members = [
     "crates/photon-editor",
     "crates/photon-cli",
     "crates/photon-desktop",
+    "crates/photon-app-manager",
+    "crates/photon-app-viewer",
+    "crates/photon-app-editor",
 ]
 
 [workspace.package]

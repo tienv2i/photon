@@ -690,9 +690,12 @@ impl EditorDocument {
                             bottom,
                         );
                     }
+                    if active.lock_alpha {
+                        preserve_alpha_channel(&before_pixels, &mut next);
+                    }
                     active.pixels = Arc::new(next);
                 } else {
-                    let painted = pixels::paint_stroke_with_brush_clipped(
+                    let mut painted = pixels::paint_stroke_with_brush_clipped(
                         &active.pixels,
                         &local_pts,
                         color,
@@ -702,6 +705,9 @@ impl EditorDocument {
                         brush,
                         sel_snapshot.as_ref().map(|s| (s, ox_i, oy_i)),
                     );
+                    if active.lock_alpha {
+                        preserve_alpha_channel(&before_pixels, &mut painted);
+                    }
                     active.pixels = Arc::new(painted);
                 }
             }
@@ -712,7 +718,7 @@ impl EditorDocument {
             } => {
                 let local_pts: Vec<[f64; 2]> =
                     points.iter().map(|[x, y]| [x - ox, y - oy]).collect();
-                let warped = liquify::liquify_stroke(
+                let mut warped = liquify::liquify_stroke(
                     &active.pixels,
                     active.original.as_deref(),
                     &local_pts,
@@ -720,6 +726,9 @@ impl EditorDocument {
                     radius,
                     strength,
                 );
+                if active.lock_alpha {
+                    preserve_alpha_channel(&before_pixels, &mut warped);
+                }
                 active.pixels = Arc::new(warped);
             }
             LiveStrokeKind::Healing {
@@ -743,7 +752,7 @@ impl EditorDocument {
                 let sel_ref = sel_snapshot
                     .as_ref()
                     .map(|s| (s, active.offset_x, active.offset_y));
-                let healed = healing::healing_stroke_with_reference(
+                let mut healed = healing::healing_stroke_with_reference(
                     &active.pixels,
                     &before_pixels,
                     &local_pts,
@@ -754,6 +763,9 @@ impl EditorDocument {
                     brush,
                     sel_ref,
                 );
+                if active.lock_alpha {
+                    preserve_alpha_channel(&before_pixels, &mut healed);
+                }
                 active.pixels = Arc::new(healed);
             }
         }
@@ -1424,7 +1436,8 @@ impl EditorDocument {
             let ox = f64::from(ox_i);
             let oy = f64::from(oy_i);
             let local_pts: Vec<[f64; 2]> = points.iter().map(|[x, y]| [x - ox, y - oy]).collect();
-            let next = pixels::paint_stroke_with_brush_clipped(
+            let lock_alpha = active.lock_alpha;
+            let mut next = pixels::paint_stroke_with_brush_clipped(
                 &active.pixels,
                 &local_pts,
                 *color,
@@ -1434,6 +1447,9 @@ impl EditorDocument {
                 *brush,
                 sel_snapshot.as_ref().map(|s| (s, ox_i, oy_i)),
             );
+            if lock_alpha {
+                preserve_alpha_channel(&active.pixels, &mut next);
+            }
             self.stack.active_layer_mut().pixels = Arc::new(next);
             return Ok(());
         }
@@ -1456,7 +1472,7 @@ impl EditorDocument {
             let ox = f64::from(active.offset_x);
             let oy = f64::from(active.offset_y);
             let local_pts: Vec<[f64; 2]> = points.iter().map(|[x, y]| [x - ox, y - oy]).collect();
-            let next = liquify::liquify_stroke(
+            let mut next = liquify::liquify_stroke(
                 &active.pixels,
                 active.original.as_deref(),
                 &local_pts,
@@ -1464,6 +1480,9 @@ impl EditorDocument {
                 *radius,
                 *strength,
             );
+            if active.lock_alpha {
+                preserve_alpha_channel(&active.pixels, &mut next);
+            }
             self.stack.active_layer_mut().pixels = Arc::new(next);
             return Ok(());
         }
@@ -1497,7 +1516,7 @@ impl EditorDocument {
             let sel_ref = sel_snapshot
                 .as_ref()
                 .map(|s| (s, active.offset_x, active.offset_y));
-            let next = healing::healing_stroke(
+            let mut next = healing::healing_stroke(
                 &active.pixels,
                 &local_pts,
                 *mode,
@@ -1507,6 +1526,9 @@ impl EditorDocument {
                 *brush,
                 sel_ref,
             );
+            if active.lock_alpha {
+                preserve_alpha_channel(&active.pixels, &mut next);
+            }
             self.stack.active_layer_mut().pixels = Arc::new(next);
             return Ok(());
         }
@@ -1640,6 +1662,9 @@ impl EditorDocument {
                 render_drawing_op(&active.pixels, op, ox_i, oy_i, sel_snapshot.as_ref(), false);
             if let Some(ref sel) = sel_snapshot {
                 clip_rgba_by_selection(&active.pixels, &mut next, ox_i, oy_i, sel);
+            }
+            if active.lock_alpha {
+                preserve_alpha_channel(&active.pixels, &mut next);
             }
             self.stack.active_layer_mut().pixels = Arc::new(next);
             return Ok(());
@@ -1896,6 +1921,33 @@ impl EditorDocument {
         self.stack.selection.quick_mask_active
     }
 
+    pub fn save_selection(
+        &mut self,
+        name: String,
+        target_id: Option<u64>,
+        op: SelectionBooleanOp,
+    ) -> u64 {
+        let id = self.stack.selection.save_selection(name, target_id, op);
+        self.selection_revision += 1;
+        id
+    }
+
+    pub fn load_selection(&mut self, id: u64, op: SelectionBooleanOp, invert: bool) -> bool {
+        let ok = self.stack.selection.load_selection(id, op, invert);
+        if ok {
+            self.selection_revision += 1;
+        }
+        ok
+    }
+
+    pub fn delete_saved_selection(&mut self, id: u64) -> bool {
+        let ok = self.stack.selection.delete_saved_selection(id);
+        if ok {
+            self.selection_revision += 1;
+        }
+        ok
+    }
+
     pub fn select_from_layer_alpha(&mut self, op: SelectionBooleanOp) {
         let (cw, ch) = (self.stack.canvas_width, self.stack.canvas_height);
         let active = self.stack.active_layer();
@@ -1923,6 +1975,9 @@ impl EditorDocument {
         let active = self.stack.active_layer();
         if active.locked {
             return Err(ImageError::coded("layer_locked"));
+        }
+        if active.lock_alpha {
+            return Ok(());
         }
         let (lw, lh) = active.dimensions();
         let ox = active.offset_x;
@@ -1959,6 +2014,9 @@ impl EditorDocument {
         let active = self.stack.active_layer();
         if active.locked {
             return Err(ImageError::coded("layer_locked"));
+        }
+        if active.lock_alpha {
+            return Ok(());
         }
         let before = self.stack.clone();
         let (lw, lh) = active.dimensions();
@@ -2406,6 +2464,16 @@ fn render_drawing_op(
             )
         }
         _ => src.clone(),
+    }
+}
+
+#[inline]
+fn preserve_alpha_channel(before: &RgbaImage, next: &mut RgbaImage) {
+    if before.dimensions() != next.dimensions() {
+        return;
+    }
+    for (dst, src) in next.pixels_mut().zip(before.pixels()) {
+        dst.0[3] = src.0[3];
     }
 }
 
@@ -3066,6 +3134,8 @@ mod tests {
             name: None,
             visible: None,
             locked: None,
+            clipped_to_below: None,
+            lock_alpha: None,
             opacity: Some(0.5),
             blend_mode: Some(BlendMode::Multiply),
             offset_x: None,
@@ -3165,6 +3235,8 @@ mod tests {
             name: None,
             visible: None,
             locked: None,
+            clipped_to_below: None,
+            lock_alpha: None,
             opacity: None,
             blend_mode: None,
             offset_x: Some(4),
@@ -3687,6 +3759,8 @@ mod tests {
                 name: None,
                 visible: Some(true),
                 locked: None,
+                clipped_to_below: None,
+                lock_alpha: None,
                 opacity: Some(0.75),
                 blend_mode: Some(BlendMode::Multiply),
                 offset_x: None,

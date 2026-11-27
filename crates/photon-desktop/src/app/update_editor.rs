@@ -48,6 +48,10 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
             state.editor_ui.apply_to_selection = v;
             Task::none()
         }
+        Message::EditorToggleAdjustLivePreview => {
+            state.editor_ui.adjust_live_preview = !state.editor_ui.adjust_live_preview;
+            Task::none()
+        }
         Message::EditorResetPendingAdjustments => {
             state.pending_adj = ColorAdjustments::default();
             state.editor_ui.reset_adjustments();
@@ -177,9 +181,11 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
                 state.editor_ui.ai_subtool = tool;
             }
             if tool == EditorTool::Crop {
-                if state.crop_uv.is_none() && state.snapshot.meta.editor.is_some() {
-                    state.crop_uv = Some([0.1, 0.1, 0.9, 0.9]);
+                if state.crop_uv.is_none() {
+                    state.crop_uv =
+                        initial_crop_uv_from_editor(state.snapshot.meta.editor.as_ref());
                 }
+                state.pending_focus_widget = Some("photon.tool.first_input");
             } else {
                 state.crop_uv = None;
             }
@@ -940,9 +946,10 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
             Task::none()
         }
         Message::EditorApplyGradientDraft => {
-            let Some((start, end)) = state.editor_ui.gradient_draft.take() else {
+            let Some((start, end)) = state.editor_ui.gradient_draft else {
                 return Task::none();
             };
+            state.pending_preview_commit_rev = state.editor_frame.as_ref().map(|f| f.revision);
             dispatch_to_core(
                 state.core.clone(),
                 build_draw_gradient_command(&state.editor_ui, start, end),
@@ -1053,6 +1060,333 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
                 },
             )
         }
+        Message::OpenSaveSelectionDialog => {
+            if let Some(ed) = state.snapshot.meta.editor.as_ref()
+                && ed.selection.has_selection
+            {
+                let next_idx = ed.selection.saved_selections.len() + 1;
+                state.dialog = Some(InAppDialog::SaveSelection {
+                    name: format!("Selection {next_idx}"),
+                    target_id: None,
+                    op: SelectionBooleanOp::Replace,
+                    error: None,
+                });
+                open_dialog_window(state, DesktopDialogId::SaveSelection);
+            }
+            Task::none()
+        }
+        Message::SaveSelectionNameChanged(v) => {
+            if let Some(InAppDialog::SaveSelection { name, error, .. }) = &mut state.dialog {
+                *name = v;
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::SaveSelectionTargetChanged(tid) => {
+            if let Some(InAppDialog::SaveSelection {
+                target_id,
+                name,
+                error,
+                ..
+            }) = &mut state.dialog
+            {
+                *target_id = tid;
+                if let Some(id) = tid
+                    && let Some(ed) = state.snapshot.meta.editor.as_ref()
+                    && let Some(ch) = ed.selection.saved_selections.iter().find(|s| s.id == id)
+                {
+                    *name = ch.name.clone();
+                }
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::SaveSelectionOpChanged(new_op) => {
+            if let Some(InAppDialog::SaveSelection { op, .. }) = &mut state.dialog {
+                *op = new_op;
+            }
+            Task::none()
+        }
+        Message::ConfirmSaveSelection => {
+            let Some(InAppDialog::SaveSelection {
+                name,
+                target_id,
+                op,
+                ..
+            }) = state.dialog.take()
+            else {
+                return Task::none();
+            };
+            state.dialog_manager.close(&DesktopDialogId::SaveSelection);
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorSaveSelection {
+                    name,
+                    target_id,
+                    op,
+                },
+            )
+        }
+        Message::OpenLoadSelectionDialog => {
+            if let Some(ed) = state.snapshot.meta.editor.as_ref() {
+                let first_id = ed.selection.saved_selections.first().map(|s| s.id);
+                if first_id.is_some() {
+                    state.dialog = Some(InAppDialog::LoadSelection {
+                        selected_id: first_id,
+                        op: SelectionBooleanOp::Replace,
+                        invert: false,
+                        error: None,
+                    });
+                    open_dialog_window(state, DesktopDialogId::LoadSelection);
+                }
+            }
+            Task::none()
+        }
+        Message::LoadSelectionSelectedChanged(id) => {
+            if let Some(InAppDialog::LoadSelection {
+                selected_id, error, ..
+            }) = &mut state.dialog
+            {
+                *selected_id = Some(id);
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::LoadSelectionOpChanged(new_op) => {
+            if let Some(InAppDialog::LoadSelection { op, .. }) = &mut state.dialog {
+                *op = new_op;
+            }
+            Task::none()
+        }
+        Message::LoadSelectionInvertChanged(inv) => {
+            if let Some(InAppDialog::LoadSelection { invert, .. }) = &mut state.dialog {
+                *invert = inv;
+            }
+            Task::none()
+        }
+        Message::DeleteSavedSelection(id) => {
+            if let Some(InAppDialog::LoadSelection { selected_id, .. }) = &mut state.dialog
+                && *selected_id == Some(id)
+            {
+                *selected_id = state.snapshot.meta.editor.as_ref().and_then(|ed| {
+                    ed.selection
+                        .saved_selections
+                        .iter()
+                        .find(|s| s.id != id)
+                        .map(|s| s.id)
+                });
+            }
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorDeleteSavedSelection { id },
+            )
+        }
+        Message::ConfirmLoadSelection => {
+            let Some(InAppDialog::LoadSelection {
+                selected_id,
+                op,
+                invert,
+                ..
+            }) = state.dialog.clone()
+            else {
+                return Task::none();
+            };
+            let Some(id) = selected_id else {
+                return Task::none();
+            };
+            state.dialog = None;
+            state.dialog_manager.close(&DesktopDialogId::LoadSelection);
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorLoadSelection { id, op, invert },
+            )
+        }
+        Message::OpenNewGuideDialog => {
+            if state.snapshot.meta.editor.is_some() {
+                state.dialog = Some(InAppDialog::NewGuide {
+                    axis: photon_canvas::GuideAxis::Vertical,
+                    value_input: "50".to_string(),
+                    unit_percent: true,
+                    error: None,
+                });
+                open_dialog_window(state, DesktopDialogId::NewGuide);
+            }
+            Task::none()
+        }
+        Message::NewGuideAxisChanged(new_axis) => {
+            if let Some(InAppDialog::NewGuide { axis, error, .. }) = &mut state.dialog {
+                *axis = new_axis;
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::NewGuideValueChanged(v) => {
+            if let Some(InAppDialog::NewGuide {
+                value_input, error, ..
+            }) = &mut state.dialog
+            {
+                *value_input = v;
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::NewGuideUnitChanged(pct) => {
+            if let Some(InAppDialog::NewGuide {
+                unit_percent,
+                error,
+                ..
+            }) = &mut state.dialog
+            {
+                *unit_percent = pct;
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::ConfirmNewGuide => {
+            let Some(InAppDialog::NewGuide {
+                axis,
+                value_input,
+                unit_percent,
+                ..
+            }) = state.dialog.clone()
+            else {
+                return Task::none();
+            };
+            let Some(ed) = state.snapshot.meta.editor.as_ref() else {
+                return Task::none();
+            };
+            let max_px = match axis {
+                photon_canvas::GuideAxis::Horizontal => ed.height.max(1) as f32,
+                photon_canvas::GuideAxis::Vertical => ed.width.max(1) as f32,
+            };
+            let Ok(raw) = value_input.trim().parse::<f32>() else {
+                if let Some(InAppDialog::NewGuide { error, .. }) = &mut state.dialog {
+                    *error = Some(tr(state.snapshot.meta.language, "error-invalid-number"));
+                }
+                return Task::none();
+            };
+            let pos_px = if unit_percent {
+                (raw / 100.0) * max_px
+            } else {
+                raw
+            };
+            if !pos_px.is_finite() || pos_px < 0.0 || pos_px > max_px {
+                if let Some(InAppDialog::NewGuide { error, .. }) = &mut state.dialog {
+                    *error = Some(tr(state.snapshot.meta.language, "error-invalid-number"));
+                }
+                return Task::none();
+            }
+            state.dialog = None;
+            state.dialog_manager.close(&DesktopDialogId::NewGuide);
+            let id = state.editor_ui.next_guide_id;
+            state.editor_ui.next_guide_id += 1;
+            state.editor_ui.show_guides = true;
+            state.editor_ui.guides.push(photon_canvas::EditorGuide {
+                id,
+                axis,
+                position_px: pos_px.round(),
+            });
+            Task::none()
+        }
+        Message::OpenGridSettingsDialog => {
+            state.dialog = Some(InAppDialog::GridSettings {
+                spacing_input: format!("{}", state.editor_ui.grid_spacing_px.round() as u32),
+                subdivisions_input: format!("{}", state.editor_ui.grid_subdivisions),
+                opacity_input: format!("{}", (state.editor_ui.grid_opacity * 100.0).round() as u32),
+                show_grid: state.editor_ui.show_grid,
+                snap_to_grid: state.editor_ui.snap.to_grid,
+                error: None,
+            });
+            open_dialog_window(state, DesktopDialogId::GridSettings);
+            Task::none()
+        }
+        Message::GridSettingsSpacingChanged(v) => {
+            if let Some(InAppDialog::GridSettings {
+                spacing_input,
+                error,
+                ..
+            }) = &mut state.dialog
+            {
+                *spacing_input = v;
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::GridSettingsSubdivisionsChanged(v) => {
+            if let Some(InAppDialog::GridSettings {
+                subdivisions_input,
+                error,
+                ..
+            }) = &mut state.dialog
+            {
+                *subdivisions_input = v;
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::GridSettingsOpacityChanged(v) => {
+            if let Some(InAppDialog::GridSettings {
+                opacity_input,
+                error,
+                ..
+            }) = &mut state.dialog
+            {
+                *opacity_input = v;
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::GridSettingsShowGridChanged(v) => {
+            if let Some(InAppDialog::GridSettings { show_grid, .. }) = &mut state.dialog {
+                *show_grid = v;
+            }
+            Task::none()
+        }
+        Message::GridSettingsSnapChanged(v) => {
+            if let Some(InAppDialog::GridSettings { snap_to_grid, .. }) = &mut state.dialog {
+                *snap_to_grid = v;
+            }
+            Task::none()
+        }
+        Message::ConfirmGridSettings => {
+            let Some(InAppDialog::GridSettings {
+                spacing_input,
+                subdivisions_input,
+                opacity_input,
+                show_grid,
+                snap_to_grid,
+                ..
+            }) = state.dialog.clone()
+            else {
+                return Task::none();
+            };
+            let Ok(spacing) = spacing_input.trim().parse::<f32>() else {
+                if let Some(InAppDialog::GridSettings { error, .. }) = &mut state.dialog {
+                    *error = Some(tr(state.snapshot.meta.language, "error-invalid-number"));
+                }
+                return Task::none();
+            };
+            let Ok(subdivisions) = subdivisions_input.trim().parse::<u32>() else {
+                if let Some(InAppDialog::GridSettings { error, .. }) = &mut state.dialog {
+                    *error = Some(tr(state.snapshot.meta.language, "error-invalid-number"));
+                }
+                return Task::none();
+            };
+            let Ok(opacity_pct) = opacity_input.trim().parse::<f32>() else {
+                if let Some(InAppDialog::GridSettings { error, .. }) = &mut state.dialog {
+                    *error = Some(tr(state.snapshot.meta.language, "error-invalid-number"));
+                }
+                return Task::none();
+            };
+            state.editor_ui.grid_spacing_px = spacing.clamp(8.0, 512.0);
+            state.editor_ui.grid_subdivisions = subdivisions.clamp(1, 16);
+            state.editor_ui.grid_opacity = (opacity_pct / 100.0).clamp(0.1, 2.0);
+            state.editor_ui.show_grid = show_grid;
+            state.editor_ui.snap.to_grid = snap_to_grid;
+            state.dialog = None;
+            state.dialog_manager.close(&DesktopDialogId::GridSettings);
+            Task::none()
+        }
         Message::EditorSetTransformSpec(spec) => {
             state.editor_ui.transform_spec = spec;
             if let Some(tp) = &mut state.transform_preview {
@@ -1113,13 +1447,11 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
         Message::EditorTransformCommit => {
             let spec = state.editor_ui.transform_spec;
             let layer_id = state.transform_layer_id;
-            state.editor_ui.transform_spec = LayerTransformSpec::default();
-            state.transform_preview = None;
-            state.transform_layer_id = None;
             if state.editor_ui.tool == EditorTool::Transform {
                 state.editor_ui.tool = EditorTool::Pointer;
             }
             if !spec.is_identity() {
+                state.pending_preview_commit_rev = state.editor_frame.as_ref().map(|f| f.revision);
                 return dispatch_to_core(
                     state.core.clone(),
                     Command::EditorTransformLayer {
@@ -1128,6 +1460,9 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
                     },
                 );
             }
+            state.editor_ui.transform_spec = LayerTransformSpec::default();
+            state.transform_preview = None;
+            state.transform_layer_id = None;
             if state.editor_ui.tool == EditorTool::Pointer && state.snapshot.meta.editor.is_some() {
                 let active_id = state
                     .snapshot
@@ -1437,8 +1772,12 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
         Message::EditorApplyRotateAngle => {
             let degrees = state.editor_ui.rotate_angle;
             let fill = state.editor_ui.rotate_fill;
-            state.editor_ui.rotate_angle = 0.0;
             state.editor_ui.tool = EditorTool::Pointer;
+            if degrees.abs() > 1e-4 {
+                state.pending_preview_commit_rev = state.editor_frame.as_ref().map(|f| f.revision);
+            } else {
+                state.editor_ui.rotate_angle = 0.0;
+            }
             dispatch_to_core(
                 state.core.clone(),
                 Command::EditorRotateAngle {
@@ -1590,6 +1929,8 @@ pub(super) fn handle_editor_message(state: &mut PhotonGui, message: Message) -> 
                     name: Some(name),
                     visible: None,
                     locked: None,
+                    clipped_to_below: None,
+                    lock_alpha: None,
                     opacity: None,
                     blend_mode: None,
                     offset_x: None,
@@ -1723,6 +2064,11 @@ pub(super) fn dispatch_editor_shortcut(
             update(state, Message::EditorSelectTool(EditorTool::Liquify))
         }
         EditorShortcutAction::SwapForegroundBackground => update(state, Message::EditorSwapColors),
+        EditorShortcutAction::ResetDefaultColors => {
+            state.editor_ui.fg_color = [0, 0, 0];
+            state.editor_ui.bg_color = Some([255, 255, 255]);
+            Task::none()
+        }
         EditorShortcutAction::ToggleQuickMask => {
             dispatch_to_core(state.core.clone(), Command::EditorSelectToggleQuickMask)
         }
@@ -1733,6 +2079,21 @@ pub(super) fn dispatch_editor_shortcut(
                     Message::EditorSetHealingRadius(
                         (state.editor_ui.healing_radius - 2.0).max(1.0),
                     ),
+                )
+            } else if matches!(
+                state.editor_ui.tool,
+                EditorTool::BezierPen
+                    | EditorTool::DrawLine
+                    | EditorTool::DrawRect
+                    | EditorTool::DrawEllipse
+                    | EditorTool::DrawPolygon
+                    | EditorTool::DrawPolyline
+            ) {
+                update(
+                    state,
+                    Message::Editor(EditorMessage::EditorSetShapeStrokeWidth(
+                        (state.editor_ui.shape_stroke_width - 1.0).max(1.0),
+                    )),
                 )
             } else {
                 update(
@@ -1748,6 +2109,21 @@ pub(super) fn dispatch_editor_shortcut(
                     Message::EditorSetHealingRadius(
                         (state.editor_ui.healing_radius + 2.0).min(200.0),
                     ),
+                )
+            } else if matches!(
+                state.editor_ui.tool,
+                EditorTool::BezierPen
+                    | EditorTool::DrawLine
+                    | EditorTool::DrawRect
+                    | EditorTool::DrawEllipse
+                    | EditorTool::DrawPolygon
+                    | EditorTool::DrawPolyline
+            ) {
+                update(
+                    state,
+                    Message::Editor(EditorMessage::EditorSetShapeStrokeWidth(
+                        (state.editor_ui.shape_stroke_width + 1.0).min(64.0),
+                    )),
                 )
             } else {
                 update(
@@ -1828,8 +2204,25 @@ pub(super) fn dispatch_editor_shortcut(
         EditorShortcutAction::DuplicateLayer => {
             if has_selection {
                 dispatch_to_core(state.core.clone(), Command::EditorSelectionDuplicateLayer)
+            } else if state.editor_ui.selected_layer_ids.len() >= 2 {
+                dispatch_to_core(
+                    state.core.clone(),
+                    Command::EditorLayerDuplicateMultiple {
+                        ids: state.editor_ui.selected_layer_ids.clone(),
+                    },
+                )
             } else if let Some(id) = active_layer_id {
                 dispatch_to_core(state.core.clone(), Command::EditorLayerDuplicate { id })
+            } else {
+                Task::none()
+            }
+        }
+        EditorShortcutAction::LayerViaCut => {
+            if has_selection {
+                dispatch_to_core(
+                    state.core.clone(),
+                    Command::EditorLayerFromSelection { cut: true },
+                )
             } else {
                 Task::none()
             }
@@ -1841,10 +2234,36 @@ pub(super) fn dispatch_editor_shortcut(
                 Task::none()
             }
         }
+        EditorShortcutAction::StampVisible => {
+            dispatch_to_core(state.core.clone(), Command::EditorLayerStampVisible)
+        }
+        EditorShortcutAction::ToggleClippingMask => {
+            if let Some(id) = active_layer_id {
+                dispatch_to_core(
+                    state.core.clone(),
+                    Command::EditorLayerToggleClippingMask { id: Some(id) },
+                )
+            } else {
+                Task::none()
+            }
+        }
         EditorShortcutAction::ZoomIn => update(state, Message::ZoomStep(1.25)),
         EditorShortcutAction::ZoomOut => update(state, Message::ZoomStep(0.8)),
         EditorShortcutAction::ZoomFit => update(state, Message::Canvas(CanvasEvent::ResetFit)),
         EditorShortcutAction::ZoomActual => update(state, Message::EditorZoomActual),
+        EditorShortcutAction::ToggleRulers => {
+            handle_editor_vector_text_message(state, EditorMessage::ToggleRulers)
+        }
+        EditorShortcutAction::ToggleGrid => {
+            handle_editor_vector_text_message(state, EditorMessage::ToggleGrid)
+        }
+        EditorShortcutAction::ToggleGuides => {
+            handle_editor_vector_text_message(state, EditorMessage::ToggleGuides)
+        }
+        EditorShortcutAction::ToggleSnap => handle_editor_vector_text_message(
+            state,
+            EditorMessage::ToggleSnap(photon_editor::SnapTarget::Master),
+        ),
     }
 }
 
@@ -2062,6 +2481,77 @@ pub(super) fn handle_editor_ai_message(state: &mut PhotonGui, msg: EditorMessage
             ui.ai_caption_draft = text.clone();
             dispatch_to_core(state.core.clone(), Command::EditorSaveCaption { text })
         }
+        EditorMessage::ToggleRulers => {
+            state.editor_ui.show_rulers = !state.editor_ui.show_rulers;
+            Task::none()
+        }
+        EditorMessage::ToggleGrid => {
+            state.editor_ui.show_grid = !state.editor_ui.show_grid;
+            Task::none()
+        }
+        EditorMessage::SetGridSpacing(px) => {
+            state.editor_ui.grid_spacing_px = px.clamp(8.0, 512.0);
+            Task::none()
+        }
+        EditorMessage::SetGridSettings {
+            spacing_px,
+            subdivisions,
+            opacity,
+        } => {
+            state.editor_ui.grid_spacing_px = spacing_px.clamp(8.0, 512.0);
+            state.editor_ui.grid_subdivisions = subdivisions.clamp(1, 16);
+            state.editor_ui.grid_opacity = opacity.clamp(0.1, 2.0);
+            Task::none()
+        }
+        EditorMessage::ToggleGuides => {
+            state.editor_ui.show_guides = !state.editor_ui.show_guides;
+            Task::none()
+        }
+        EditorMessage::ToggleLockGuides => {
+            state.editor_ui.lock_guides = !state.editor_ui.lock_guides;
+            Task::none()
+        }
+        EditorMessage::ClearGuides => {
+            state.editor_ui.guides.clear();
+            state.editor_ui.pending_guide_preview = None;
+            Task::none()
+        }
+        EditorMessage::AddGuide(axis, pos_px) => {
+            let id = state.editor_ui.next_guide_id;
+            state.editor_ui.next_guide_id += 1;
+            state.editor_ui.show_guides = true;
+            state.editor_ui.pending_guide_preview = None;
+            state.editor_ui.guides.push(photon_canvas::EditorGuide {
+                id,
+                axis,
+                position_px: pos_px.round(),
+            });
+            Task::none()
+        }
+        EditorMessage::SetPendingGuidePreview(preview) => {
+            state.editor_ui.pending_guide_preview = preview;
+            Task::none()
+        }
+        EditorMessage::ToggleSnap(target) => {
+            match target {
+                photon_editor::SnapTarget::Master => {
+                    state.editor_ui.snap.enabled = !state.editor_ui.snap.enabled;
+                }
+                photon_editor::SnapTarget::Guides => {
+                    state.editor_ui.snap.to_guides = !state.editor_ui.snap.to_guides;
+                }
+                photon_editor::SnapTarget::Grid => {
+                    state.editor_ui.snap.to_grid = !state.editor_ui.snap.to_grid;
+                }
+                photon_editor::SnapTarget::Canvas => {
+                    state.editor_ui.snap.to_canvas = !state.editor_ui.snap.to_canvas;
+                }
+                photon_editor::SnapTarget::Layers => {
+                    state.editor_ui.snap.to_layers = !state.editor_ui.snap.to_layers;
+                }
+            }
+            Task::none()
+        }
         _ => Task::none(),
     }
 }
@@ -2078,6 +2568,135 @@ pub(super) fn handle_editor_vector_text_message(
         EditorMessage::EditorSetShapeCornerRadius(radius) => {
             state.editor_ui.shape_corner_radius = radius.clamp(0.0, 120.0);
             Task::none()
+        }
+        EditorMessage::EditorSetAlignTarget(target) => {
+            state.editor_ui.align_target = target;
+            Task::none()
+        }
+        EditorMessage::EditorLayerRowClicked(id) => {
+            if state.shift_held {
+                if let Some(ed) = &state.snapshot.meta.editor {
+                    let anchor = state
+                        .editor_ui
+                        .layer_anchor_id
+                        .unwrap_or(ed.active_layer_id);
+                    if let (Some(a_idx), Some(b_idx)) = (
+                        ed.layers.iter().position(|l| l.id == anchor),
+                        ed.layers.iter().position(|l| l.id == id),
+                    ) {
+                        let lo = a_idx.min(b_idx);
+                        let hi = a_idx.max(b_idx);
+                        state.editor_ui.selected_layer_ids =
+                            ed.layers[lo..=hi].iter().map(|l| l.id).collect();
+                        return Task::none();
+                    }
+                }
+                Task::none()
+            } else if state.ctrl_held {
+                if let Some(pos) = state
+                    .editor_ui
+                    .selected_layer_ids
+                    .iter()
+                    .position(|&lid| lid == id)
+                {
+                    state.editor_ui.selected_layer_ids.remove(pos);
+                } else {
+                    if state.editor_ui.selected_layer_ids.is_empty()
+                        && let Some(ed) = &state.snapshot.meta.editor
+                        && ed.active_layer_id != id
+                    {
+                        state.editor_ui.selected_layer_ids.push(ed.active_layer_id);
+                    }
+                    state.editor_ui.selected_layer_ids.push(id);
+                }
+                state.editor_ui.layer_anchor_id = Some(id);
+                Task::none()
+            } else {
+                state.editor_ui.selected_layer_ids.clear();
+                state.editor_ui.layer_anchor_id = Some(id);
+                dispatch_to_core(state.core.clone(), Command::EditorLayerSelect { id })
+            }
+        }
+        EditorMessage::EditorBeginDragLayer(id) => {
+            state.editor_ui.dragging_layer_id = Some(id);
+            Task::none()
+        }
+        EditorMessage::EditorDropLayer(target_id) => {
+            let Some(drag_id) = state.editor_ui.dragging_layer_id.take() else {
+                return Task::none();
+            };
+            if drag_id == target_id {
+                return Task::none();
+            }
+            if let Some(ed) = &state.snapshot.meta.editor
+                && let Some(new_index) = ed.layers.iter().position(|l| l.id == target_id)
+            {
+                return dispatch_to_core(
+                    state.core.clone(),
+                    Command::EditorLayerReorder {
+                        id: drag_id,
+                        new_index,
+                    },
+                );
+            }
+            Task::none()
+        }
+        EditorMessage::EditorToggleLayerMultiSelect(id) => {
+            if let Some(pos) = state
+                .editor_ui
+                .selected_layer_ids
+                .iter()
+                .position(|&lid| lid == id)
+            {
+                state.editor_ui.selected_layer_ids.remove(pos);
+            } else {
+                if state.editor_ui.selected_layer_ids.is_empty()
+                    && let Some(ed) = &state.snapshot.meta.editor
+                    && ed.active_layer_id != id
+                {
+                    state.editor_ui.selected_layer_ids.push(ed.active_layer_id);
+                }
+                state.editor_ui.selected_layer_ids.push(id);
+            }
+            Task::none()
+        }
+        EditorMessage::EditorAlignObjects(op) => {
+            let shape_ids = state
+                .snapshot
+                .meta
+                .editor
+                .as_ref()
+                .and_then(|ed| ed.active_vector_data.as_ref())
+                .map(|v| v.selected_shape_ids.clone())
+                .unwrap_or_default();
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorAlignObjects {
+                    op,
+                    target: state.editor_ui.align_target,
+                    layer_ids: state.editor_ui.selected_layer_ids.clone(),
+                    shape_ids,
+                },
+            )
+        }
+        EditorMessage::EditorDistributeObjects(op) => {
+            let shape_ids = state
+                .snapshot
+                .meta
+                .editor
+                .as_ref()
+                .and_then(|ed| ed.active_vector_data.as_ref())
+                .map(|v| v.selected_shape_ids.clone())
+                .unwrap_or_default();
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorDistributeObjects {
+                    op,
+                    layer_ids: state.editor_ui.selected_layer_ids.clone(),
+                    shape_ids,
+                    fixed_gap_px: None,
+                },
+            )
         }
         EditorMessage::EditorSelectVectorNode(idx) => {
             state.editor_ui.selected_vector_node = idx;
@@ -2312,6 +2931,77 @@ pub(super) fn handle_editor_vector_text_message(
                     },
                 )
             }
+        }
+        EditorMessage::ToggleRulers => {
+            state.editor_ui.show_rulers = !state.editor_ui.show_rulers;
+            Task::none()
+        }
+        EditorMessage::ToggleGrid => {
+            state.editor_ui.show_grid = !state.editor_ui.show_grid;
+            Task::none()
+        }
+        EditorMessage::SetGridSpacing(px) => {
+            state.editor_ui.grid_spacing_px = px.clamp(8.0, 512.0);
+            Task::none()
+        }
+        EditorMessage::SetGridSettings {
+            spacing_px,
+            subdivisions,
+            opacity,
+        } => {
+            state.editor_ui.grid_spacing_px = spacing_px.clamp(8.0, 512.0);
+            state.editor_ui.grid_subdivisions = subdivisions.clamp(1, 16);
+            state.editor_ui.grid_opacity = opacity.clamp(0.1, 2.0);
+            Task::none()
+        }
+        EditorMessage::ToggleGuides => {
+            state.editor_ui.show_guides = !state.editor_ui.show_guides;
+            Task::none()
+        }
+        EditorMessage::ToggleLockGuides => {
+            state.editor_ui.lock_guides = !state.editor_ui.lock_guides;
+            Task::none()
+        }
+        EditorMessage::ClearGuides => {
+            state.editor_ui.guides.clear();
+            state.editor_ui.pending_guide_preview = None;
+            Task::none()
+        }
+        EditorMessage::AddGuide(axis, pos_px) => {
+            let id = state.editor_ui.next_guide_id;
+            state.editor_ui.next_guide_id += 1;
+            state.editor_ui.show_guides = true;
+            state.editor_ui.pending_guide_preview = None;
+            state.editor_ui.guides.push(photon_canvas::EditorGuide {
+                id,
+                axis,
+                position_px: pos_px.round(),
+            });
+            Task::none()
+        }
+        EditorMessage::SetPendingGuidePreview(preview) => {
+            state.editor_ui.pending_guide_preview = preview;
+            Task::none()
+        }
+        EditorMessage::ToggleSnap(target) => {
+            match target {
+                photon_editor::SnapTarget::Master => {
+                    state.editor_ui.snap.enabled = !state.editor_ui.snap.enabled;
+                }
+                photon_editor::SnapTarget::Guides => {
+                    state.editor_ui.snap.to_guides = !state.editor_ui.snap.to_guides;
+                }
+                photon_editor::SnapTarget::Grid => {
+                    state.editor_ui.snap.to_grid = !state.editor_ui.snap.to_grid;
+                }
+                photon_editor::SnapTarget::Canvas => {
+                    state.editor_ui.snap.to_canvas = !state.editor_ui.snap.to_canvas;
+                }
+                photon_editor::SnapTarget::Layers => {
+                    state.editor_ui.snap.to_layers = !state.editor_ui.snap.to_layers;
+                }
+            }
+            Task::none()
         }
         _ => Task::none(),
     }

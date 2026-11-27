@@ -45,8 +45,8 @@ use photon_ui::grid::{
 use photon_ui::icons::Icon;
 use photon_ui::menu::{
     CascadingSubmenu, MenuEntry, MenuIconButton, MenuItem, menu_panel_entries, with_anchored_menu,
-    with_context_menu, with_context_menu_and_cascading_submenus, with_top_right_menu,
-    with_top_right_menu_at,
+    with_anchored_menu_and_submenus, with_context_menu, with_context_menu_and_cascading_submenus,
+    with_top_right_menu, with_top_right_menu_at,
 };
 use photon_ui::panel::{section_card, status_bar};
 use photon_ui::theme::{
@@ -84,10 +84,10 @@ use photon_editor::{
     TabCloseScope, WatermarkTab, apply_target_control, build_color_picker_dialog,
     build_editor_add_layer_menu, build_editor_canvas_context_menu, build_editor_layer_context_menu,
     build_editor_plugins_menu_entries, build_editor_tab_context_menu, build_editor_toolbar,
-    build_editor_vector_menu_entries, build_editor_view, build_export_dialog,
-    build_export_vector_svg_dialog, build_tool_group_flyout_menu, build_transform_each_dialog,
-    build_vector_blend_dialog, build_vector_shape_from_draw_commit, crop_uv_to_signed,
-    default_curves, format_hex, parse_hex_rgb, rgb_to_color, slider_stepper_control,
+    build_editor_view, build_export_dialog, build_export_vector_svg_dialog,
+    build_tool_group_flyout_menu, build_transform_each_dialog, build_vector_blend_dialog,
+    build_vector_shape_from_draw_commit, crop_uv_to_signed, default_curves, format_hex,
+    parse_hex_rgb, rgb_to_color, slider_stepper_control,
 };
 use photon_protocol::DisplayFont;
 use photon_ui::editor::{anchor_grid_3x3, checker_swatch};
@@ -320,6 +320,7 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
     let (id, open_task) = window::open(window::Settings {
         size: open_logical_size,
         min_size: Some(open_min_size),
+        exit_on_close_request: false,
         platform_specific,
         ..Default::default()
     });
@@ -461,6 +462,11 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
         dragging_editor_panel: None,
         editor_panel_drop_target: None,
         pending_leave_to_browser: false,
+        pending_exit: false,
+        exit_closing_tab_id: None,
+        pending_preview_commit_rev: None,
+        pending_focus_widget: None,
+        recovery_prompted: false,
         pending_layout_commands: 0,
         last_core_layout,
         pending_screenshots: BTreeMap::new(),
@@ -478,6 +484,7 @@ pub fn boot() -> (PhotonGui, Task<Message>) {
         toast_seq: 0,
         path_editing: false,
         active_menu: None,
+        active_menu_submenu: None,
         editor_add_layer_anchor: None,
         context_menu: None,
         last_cursor: None,
@@ -725,6 +732,7 @@ pub fn subscription(state: &PhotonGui) -> Subscription<Message> {
             _ => None,
         }),
         window::close_events().map(Message::WindowClosed),
+        window::close_requests().map(Message::WindowCloseRequested),
         window::resize_events().map(|(id, size)| Message::WindowResized(id, size)),
     ];
     if state.snapshot.meta.workspace == Workspace::Editor
@@ -736,6 +744,9 @@ pub fn subscription(state: &PhotonGui) -> Subscription<Message> {
             .is_some_and(|ed| ed.selection.has_selection)
     {
         subs.push(iced::time::every(Duration::from_millis(60)).map(|_| Message::MarchingAntsTick));
+    }
+    if state.snapshot.meta.editor_tabs.iter().any(|t| t.modified) {
+        subs.push(iced::time::every(Duration::from_secs(5)).map(|_| Message::RecoverySyncTick));
     }
     Subscription::batch(subs)
 }
@@ -773,11 +784,42 @@ fn event_broadcast_stream() -> impl iced::futures::Stream<Item = Message> {
     })
 }
 
+pub(super) fn initial_crop_uv_from_editor(
+    ed: Option<&photon_protocol::EditorState>,
+) -> Option<[f32; 4]> {
+    let ed = ed?;
+    if !ed.selection.has_selection {
+        return None;
+    }
+    let [x0, y0, bw, bh] = ed.selection.bounds?;
+    let w = ed.width.max(1) as f32;
+    let h = ed.height.max(1) as f32;
+    let x1 = x0 + bw;
+    let y1 = y0 + bh;
+    let u0 = (x0 as f32 / w).clamp(0.0, 1.0);
+    let v0 = (y0 as f32 / h).clamp(0.0, 1.0);
+    let u1 = (x1.max(x0 + 1) as f32 / w).clamp(0.0, 1.0);
+    let v1 = (y1.max(y0 + 1) as f32 / h).clamp(0.0, 1.0);
+    if (u1 - u0) * w < 1.0 || (v1 - v0) * h < 1.0 {
+        return None;
+    }
+    Some([u0, v0, u1, v1])
+}
+
 pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
+    let task = update_inner(state, message);
+    if let Some(fid) = state.pending_focus_widget.take() {
+        return Task::batch([task, widget_operation::focus(iced::widget::Id::new(fid))]);
+    }
+    task
+}
+
+fn update_inner(state: &mut PhotonGui, message: Message) -> Task<Message> {
     match message {
         Message::Noop => Task::none(),
         Message::ToggleMenu(menu) => {
             state.context_menu = None;
+            state.active_menu_submenu = None;
             state.active_menu = if state.active_menu == Some(menu) {
                 state.editor_add_layer_anchor = None;
                 None
@@ -791,6 +833,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         }
         Message::HoverMenu(menu) => {
             if state.active_menu.is_some() && state.active_menu != Some(menu) {
+                state.active_menu_submenu = None;
                 state.editor_add_layer_anchor = (menu == ActiveMenu::EditorAddLayer)
                     .then(|| state.last_cursor)
                     .flatten();
@@ -798,8 +841,13 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::SetMenuSubmenu(sub) => {
+            state.active_menu_submenu = Some(sub);
+            Task::none()
+        }
         Message::CloseMenu => {
             state.active_menu = None;
+            state.active_menu_submenu = None;
             state.editor_add_layer_anchor = None;
             Task::none()
         }
@@ -1096,6 +1144,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         Message::OpenSettings => {
             state.active_menu = None;
             state.context_menu = None;
+            if let Some(d) = state.dialog.take() {
+                state.dialog_manager.close(&dialog_id_for_in_app(&d));
+            }
             state.settings_open = true;
             state.settings_tab = SettingsTab::General;
             state.settings_confirm_factory_reset = false;
@@ -1310,6 +1361,147 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ExportVectorSvgPathPicked(None) => Task::none(),
+        Message::OpenSliceImageDialog => {
+            state.active_menu = None;
+            state.active_menu_submenu = None;
+            let default_dir = state
+                .snapshot
+                .meta
+                .editor
+                .as_ref()
+                .and_then(|ed| std::path::Path::new(&ed.path).parent())
+                .map(|p| p.join("slices").to_string_lossy().into_owned())
+                .unwrap_or_else(|| "/tmp/photon-slices".to_owned());
+            state.dialog = Some(InAppDialog::SliceImage {
+                is_grid: true,
+                rows: "2".to_owned(),
+                cols: "2".to_owned(),
+                strip_height: "1024".to_owned(),
+                output_dir: default_dir,
+                prefix: "slice".to_owned(),
+                format: "png".to_owned(),
+                error: None,
+            });
+            open_dialog_window(state, DesktopDialogId::SliceImage);
+            Task::none()
+        }
+        Message::SliceImageModeChanged(is_grid) => {
+            if let Some(InAppDialog::SliceImage { is_grid: g, .. }) = &mut state.dialog {
+                *g = is_grid;
+            }
+            Task::none()
+        }
+        Message::SliceImageRowsChanged(val) => {
+            if let Some(InAppDialog::SliceImage { rows, error, .. }) = &mut state.dialog {
+                *rows = val;
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::SliceImageColsChanged(val) => {
+            if let Some(InAppDialog::SliceImage { cols, error, .. }) = &mut state.dialog {
+                *cols = val;
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::SliceImageStripHeightChanged(val) => {
+            if let Some(InAppDialog::SliceImage {
+                strip_height,
+                error,
+                ..
+            }) = &mut state.dialog
+            {
+                *strip_height = val;
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::SliceImageOutputDirChanged(val) => {
+            if let Some(InAppDialog::SliceImage {
+                output_dir, error, ..
+            }) = &mut state.dialog
+            {
+                *output_dir = val;
+                *error = None;
+            }
+            Task::none()
+        }
+        Message::SliceImagePrefixChanged(val) => {
+            if let Some(InAppDialog::SliceImage { prefix, .. }) = &mut state.dialog {
+                *prefix = val;
+            }
+            Task::none()
+        }
+        Message::SliceImageFormatChanged(val) => {
+            if let Some(InAppDialog::SliceImage { format, .. }) = &mut state.dialog {
+                *format = val;
+            }
+            Task::none()
+        }
+        Message::ConfirmSliceImage => {
+            let Some(InAppDialog::SliceImage {
+                is_grid,
+                rows,
+                cols,
+                strip_height,
+                output_dir,
+                prefix,
+                format,
+                ..
+            }) = state.dialog.clone()
+            else {
+                return Task::none();
+            };
+            let out_dir = output_dir.trim().to_owned();
+            if out_dir.is_empty() {
+                if let Some(InAppDialog::SliceImage { error, .. }) = &mut state.dialog {
+                    *error = Some(tr(state.snapshot.meta.language, "dialog-error-title"));
+                }
+                return Task::none();
+            }
+            let mode = if is_grid {
+                let (Ok(r), Ok(c)) = (rows.trim().parse::<u32>(), cols.trim().parse::<u32>())
+                else {
+                    if let Some(InAppDialog::SliceImage { error, .. }) = &mut state.dialog {
+                        *error = Some(tr(state.snapshot.meta.language, "dialog-error-title"));
+                    }
+                    return Task::none();
+                };
+                if r == 0 || c == 0 {
+                    if let Some(InAppDialog::SliceImage { error, .. }) = &mut state.dialog {
+                        *error = Some(tr(state.snapshot.meta.language, "dialog-error-title"));
+                    }
+                    return Task::none();
+                }
+                photon_protocol::SliceMode::Grid { rows: r, cols: c }
+            } else {
+                let Ok(h) = strip_height.trim().parse::<u32>() else {
+                    if let Some(InAppDialog::SliceImage { error, .. }) = &mut state.dialog {
+                        *error = Some(tr(state.snapshot.meta.language, "dialog-error-title"));
+                    }
+                    return Task::none();
+                };
+                if h == 0 {
+                    if let Some(InAppDialog::SliceImage { error, .. }) = &mut state.dialog {
+                        *error = Some(tr(state.snapshot.meta.language, "dialog-error-title"));
+                    }
+                    return Task::none();
+                }
+                photon_protocol::SliceMode::Strip { strip_height: h }
+            };
+            state.dialog = None;
+            state.dialog_manager.close(&DesktopDialogId::SliceImage);
+            dispatch_to_core(
+                state.core.clone(),
+                Command::EditorSliceExport {
+                    mode,
+                    output_dir: out_dir,
+                    prefix: prefix.trim().to_owned(),
+                    format: format.trim().to_owned(),
+                },
+            )
+        }
         Message::LayoutCommandCompleted(res) => {
             state.pending_layout_commands = state.pending_layout_commands.saturating_sub(1);
             update(state, Message::CommandCompleted(res))
@@ -1397,6 +1589,93 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::WindowMonitorSizeCheck(_, None, _) => Task::none(),
+        Message::WindowCloseRequested(id) => {
+            if !matches!(
+                state.windows.get(&id),
+                Some(WindowRole::Main | WindowRole::AuxiliaryViewer)
+            ) {
+                state.dialog = None;
+                return window::close(id);
+            }
+            update(state, Message::RequestAppExit)
+        }
+        Message::RecoverySyncTick => {
+            if state.snapshot.meta.editor_tabs.iter().any(|t| t.modified) {
+                dispatch_to_core(state.core.clone(), Command::EditorRecoverySync)
+            } else {
+                Task::none()
+            }
+        }
+        Message::RestoreRecoverySession => {
+            state.dialog = None;
+            state.dialog_manager.close(&DesktopDialogId::RecoveryPrompt);
+            dispatch_to_core(state.core.clone(), Command::EditorRecoveryRestore)
+        }
+        Message::DiscardRecoverySession => {
+            state.dialog = None;
+            state.dialog_manager.close(&DesktopDialogId::RecoveryPrompt);
+            dispatch_to_core(state.core.clone(), Command::EditorRecoveryDiscard)
+        }
+        Message::RequestAppExit => {
+            if state.dialog.is_some() || state.exit_closing_tab_id.is_some() {
+                return Task::none();
+            }
+            state.active_menu = None;
+            state.active_menu_submenu = None;
+            state.context_menu = None;
+            let dirty_tab_id = state
+                .snapshot
+                .meta
+                .editor_tabs
+                .iter()
+                .find(|t| t.modified)
+                .map(|t| t.id)
+                .or_else(|| {
+                    state
+                        .snapshot
+                        .meta
+                        .editor
+                        .as_ref()
+                        .filter(|d| d.modified)
+                        .map(|d| d.id)
+                });
+            if let Some(tab_id) = dirty_tab_id {
+                state.pending_exit = true;
+                state.dialog = Some(InAppDialog::ConfirmUnsavedLeave {
+                    tab_id: Some(tab_id),
+                    close_editor: true,
+                });
+                open_dialog_window(state, DesktopDialogId::ConfirmUnsavedLeave);
+                return Task::none();
+            }
+            state.pending_exit = false;
+            let core = state.core.clone();
+            let save_ui = !is_standalone_viewer()
+                && !is_standalone_editor()
+                && (state.snapshot.meta.save_ui_state_on_exit || state.ctrl_held);
+            let force = state.ctrl_held;
+            Task::perform(
+                async move {
+                    let _ = core
+                        .dispatch(Envelope::new(
+                            format!("gui-cleanup-{}", std::process::id()),
+                            ClientKind::Gui,
+                            Command::EditorRecoveryCleanup,
+                        ))
+                        .await;
+                    if save_ui {
+                        let _ = core
+                            .dispatch(Envelope::new(
+                                format!("gui-exit-{}", std::process::id()),
+                                ClientKind::Gui,
+                                Command::SaveUiState { force },
+                            ))
+                            .await;
+                    }
+                },
+                |_| Message::ShutdownAfterSave,
+            )
+        }
         Message::WindowClosed(id) => {
             state.windows.remove(&id);
             if state.last_active_window == Some(id) {
@@ -2068,6 +2347,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 Some(InAppDialog::ConfirmUnsavedLeave { tab_id, .. }) => tab_id,
                 _ => None,
             };
+            if state.pending_exit {
+                state.exit_closing_tab_id = tab_id.or(state.snapshot.meta.active_editor_tab_id);
+            }
             state
                 .dialog_manager
                 .close(&DesktopDialogId::ConfirmUnsavedLeave);
@@ -2135,6 +2417,9 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
                 Some(InAppDialog::ConfirmUnsavedLeave { tab_id, .. }) => tab_id,
                 _ => None,
             };
+            if state.pending_exit {
+                state.exit_closing_tab_id = tab_id.or(state.snapshot.meta.active_editor_tab_id);
+            }
             let needs_switch = tab_id
                 .zip(state.snapshot.meta.active_editor_tab_id)
                 .is_some_and(|(target, active)| target != active);
@@ -2208,6 +2493,8 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         }
         Message::CloseDialog => {
             state.pending_leave_to_browser = false;
+            state.pending_exit = false;
+            state.exit_closing_tab_id = None;
             state.pending_close_tabs.clear();
             state.new_doc_create_from_clipboard = false;
             if let Some(d) = state.dialog.take() {
@@ -2604,40 +2891,118 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         Message::ToggleCropMode => {
             state.active_menu = None;
             state.context_menu = None;
-            if state.crop_uv.is_some() {
+            if state.editor_ui.tool == EditorTool::Crop || state.crop_uv.is_some() {
                 state.crop_uv = None;
                 if state.editor_ui.tool == EditorTool::Crop {
                     state.editor_ui.tool = EditorTool::Pointer;
                 }
-            } else if state.snapshot.meta.editor.is_some() {
+            } else if let Some(ed) = state.snapshot.meta.editor.as_ref() {
                 state.editor_ui.tool = EditorTool::Crop;
-                state.crop_uv = Some([0.1, 0.1, 0.9, 0.9]);
+                state.crop_uv = initial_crop_uv_from_editor(Some(ed));
+                state.pending_focus_widget = Some("photon.tool.first_input");
             }
             sync_ui_tree_task(state)
         }
         Message::SetCropPreset(ratio) => {
             state.editor_ui.crop_aspect = ratio;
-            if let Some(doc) = &state.snapshot.meta.editor {
+            if let Some(uv) = state.crop_uv
+                && let Some(doc) = &state.snapshot.meta.editor
+            {
                 let iw = doc.width.max(1) as f32;
                 let ih = doc.height.max(1) as f32;
-                let uv = match ratio {
-                    None => [0.1, 0.1, 0.9, 0.9],
+                let next_uv = match ratio {
+                    None => uv,
                     Some(target_ratio) => {
-                        let img_ratio = iw / ih;
-                        if img_ratio > target_ratio {
-                            let h = 0.8_f32;
-                            let w = (h * target_ratio / img_ratio).min(0.95);
-                            let dx = (1.0 - w) * 0.5;
-                            [dx, 0.1, 1.0 - dx, 0.9]
-                        } else {
-                            let w = 0.8_f32;
-                            let h = (w * img_ratio / target_ratio).min(0.95);
-                            let dy = (1.0 - h) * 0.5;
-                            [0.1, dy, 0.9, 1.0 - dy]
-                        }
+                        let cx = (uv[0] + uv[2]) * 0.5;
+                        let cy = (uv[1] + uv[3]) * 0.5;
+                        let cur_w = (uv[2] - uv[0]) * iw;
+                        let _cur_h = (uv[3] - uv[1]) * ih;
+                        let new_w = cur_w.max(1.0);
+                        let new_h = (new_w / target_ratio).clamp(1.0, ih);
+                        let half_u = (new_w / iw) * 0.5;
+                        let half_v = (new_h / ih) * 0.5;
+                        let u0 = (cx - half_u).clamp(0.0, 1.0 - 1.0 / iw);
+                        let v0 = (cy - half_v).clamp(0.0, 1.0 - 1.0 / ih);
+                        let u1 = (u0 + half_u * 2.0).min(1.0);
+                        let v1 = (v0 + half_v * 2.0).min(1.0);
+                        [u0, v0, u1, v1]
                     }
                 };
-                state.crop_uv = Some(uv);
+                state.crop_uv = Some(next_uv);
+            }
+            Task::none()
+        }
+        Message::SetCropField(field, raw) => {
+            let Some(doc) = &state.snapshot.meta.editor else {
+                return Task::none();
+            };
+            let iw = doc.width.max(1) as f32;
+            let ih = doc.height.max(1) as f32;
+            let (mut x, mut y, mut w, mut h) = state
+                .crop_uv
+                .map(|uv| crop_uv_to_signed(uv, doc.width, doc.height))
+                .unwrap_or((0, 0, 0, 0));
+            let trimmed = raw.trim();
+            match field {
+                photon_editor::CropRectField::X => {
+                    x = if trimmed.is_empty() {
+                        0
+                    } else if let Ok(v) = trimmed.parse::<i32>() {
+                        v
+                    } else {
+                        return Task::none();
+                    };
+                }
+                photon_editor::CropRectField::Y => {
+                    y = if trimmed.is_empty() {
+                        0
+                    } else if let Ok(v) = trimmed.parse::<i32>() {
+                        v
+                    } else {
+                        return Task::none();
+                    };
+                }
+                photon_editor::CropRectField::W => {
+                    w = if trimmed.is_empty() {
+                        0
+                    } else if let Ok(v) = trimmed.parse::<u32>() {
+                        v
+                    } else {
+                        return Task::none();
+                    };
+                    if w == 0 {
+                        state.crop_uv = None;
+                        return Task::none();
+                    }
+                    if h == 0 {
+                        h = 1;
+                    }
+                }
+                photon_editor::CropRectField::H => {
+                    h = if trimmed.is_empty() {
+                        0
+                    } else if let Ok(v) = trimmed.parse::<u32>() {
+                        v
+                    } else {
+                        return Task::none();
+                    };
+                    if h == 0 {
+                        state.crop_uv = None;
+                        return Task::none();
+                    }
+                    if w == 0 {
+                        w = 1;
+                    }
+                }
+            }
+            if w == 0 || h == 0 {
+                state.crop_uv = None;
+            } else {
+                let u0 = x as f32 / iw;
+                let v0 = y as f32 / ih;
+                let u1 = (x as f32 + w.max(1) as f32) / iw;
+                let v1 = (y as f32 + h.max(1) as f32) / ih;
+                state.crop_uv = Some([u0, v0, u1, v1]);
             }
             Task::none()
         }
@@ -3627,6 +3992,23 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::EditorFrameLoaded(frame) => {
+            if let (Some(prev_rev), Some(f)) = (state.pending_preview_commit_rev, frame.as_ref())
+                && f.revision > prev_rev
+            {
+                state.pending_preview_commit_rev = None;
+                state.editor_ui.transform_spec = LayerTransformSpec::default();
+                state.editor_ui.rotate_angle = 0.0;
+                state.editor_ui.gradient_draft = None;
+                if !matches!(
+                    state.editor_ui.tool,
+                    EditorTool::Transform | EditorTool::Pointer
+                ) {
+                    state.transform_preview = None;
+                    state.transform_layer_id = None;
+                } else if let Some(tp) = &mut state.transform_preview {
+                    tp.spec = LayerTransformSpec::default();
+                }
+            }
             state.editor_histogram = frame
                 .as_ref()
                 .map(|f| (f.revision, compute_luminance_histogram(f)));
@@ -4449,6 +4831,7 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         | Message::SetShadows(..)
         | Message::ApplyColorAdjustments
         | Message::EditorToggleApplyToSelection(..)
+        | Message::EditorToggleAdjustLivePreview
         | Message::DenoiseDialogSelectionOnlyChanged(..)
         | Message::EditorResetPendingAdjustments
         | Message::EditorOpenAdjustPopup(..)
@@ -4536,6 +4919,29 @@ pub fn update(state: &mut PhotonGui, message: Message) -> Task<Message> {
         | Message::DenoiseDialogDetailChanged(..)
         | Message::DenoiseDialogTargetChanged(..)
         | Message::ConfirmDenoiseDialog
+        | Message::OpenSaveSelectionDialog
+        | Message::SaveSelectionNameChanged(..)
+        | Message::SaveSelectionTargetChanged(..)
+        | Message::SaveSelectionOpChanged(..)
+        | Message::ConfirmSaveSelection
+        | Message::OpenLoadSelectionDialog
+        | Message::LoadSelectionSelectedChanged(..)
+        | Message::LoadSelectionOpChanged(..)
+        | Message::LoadSelectionInvertChanged(..)
+        | Message::DeleteSavedSelection(..)
+        | Message::ConfirmLoadSelection
+        | Message::OpenNewGuideDialog
+        | Message::NewGuideAxisChanged(..)
+        | Message::NewGuideValueChanged(..)
+        | Message::NewGuideUnitChanged(..)
+        | Message::ConfirmNewGuide
+        | Message::OpenGridSettingsDialog
+        | Message::GridSettingsSpacingChanged(..)
+        | Message::GridSettingsSubdivisionsChanged(..)
+        | Message::GridSettingsOpacityChanged(..)
+        | Message::GridSettingsShowGridChanged(..)
+        | Message::GridSettingsSnapChanged(..)
+        | Message::ConfirmGridSettings
         | Message::EditorSetTransformSpec(..)
         | Message::EditorTransformFramesLoaded(..)
         | Message::EditorTransformCommit
@@ -4738,10 +5144,25 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
         .style(app_shell_style);
 
     let with_menu = match build_active_menu(state, role, ws) {
-        Some((Some(left_offset), menu_el)) => {
-            with_anchored_menu(shell, true, left_offset, 44.0, menu_el, Message::CloseMenu)
+        Some((Some(left_offset), est_h, menu_el, submenus)) => {
+            if submenus.is_empty() {
+                with_anchored_menu(shell, true, left_offset, 44.0, menu_el, Message::CloseMenu)
+            } else {
+                with_anchored_menu_and_submenus(
+                    shell,
+                    true,
+                    left_offset,
+                    44.0,
+                    state.window_size,
+                    230.0,
+                    est_h,
+                    menu_el,
+                    submenus,
+                    Message::CloseMenu,
+                )
+            }
         }
-        Some((None, menu_el)) => match state.active_menu {
+        Some((None, _est_h, menu_el, _submenus)) => match state.active_menu {
             Some(ActiveMenu::WorkspaceSwitcher) => {
                 with_top_right_menu_at(shell, true, 52.0, 52.0, menu_el, Message::CloseMenu)
             }
@@ -5358,7 +5779,7 @@ mod tests {
     fn canvas_size_dialog_has_sensible_defaults_and_id_mapping() {
         let state = default_window_state_for(DesktopDialogId::CanvasSize);
         assert_eq!(state.width, 460.0);
-        assert_eq!(state.height, 390.0);
+        assert_eq!(state.height, 435.0);
         let dlg = InAppDialog::CanvasSize {
             dims: DimensionInputState::from_dims(100, 100),
             anchor: photon_protocol::CanvasAnchor::Center,

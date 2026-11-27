@@ -95,6 +95,7 @@ pub fn build_editor_tab_bar<'a>(
         let select_btn = button(
             container(label_row)
                 .width(Length::Shrink)
+                .max_width(168)
                 .height(Length::Fill)
                 .clip(true)
                 .align_y(Alignment::Center),

@@ -22,6 +22,7 @@ pub enum DimGridAction {
     ToggleLockHeight,
     ToggleLockRatio,
     PresetRatio(u32, u32),
+    PresetDimensions(u32, u32),
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +192,14 @@ impl DimensionInputState {
                 }
                 self.refresh_display_strings();
             }
+            DimGridAction::PresetDimensions(w, h) => {
+                self.width_px = w.clamp(1, 32_768);
+                self.height_px = h.clamp(1, 32_768);
+                self.lock_width = false;
+                self.lock_height = false;
+                self.ratio_str = format_ratio_string(self.width_px, self.height_px);
+                self.refresh_display_strings();
+            }
         }
     }
 
@@ -297,6 +306,11 @@ pub struct EditorUiState {
     pub stroke_active: bool,
     pub apply_target: ApplyTarget,
     pub apply_to_selection: bool,
+    pub adjust_live_preview: bool,
+    pub selected_layer_ids: Vec<u64>,
+    pub layer_anchor_id: Option<u64>,
+    pub dragging_layer_id: Option<u64>,
+    pub align_target: photon_protocol::AlignTarget,
     pub hsv: HsvAdjustment,
     pub balance: ColorBalanceAdjustment,
     pub balance_zone: ColorBalanceZone,
@@ -309,6 +323,18 @@ pub struct EditorUiState {
     pub canvas_fill: Option<[u8; 3]>,
     pub crop_aspect: Option<f32>,
     pub crop_fill: Option<[u8; 3]>,
+    pub show_rulers: bool,
+    pub show_grid: bool,
+    pub grid_spacing_px: f32,
+    pub grid_subdivisions: u32,
+    pub grid_opacity: f32,
+    pub show_guides: bool,
+    pub lock_guides: bool,
+    pub guides: Vec<photon_canvas::EditorGuide>,
+    pub next_guide_id: u64,
+    pub pending_guide_preview: Option<(photon_canvas::GuideAxis, f32)>,
+    pub canvas_viewport_size: Option<[f32; 2]>,
+    pub snap: photon_canvas::SnapConfig,
     pub compare_mode: CompareMode,
     pub compare_split_x: f32,
     pub renaming_layer_id: Option<u64>,
@@ -575,6 +601,11 @@ impl Default for EditorUiState {
             stroke_active: false,
             apply_target: ApplyTarget::WholeImage,
             apply_to_selection: true,
+            adjust_live_preview: true,
+            selected_layer_ids: Vec::new(),
+            layer_anchor_id: None,
+            dragging_layer_id: None,
+            align_target: photon_protocol::AlignTarget::Selection,
             hsv: HsvAdjustment::default(),
             balance: ColorBalanceAdjustment::default(),
             balance_zone: ColorBalanceZone::Midtones,
@@ -587,6 +618,18 @@ impl Default for EditorUiState {
             canvas_fill: None,
             crop_aspect: None,
             crop_fill: None,
+            show_rulers: false,
+            show_grid: false,
+            grid_spacing_px: 64.0,
+            grid_subdivisions: 4,
+            grid_opacity: 1.0,
+            show_guides: true,
+            lock_guides: false,
+            guides: Vec::new(),
+            next_guide_id: 1,
+            pending_guide_preview: None,
+            canvas_viewport_size: None,
+            snap: photon_canvas::SnapConfig::default(),
             compare_mode: CompareMode::Off,
             compare_split_x: 0.5,
             renaming_layer_id: None,

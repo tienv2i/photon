@@ -152,6 +152,55 @@ impl Default for GradientPreview {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuideAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EditorGuide {
+    pub id: u64,
+    pub axis: GuideAxis,
+    pub position_px: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapConfig {
+    pub enabled: bool,
+    pub to_guides: bool,
+    pub to_grid: bool,
+    pub to_canvas: bool,
+    pub to_layers: bool,
+}
+
+impl Default for SnapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            to_guides: true,
+            to_grid: true,
+            to_canvas: true,
+            to_layers: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SmartGuideLine {
+    pub axis: GuideAxis,
+    pub pos_px: f32,
+    pub start_px: f32,
+    pub end_px: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CropDragKind {
+    New,
+    Move,
+    Resize { dx_mask: i8, dy_mask: i8 },
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CanvasInteractionState {
     pub dragging: bool,
@@ -180,19 +229,29 @@ pub struct CanvasInteractionState {
     pub last_click_time: Option<Instant>,
     pub last_click_pos: Option<iced::Point>,
     pub crop_anchor_uv: Option<[f32; 2]>,
+    pub crop_drag_kind: Option<CropDragKind>,
+    pub crop_drag_start_rect: Option<[f32; 4]>,
+    pub dragging_guide_id: Option<u64>,
+    pub active_smart_guides: Vec<SmartGuideLine>,
     pub select_anchor_px: Option<[f32; 2]>,
     pub select_current_px: Option<[f32; 2]>,
+    pub select_press_op_modifiers: (bool, bool),
+    pub select_geom_armed: (bool, bool),
     pub select_points_px: Vec<[f32; 2]>,
+    pub select_redo_segments: Vec<Vec<[f32; 2]>>,
     pub magnetic_preview_px: Vec<[f32; 2]>,
     pub select_segment_lens: Vec<usize>,
     pub drawing_shape: bool,
     pub draw_anchor_px: Option<[f32; 2]>,
     pub draw_current_px: Option<[f32; 2]>,
     pub draw_points: Vec<[f32; 2]>,
+    pub draw_redo_points: Vec<[f32; 2]>,
     pub bezier_nodes: Vec<VectorPathNode>,
+    pub bezier_redo_nodes: Vec<VectorPathNode>,
     pub bezier_dragging_handle: bool,
     pub stabilizer_pos_px: Option<[f32; 2]>,
     pub vector_drag: Option<VectorDragState>,
+    pub last_viewport_size: Option<(u32, u32)>,
 }
 
 /// Default studio canvas/viewport backdrop RGB matching `PaletteTokens::bg_canvas`.
@@ -221,6 +280,8 @@ pub enum CanvasEvent {
     StrokeEnd(bool),
     HealingSourcePicked([f64; 2]),
     SampleColor([u32; 2]),
+    SampleBgColor([u32; 2]),
+    ShapeStrokeWidthChanged(f32),
     CompareSplitChanged(f32),
     ContextMenuRequested {
         pos: [f32; 2],
@@ -235,6 +296,7 @@ pub enum CanvasEvent {
         shift: bool,
         alt: bool,
     },
+    SelectClear,
     SelectLineCommit {
         is_row: bool,
         coord: u32,
@@ -291,6 +353,11 @@ pub enum CanvasEvent {
     VectorSelectShape {
         shape_id: u64,
         node_index: Option<usize>,
+        additive: bool,
+    },
+    VectorSelectMarquee {
+        shape_ids: Vec<u64>,
+        additive: bool,
     },
     VectorMoveNode {
         shape_id: u64,
@@ -322,6 +389,13 @@ pub enum CanvasEvent {
         x: f32,
         y: f32,
     },
+    GuideMoved {
+        id: u64,
+        position_px: f32,
+    },
+    GuideRemoved(u64),
+    CursorDocMoved(Option<[f32; 2]>),
+    ViewportResized(f32, f32),
     ResetFit,
 }
 
@@ -338,6 +412,7 @@ pub struct ImageCanvasProgram {
     pub pan_x: f32,
     pub pan_y: f32,
     pub adjustments: ColorAdjustments,
+    pub adj_selection_only: bool,
     pub dark_theme: bool,
     pub crop_rect: Option<[f32; 4]>,
     pub crop_aspect: Option<f32>,
@@ -352,6 +427,7 @@ pub struct ImageCanvasProgram {
     pub compare_split_x: f32,
     /// Active brush/eraser/liquify/healing radius in document pixels (`0.0` disables cursor ring).
     pub brush_radius_px: f32,
+    pub shape_stroke_width: f32,
     /// When true (Editor), mouse-active tools reserve Left-drag exclusively; Pointer (no crop), Hand,
     /// Middle-mouse drag, and Space+Left-drag pan freely.
     pub restrict_pan_to_hand: bool,
@@ -366,6 +442,17 @@ pub struct ImageCanvasProgram {
     pub gradient_preview: Option<GradientPreview>,
     pub active_vector_layer: Option<VectorLayerData>,
     pub selected_vector_node: Option<usize>,
+    pub show_grid: bool,
+    pub grid_spacing_px: f32,
+    pub grid_subdivisions: u32,
+    pub grid_opacity: f32,
+    pub show_guides: bool,
+    pub lock_guides: bool,
+    pub guides: Vec<EditorGuide>,
+    pub pending_guide_preview: Option<(GuideAxis, f32)>,
+    pub snap: SnapConfig,
+    /// Bounding boxes `[x0, y0, x1, y1]` of visible non-active layers for Smart Guide snapping.
+    pub layer_snap_bounds: Vec<[f32; 4]>,
 }
 
 impl Default for ImageCanvasProgram {
@@ -383,6 +470,7 @@ impl Default for ImageCanvasProgram {
             pan_x: 0.0,
             pan_y: 0.0,
             adjustments: ColorAdjustments::default(),
+            adj_selection_only: false,
             dark_theme: true,
             crop_rect: None,
             crop_aspect: None,
@@ -395,6 +483,7 @@ impl Default for ImageCanvasProgram {
             compare_mode: 0,
             compare_split_x: 0.5,
             brush_radius_px: 0.0,
+            shape_stroke_width: 2.0,
             restrict_pan_to_hand: false,
             stabilizer_radius: 0.0,
             curve_lut: None,
@@ -405,6 +494,16 @@ impl Default for ImageCanvasProgram {
             gradient_preview: None,
             active_vector_layer: None,
             selected_vector_node: None,
+            show_grid: false,
+            grid_spacing_px: 64.0,
+            grid_subdivisions: 4,
+            grid_opacity: 1.0,
+            show_guides: true,
+            lock_guides: false,
+            guides: Vec::new(),
+            pending_guide_preview: None,
+            snap: SnapConfig::default(),
+            layer_snap_bounds: Vec::new(),
         }
     }
 }
@@ -453,7 +552,15 @@ impl ImageCanvasProgram {
     }
 
     fn is_quick_color_pick_active(&self, state: &CanvasInteractionState) -> bool {
-        (state.modifiers.alt() || state.modifiers.control())
+        let pick_mod = if matches!(
+            self.tool,
+            CanvasTool::DrawLine | CanvasTool::DrawRect | CanvasTool::DrawEllipse
+        ) {
+            state.modifiers.control()
+        } else {
+            state.modifiers.alt() || state.modifiers.control()
+        };
+        pick_mod
             && !state.resizing_brush
             && !state.painting
             && !state.moving_layer
@@ -601,14 +708,154 @@ impl ImageCanvasProgram {
         Some([f64::from(u * fw), f64::from(v * fh)])
     }
 
+    fn snap_coord_px(
+        &self,
+        val: f32,
+        axis: GuideAxis,
+        threshold_px: f32,
+        fw: f32,
+        fh: f32,
+    ) -> (f32, Option<SmartGuideLine>) {
+        if !self.snap.enabled || threshold_px <= 0.0 {
+            return (val, None);
+        }
+        let mut best_val = val;
+        let mut best_dist = threshold_px;
+        let mut best_line: Option<SmartGuideLine> = None;
+        let span_end = match axis {
+            GuideAxis::Horizontal => fw,
+            GuideAxis::Vertical => fh,
+        };
+
+        if self.snap.to_guides && self.show_guides {
+            for g in &self.guides {
+                if g.axis == axis {
+                    let d = (val - g.position_px).abs();
+                    if d <= best_dist {
+                        best_dist = d;
+                        best_val = g.position_px;
+                        best_line = Some(SmartGuideLine {
+                            axis,
+                            pos_px: g.position_px,
+                            start_px: 0.0,
+                            end_px: span_end,
+                        });
+                    }
+                }
+            }
+        }
+
+        if self.snap.to_canvas {
+            let max_c = span_end;
+            for cand in [0.0, max_c * 0.5, max_c] {
+                let d = (val - cand).abs();
+                if d <= best_dist {
+                    best_dist = d;
+                    best_val = cand;
+                    best_line = Some(SmartGuideLine {
+                        axis,
+                        pos_px: cand,
+                        start_px: 0.0,
+                        end_px: span_end,
+                    });
+                }
+            }
+        }
+
+        if self.snap.to_layers {
+            for b in &self.layer_snap_bounds {
+                let cands = match axis {
+                    GuideAxis::Vertical => [b[0], (b[0] + b[2]) * 0.5, b[2]],
+                    GuideAxis::Horizontal => [b[1], (b[1] + b[3]) * 0.5, b[3]],
+                };
+                for cand in cands {
+                    let d = (val - cand).abs();
+                    if d <= best_dist {
+                        best_dist = d;
+                        best_val = cand;
+                        best_line = Some(SmartGuideLine {
+                            axis,
+                            pos_px: cand,
+                            start_px: 0.0,
+                            end_px: span_end,
+                        });
+                    }
+                }
+            }
+        }
+
+        if self.snap.to_grid && self.show_grid && self.grid_spacing_px >= 4.0 {
+            let divs = self.grid_subdivisions.clamp(1, 16) as f32;
+            let sub = (self.grid_spacing_px / divs).max(4.0);
+            let snapped = (val / sub).round() * sub;
+            let d = (val - snapped).abs();
+            if d < best_dist {
+                best_val = snapped;
+                best_line = None;
+            }
+        }
+
+        (best_val, best_line)
+    }
+
+    fn hit_test_guide(&self, px: f32, py: f32, tol_px: f32) -> Option<u64> {
+        if !self.show_guides || self.lock_guides {
+            return None;
+        }
+        for g in &self.guides {
+            let dist = match g.axis {
+                GuideAxis::Horizontal => (py - g.position_px).abs(),
+                GuideAxis::Vertical => (px - g.position_px).abs(),
+            };
+            if dist <= tol_px {
+                return Some(g.id);
+            }
+        }
+        None
+    }
+
+    fn hit_test_crop_handle(
+        rect: [f32; 4],
+        uv: [f32; 2],
+        tol_u: f32,
+        tol_v: f32,
+    ) -> Option<CropDragKind> {
+        let [u0, v0, u1, v1] = rect;
+        let um = (u0 + u1) * 0.5;
+        let vm = (v0 + v1) * 0.5;
+        let handles = [
+            (u0, v0, -1i8, -1i8),
+            (u1, v0, 1, -1),
+            (u0, v1, -1, 1),
+            (u1, v1, 1, 1),
+            (um, v0, 0, -1),
+            (um, v1, 0, 1),
+            (u0, vm, -1, 0),
+            (u1, vm, 1, 0),
+        ];
+        for (hx, hy, dx_mask, dy_mask) in handles {
+            if (uv[0] - hx).abs() <= tol_u && (uv[1] - hy).abs() <= tol_v {
+                return Some(CropDragKind::Resize { dx_mask, dy_mask });
+            }
+        }
+        if uv[0] >= u0 && uv[0] <= u1 && uv[1] >= v0 && uv[1] <= v1 {
+            return Some(CropDragKind::Move);
+        }
+        None
+    }
+
     fn constrained_crop(&self, anchor: [f32; 2], cur: [f32; 2]) -> Option<[f32; 4]> {
         let frame = self.frame.as_ref()?;
+        let fw = frame.width.max(1) as f32;
+        let fh = frame.height.max(1) as f32;
+        let min_u = 1.0 / fw;
+        let min_v = 1.0 / fh;
         let Some(target_ratio) = self.crop_aspect else {
             let x0 = anchor[0].min(cur[0]);
             let y0 = anchor[1].min(cur[1]);
             let x1 = anchor[0].max(cur[0]);
             let y1 = anchor[1].max(cur[1]);
-            if (x1 - x0) > 0.01 && (y1 - y0) > 0.01 {
+            if (x1 - x0) >= min_u && (y1 - y0) >= min_v {
                 return Some([x0, y0, x1, y1]);
             }
             return None;
@@ -687,6 +934,63 @@ fn snap_angle_15(anchor: [f32; 2], pt: [f32; 2]) -> [f32; 2] {
         anchor[0] + len * snapped.cos(),
         anchor[1] + len * snapped.sin(),
     ]
+}
+
+/// Resolve a drag-to-draw bounding box `(min_pt, max_pt)` from `anchor` and `current`.
+///
+/// - `constrain_square` (`Shift`): locks width and height to `max(|dx|, |dy|)` in the drag quadrant.
+/// - `from_center` (`Alt`): treats `anchor` as the center point and `(dx, dy)` as half-extents.
+pub fn resolve_drag_box(
+    anchor: [f32; 2],
+    current: [f32; 2],
+    constrain_square: bool,
+    from_center: bool,
+) -> ([f32; 2], [f32; 2]) {
+    let mut dx = current[0] - anchor[0];
+    let mut dy = current[1] - anchor[1];
+    if constrain_square {
+        let side = dx.abs().max(dy.abs());
+        dx = if dx >= 0.0 { side } else { -side };
+        dy = if dy >= 0.0 { side } else { -side };
+    }
+    if from_center {
+        let rx = dx.abs();
+        let ry = dy.abs();
+        (
+            [anchor[0] - rx, anchor[1] - ry],
+            [anchor[0] + rx, anchor[1] + ry],
+        )
+    } else {
+        let end = [anchor[0] + dx, anchor[1] + dy];
+        (
+            [anchor[0].min(end[0]), anchor[1].min(end[1])],
+            [anchor[0].max(end[0]), anchor[1].max(end[1])],
+        )
+    }
+}
+
+/// Resolve a drag-to-draw line `(start, end)` from `anchor` and `current`.
+///
+/// - `snap_angle` (`Shift`): snaps the line angle to 15-degree increments.
+/// - `from_center` (`Alt`): mirrors the start point across `anchor`.
+pub fn resolve_drag_line(
+    anchor: [f32; 2],
+    current: [f32; 2],
+    snap_angle: bool,
+    from_center: bool,
+) -> ([f32; 2], [f32; 2]) {
+    let end = if snap_angle {
+        snap_angle_15(anchor, current)
+    } else {
+        current
+    };
+    if from_center {
+        let dx = end[0] - anchor[0];
+        let dy = end[1] - anchor[1];
+        ([anchor[0] - dx, anchor[1] - dy], end)
+    } else {
+        (anchor, end)
+    }
 }
 
 fn commit_polygon_selection(state: &mut CanvasInteractionState) -> Option<Action<CanvasEvent>> {
@@ -966,6 +1270,19 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<CanvasEvent>> {
+        if matches!(
+            event,
+            Event::Window(iced::window::Event::RedrawRequested(_))
+        ) {
+            let vp = (bounds.width.round() as u32, bounds.height.round() as u32);
+            if state.last_viewport_size != Some(vp) && vp.0 > 0 && vp.1 > 0 {
+                state.last_viewport_size = Some(vp);
+                return Some(Action::publish(CanvasEvent::ViewportResized(
+                    bounds.width,
+                    bounds.height,
+                )));
+            }
+        }
         match event {
             Event::Window(iced::window::Event::Unfocused) => {
                 let had_transient = state.space_pan_active
@@ -1003,6 +1320,14 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 }
             }
             Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) => {
+                if state.selecting {
+                    if !mods.shift() {
+                        state.select_geom_armed.0 = true;
+                    }
+                    if !mods.alt() {
+                        state.select_geom_armed.1 = true;
+                    }
+                }
                 if state.modifiers != *mods {
                     state.modifiers = *mods;
                     return Some(Action::request_redraw());
@@ -1090,11 +1415,18 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     {
                         if self.tool == CanvasTool::MagneticLasso {
                             let n = state.select_segment_lens.pop().unwrap_or(1);
+                            let mut seg = Vec::with_capacity(n);
                             for _ in 0..n {
-                                state.select_points_px.pop();
+                                if let Some(p) = state.select_points_px.pop() {
+                                    seg.push(p);
+                                }
                             }
-                        } else {
-                            state.select_points_px.pop();
+                            seg.reverse();
+                            if !seg.is_empty() {
+                                state.select_redo_segments.push(seg);
+                            }
+                        } else if let Some(p) = state.select_points_px.pop() {
+                            state.select_redo_segments.push(vec![p]);
                         }
                         state.magnetic_preview_px.clear();
                         if state.select_points_px.is_empty() {
@@ -1102,6 +1434,31 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             state.select_current_px = None;
                         }
                         return Some(Action::request_redraw());
+                    }
+                    Key::Character(ch)
+                        if ch.eq_ignore_ascii_case("z")
+                            && state.modifiers.shift()
+                            && !state.modifiers.control()
+                            && !state.modifiers.alt()
+                            && !state.select_redo_segments.is_empty()
+                            && matches!(
+                                self.tool,
+                                CanvasTool::PolygonLasso
+                                    | CanvasTool::MagneticLasso
+                                    | CanvasTool::BezierSelect
+                            ) =>
+                    {
+                        if let Some(seg) = state.select_redo_segments.pop() {
+                            let len = seg.len();
+                            state.select_points_px.extend(seg);
+                            if self.tool == CanvasTool::MagneticLasso {
+                                state.select_segment_lens.push(len);
+                            }
+                            state.selecting = true;
+                            state.select_redo_segments.clear();
+                            state.select_current_px = state.select_points_px.last().copied();
+                            return Some(Action::request_redraw());
+                        }
                     }
                     Key::Named(Named::Escape)
                         if state.selecting
@@ -1113,6 +1470,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             ) =>
                     {
                         state.select_points_px.clear();
+                        state.select_redo_segments.clear();
                         state.select_segment_lens.clear();
                         state.magnetic_preview_px.clear();
                         state.select_current_px = None;
@@ -1126,6 +1484,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                                 CanvasTool::DrawPolygon | CanvasTool::DrawPolyline
                             ) =>
                     {
+                        state.draw_redo_points.clear();
                         if let Some(action) = commit_draw_polyline(state, self.tool) {
                             return Some(action);
                         }
@@ -1137,12 +1496,32 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                                 CanvasTool::DrawPolygon | CanvasTool::DrawPolyline
                             ) =>
                     {
-                        state.draw_points.pop();
+                        if let Some(pt) = state.draw_points.pop() {
+                            state.draw_redo_points.push(pt);
+                        }
                         if state.draw_points.is_empty() {
                             state.drawing_shape = false;
                             state.draw_current_px = None;
                         }
                         return Some(Action::request_redraw());
+                    }
+                    Key::Character(ch)
+                        if ch.eq_ignore_ascii_case("z")
+                            && state.modifiers.shift()
+                            && !state.modifiers.control()
+                            && !state.modifiers.alt()
+                            && !state.draw_redo_points.is_empty()
+                            && matches!(
+                                self.tool,
+                                CanvasTool::DrawPolygon | CanvasTool::DrawPolyline
+                            ) =>
+                    {
+                        if let Some(pt) = state.draw_redo_points.pop() {
+                            state.draw_points.push(pt);
+                            state.drawing_shape = true;
+                            state.draw_current_px = Some(pt);
+                            return Some(Action::request_redraw());
+                        }
                     }
                     Key::Named(Named::Escape)
                         if state.drawing_shape
@@ -1152,6 +1531,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             ) =>
                     {
                         state.draw_points.clear();
+                        state.draw_redo_points.clear();
                         state.draw_current_px = None;
                         state.drawing_shape = false;
                         return Some(Action::request_redraw());
@@ -1159,6 +1539,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     Key::Named(Named::Enter)
                         if !state.bezier_nodes.is_empty() && self.tool == CanvasTool::BezierPen =>
                     {
+                        state.bezier_redo_nodes.clear();
                         let to_sel = state.modifiers.control() || state.modifiers.logo();
                         if let Some(action) = commit_bezier_path(state, false, to_sel) {
                             return Some(action);
@@ -1167,7 +1548,9 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     Key::Named(Named::Backspace)
                         if !state.bezier_nodes.is_empty() && self.tool == CanvasTool::BezierPen =>
                     {
-                        state.bezier_nodes.pop();
+                        if let Some(node) = state.bezier_nodes.pop() {
+                            state.bezier_redo_nodes.push(node);
+                        }
                         if state.bezier_nodes.is_empty() {
                             state.drawing_shape = false;
                             state.bezier_dragging_handle = false;
@@ -1175,10 +1558,27 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                         }
                         return Some(Action::request_redraw());
                     }
+                    Key::Character(ch)
+                        if ch.eq_ignore_ascii_case("z")
+                            && state.modifiers.shift()
+                            && !state.modifiers.control()
+                            && !state.modifiers.alt()
+                            && !state.bezier_redo_nodes.is_empty()
+                            && self.tool == CanvasTool::BezierPen =>
+                    {
+                        if let Some(node) = state.bezier_redo_nodes.pop() {
+                            let pt = node.anchor;
+                            state.bezier_nodes.push(node);
+                            state.drawing_shape = true;
+                            state.draw_current_px = Some(pt);
+                            return Some(Action::request_redraw());
+                        }
+                    }
                     Key::Named(Named::Escape)
                         if !state.bezier_nodes.is_empty() && self.tool == CanvasTool::BezierPen =>
                     {
                         state.bezier_nodes.clear();
+                        state.bezier_redo_nodes.clear();
                         state.drawing_shape = false;
                         state.bezier_dragging_handle = false;
                         state.draw_current_px = None;
@@ -1223,17 +1623,36 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
                 if state.modifiers.shift()
-                    && matches!(self.tool, CanvasTool::Brush | CanvasTool::Eraser)
+                    && matches!(
+                        self.tool,
+                        CanvasTool::Brush
+                            | CanvasTool::Eraser
+                            | CanvasTool::BezierPen
+                            | CanvasTool::DrawLine
+                            | CanvasTool::DrawRect
+                            | CanvasTool::DrawEllipse
+                            | CanvasTool::DrawPolygon
+                            | CanvasTool::DrawPolyline
+                    )
                 {
                     let step = match delta {
                         mouse::ScrollDelta::Lines { y, .. } => *y * 2.0,
                         mouse::ScrollDelta::Pixels { y, .. } => (*y / 12.0).clamp(-4.0, 4.0),
                     };
                     if step.abs() > 0.01 {
-                        let next_r = (self.brush_radius_px + step).round().clamp(1.0, 200.0);
-                        return Some(
-                            Action::publish(CanvasEvent::BrushRadiusChanged(next_r)).and_capture(),
-                        );
+                        if matches!(self.tool, CanvasTool::Brush | CanvasTool::Eraser) {
+                            let next_r = (self.brush_radius_px + step).round().clamp(1.0, 200.0);
+                            return Some(
+                                Action::publish(CanvasEvent::BrushRadiusChanged(next_r))
+                                    .and_capture(),
+                            );
+                        } else {
+                            let next_w = (self.shape_stroke_width + step).round().clamp(1.0, 64.0);
+                            return Some(
+                                Action::publish(CanvasEvent::ShapeStrokeWidthChanged(next_w))
+                                    .and_capture(),
+                            );
+                        }
                     }
                     return None;
                 }
@@ -1374,17 +1793,8 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     return None;
                 }
 
-                // (3) Global Alt+Click / Ctrl+Click on non-selection/non-transform/non-healing tools -> SampleColor
-                if (state.modifiers.alt() || state.modifiers.control())
-                    && !self.tool.is_selection()
-                    && !matches!(
-                        self.tool,
-                        CanvasTool::Hand
-                            | CanvasTool::Zoom
-                            | CanvasTool::HealingBrush
-                            | CanvasTool::Transform
-                            | CanvasTool::PathSelect
-                    )
+                // (3) Global Quick Color Pick: Alt+Click / Ctrl+Click (Ctrl-only on DrawLine/Rect/Ellipse so Alt+Drag draws from center)
+                if self.is_quick_color_pick_active(state)
                     && let Some(pos) = cursor.position()
                     && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
                     && let Some(frame) = &self.frame
@@ -1392,7 +1802,12 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     state.sampling = true;
                     let ix = (px.floor() as u32).min(frame.width.saturating_sub(1));
                     let iy = (py.floor() as u32).min(frame.height.saturating_sub(1));
-                    return Some(Action::publish(CanvasEvent::SampleColor([ix, iy])).and_capture());
+                    let ev = if state.modifiers.shift() {
+                        CanvasEvent::SampleBgColor([ix, iy])
+                    } else {
+                        CanvasEvent::SampleColor([ix, iy])
+                    };
+                    return Some(Action::publish(ev).and_capture());
                 }
 
                 match self.tool {
@@ -1476,9 +1891,14 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     }
                     CanvasTool::MarqueeRect | CanvasTool::MarqueeEllipse => {
                         if let Some(pos) = cursor.position()
-                            && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
+                            && let Some([px, py]) = self.screen_to_image_px_unclamped(pos, bounds)
                         {
                             state.selecting = true;
+                            state.select_redo_segments.clear();
+                            let op_s = state.modifiers.shift();
+                            let op_a = state.modifiers.alt();
+                            state.select_press_op_modifiers = (op_s, op_a);
+                            state.select_geom_armed = (!op_s, !op_a);
                             state.select_anchor_px = Some([px as f32, py as f32]);
                             state.select_current_px = Some([px as f32, py as f32]);
                             return Some(Action::capture());
@@ -1511,6 +1931,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
                         {
                             state.selecting = true;
+                            state.select_redo_segments.clear();
                             state.select_points_px.clear();
                             state.select_points_px.push([px as f32, py as f32]);
                             return Some(Action::capture());
@@ -1554,6 +1975,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                                 }
                             }
                             state.selecting = true;
+                            state.select_redo_segments.clear();
                             if self.tool == CanvasTool::MagneticLasso {
                                 if state.select_points_px.is_empty() {
                                     let snapped = self
@@ -1601,7 +2023,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     }
                     CanvasTool::DrawLine | CanvasTool::DrawRect | CanvasTool::DrawEllipse => {
                         if let Some(pos) = cursor.position()
-                            && let Some([px, py]) = self.screen_to_image_px(pos, bounds)
+                            && let Some([px, py]) = self.screen_to_image_px_unclamped(pos, bounds)
                         {
                             let pt = [px as f32, py as f32];
                             state.drawing_shape = true;
@@ -1661,6 +2083,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                                 }
                             }
                             state.drawing_shape = true;
+                            state.draw_redo_points.clear();
                             state.draw_points.push(pt);
                             state.draw_current_px = Some(pt);
                             return Some(Action::request_redraw());
@@ -1682,6 +2105,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                                 }
                             }
                             state.drawing_shape = true;
+                            state.bezier_redo_nodes.clear();
                             state.bezier_dragging_handle = true;
                             state.bezier_nodes.push(VectorPathNode {
                                 anchor: pt,
@@ -1733,6 +2157,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                                             Action::publish(CanvasEvent::VectorSelectShape {
                                                 shape_id,
                                                 node_index: Some(node_index),
+                                                additive: state.modifiers.shift(),
                                             })
                                             .and_capture(),
                                         );
@@ -1763,6 +2188,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                                             Action::publish(CanvasEvent::VectorSelectShape {
                                                 shape_id,
                                                 node_index: Some(node_index),
+                                                additive: state.modifiers.shift(),
                                             })
                                             .and_capture(),
                                         );
@@ -1792,6 +2218,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                                             Action::publish(CanvasEvent::VectorSelectShape {
                                                 shape_id,
                                                 node_index: None,
+                                                additive: state.modifiers.shift(),
                                             })
                                             .and_capture(),
                                         );
@@ -1806,11 +2233,19 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                                             Action::publish(CanvasEvent::VectorSelectShape {
                                                 shape_id,
                                                 node_index: None,
+                                                additive: state.modifiers.shift(),
                                             })
                                             .and_capture(),
                                         );
                                     }
                                 }
+                            } else {
+                                state.selecting = true;
+                                state.select_press_op_modifiers =
+                                    (state.modifiers.shift(), state.modifiers.alt());
+                                state.select_anchor_px = Some(pt);
+                                state.select_current_px = Some(pt);
+                                return Some(Action::capture());
                             }
                         }
                         return None;
@@ -1842,19 +2277,59 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             );
                         }
                     }
-                    CanvasTool::Crop | CanvasTool::Pointer if self.crop_rect.is_some() => {
+                    CanvasTool::Crop | CanvasTool::Pointer
+                        if self.crop_rect.is_some()
+                            && (self.tool == CanvasTool::Crop || self.restrict_pan_to_hand) =>
+                    {
+                        if let Some(pos) = cursor.position()
+                            && let Some(uv) = self.screen_to_image_uv(pos, bounds)
+                        {
+                            let tol = self
+                                .fit_geometry(bounds)
+                                .map(|(_, _, drawn_w, drawn_h, _, _)| {
+                                    [12.0 / drawn_w.max(1.0), 12.0 / drawn_h.max(1.0)]
+                                })
+                                .unwrap_or([0.025, 0.025]);
+                            let rect = self.crop_rect.unwrap();
+                            let kind = Self::hit_test_crop_handle(rect, uv, tol[0], tol[1])
+                                .unwrap_or(CropDragKind::New);
+                            state.cropping = true;
+                            state.crop_anchor_uv = Some(uv);
+                            state.crop_drag_kind = Some(kind);
+                            state.crop_drag_start_rect = Some(rect);
+                            return Some(Action::capture());
+                        }
+                    }
+                    CanvasTool::Crop => {
                         if let Some(pos) = cursor.position()
                             && let Some(uv) = self.screen_to_image_uv(pos, bounds)
                         {
                             state.cropping = true;
                             state.crop_anchor_uv = Some(uv);
+                            state.crop_drag_kind = Some(CropDragKind::New);
+                            state.crop_drag_start_rect = None;
                             return Some(Action::capture());
                         }
+                    }
+                    CanvasTool::Pointer if !self.restrict_pan_to_hand => {
+                        state.dragging = true;
+                        state.last_cursor = cursor.position();
+                        return Some(Action::capture());
                     }
                     CanvasTool::Pointer => {
                         if let Some(pos) = cursor.position()
                             && let Some([px, py]) = self.screen_to_image_px_unclamped(pos, bounds)
                         {
+                            let doc_per_screen = self
+                                .fit_geometry(bounds)
+                                .map(|(_, _, drawn_w, _, fw, _)| (fw / drawn_w.max(1.0)).max(1e-4))
+                                .unwrap_or(1.0);
+                            if let Some(gid) =
+                                self.hit_test_guide(px as f32, py as f32, 6.0 * doc_per_screen)
+                            {
+                                state.dragging_guide_id = Some(gid);
+                                return Some(Action::capture());
+                            }
                             let pt = [px as f32, py as f32];
                             state.moving_layer = true;
                             state.move_start_px = Some(pt);
@@ -1868,7 +2343,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                         state.last_cursor = cursor.position();
                         return Some(Action::capture());
                     }
-                    CanvasTool::Crop | CanvasTool::RotateAngle => {
+                    CanvasTool::RotateAngle => {
                         // Reserve Left-click exclusively for the active tool; never accidentally pan.
                         return None;
                     }
@@ -1876,6 +2351,36 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 return None;
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                state.active_smart_guides.clear();
+                if let Some(gid) = state.dragging_guide_id.take() {
+                    if let Some(pos) = cursor.position()
+                        && let Some([px, py]) = self.screen_to_image_px_unclamped(pos, bounds)
+                        && let Some((fw, fh)) = self.effective_doc_size()
+                        && let Some(g) = self.guides.iter().find(|g| g.id == gid)
+                    {
+                        let p = match g.axis {
+                            GuideAxis::Horizontal => py as f32,
+                            GuideAxis::Vertical => px as f32,
+                        };
+                        let max_c = match g.axis {
+                            GuideAxis::Horizontal => fh,
+                            GuideAxis::Vertical => fw,
+                        };
+                        if p < 0.0 || p > max_c {
+                            return Some(
+                                Action::publish(CanvasEvent::GuideRemoved(gid)).and_capture(),
+                            );
+                        }
+                        return Some(
+                            Action::publish(CanvasEvent::GuideMoved {
+                                id: gid,
+                                position_px: p.round(),
+                            })
+                            .and_capture(),
+                        );
+                    }
+                    return Some(Action::capture());
+                }
                 if state.moving_layer {
                     state.moving_layer = false;
                     let start = state.move_start_px.take();
@@ -1986,24 +2491,48 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                                     CanvasEvent::DrawGradientCommit { start: a, end: b }
                                 }
                             }
-                            CanvasTool::DrawLine => CanvasEvent::DrawShapeCommit {
-                                kind: DrawShapeKind::Line,
-                                points: vec![a, b],
-                                nodes: Vec::new(),
-                                closed: false,
-                            },
-                            CanvasTool::DrawRect => CanvasEvent::DrawShapeCommit {
-                                kind: DrawShapeKind::Rect,
-                                points: vec![a, b],
-                                nodes: Vec::new(),
-                                closed: true,
-                            },
-                            CanvasTool::DrawEllipse => CanvasEvent::DrawShapeCommit {
-                                kind: DrawShapeKind::Ellipse,
-                                points: vec![a, b],
-                                nodes: Vec::new(),
-                                closed: true,
-                            },
+                            CanvasTool::DrawLine => {
+                                let (la, lb) = resolve_drag_line(
+                                    a,
+                                    b,
+                                    state.modifiers.shift(),
+                                    state.modifiers.alt(),
+                                );
+                                CanvasEvent::DrawShapeCommit {
+                                    kind: DrawShapeKind::Line,
+                                    points: vec![la, lb],
+                                    nodes: Vec::new(),
+                                    closed: false,
+                                }
+                            }
+                            CanvasTool::DrawRect => {
+                                let (p0, p1) = resolve_drag_box(
+                                    a,
+                                    b,
+                                    state.modifiers.shift(),
+                                    state.modifiers.alt(),
+                                );
+                                CanvasEvent::DrawShapeCommit {
+                                    kind: DrawShapeKind::Rect,
+                                    points: vec![p0, p1],
+                                    nodes: Vec::new(),
+                                    closed: true,
+                                }
+                            }
+                            CanvasTool::DrawEllipse => {
+                                let (p0, p1) = resolve_drag_box(
+                                    a,
+                                    b,
+                                    state.modifiers.shift(),
+                                    state.modifiers.alt(),
+                                );
+                                CanvasEvent::DrawShapeCommit {
+                                    kind: DrawShapeKind::Ellipse,
+                                    points: vec![p0, p1],
+                                    nodes: Vec::new(),
+                                    closed: true,
+                                }
+                            }
                             _ => unreachable!(),
                         };
                         return Some(Action::publish(ev).and_capture());
@@ -2017,6 +2546,12 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 if state.cropping {
                     state.cropping = false;
                     state.crop_anchor_uv = None;
+                    state.crop_drag_kind = None;
+                    state.crop_drag_start_rect = None;
+                    state.dragging_guide_id = None;
+                    state.active_smart_guides.clear();
+                    state.crop_drag_kind = None;
+                    state.crop_drag_start_rect = None;
                     return Some(Action::capture());
                 }
                 if state.selecting
@@ -2026,6 +2561,7 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             | CanvasTool::MarqueeEllipse
                             | CanvasTool::Lasso
                             | CanvasTool::QuickSelect
+                            | CanvasTool::PathSelect
                     )
                 {
                     state.selecting = false;
@@ -2035,21 +2571,79 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                         CanvasTool::MarqueeRect | CanvasTool::MarqueeEllipse => {
                             let anchor = state.select_anchor_px.take();
                             let cur = state.select_current_px.take();
+                            let (op_shift, op_alt) = state.select_press_op_modifiers;
+                            let (arm_s, arm_a) = state.select_geom_armed;
+                            state.select_press_op_modifiers = (false, false);
+                            state.select_geom_armed = (false, false);
                             if let (Some(a), Some(b)) = (anchor, cur) {
-                                let x = a[0].min(b[0]);
-                                let y = a[1].min(b[1]);
-                                let w = (a[0] - b[0]).abs();
-                                let h = (a[1] - b[1]).abs();
+                                let (p0, p1) = resolve_drag_box(a, b, shift && arm_s, alt && arm_a);
+                                let (doc_w, doc_h) =
+                                    self.effective_doc_size().unwrap_or((f32::MAX, f32::MAX));
+                                let x0 = p0[0].clamp(0.0, doc_w);
+                                let y0 = p0[1].clamp(0.0, doc_h);
+                                let x1 = p1[0].clamp(0.0, doc_w);
+                                let y1 = p1[1].clamp(0.0, doc_h);
+                                let w = (x1 - x0).max(0.0);
+                                let h = (y1 - y0).max(0.0);
                                 if w >= 1.0 && h >= 1.0 {
                                     return Some(
                                         Action::publish(CanvasEvent::SelectMarqueeCommit {
                                             is_ellipse: self.tool == CanvasTool::MarqueeEllipse,
-                                            x,
-                                            y,
+                                            x: x0,
+                                            y: y0,
                                             width: w,
                                             height: h,
-                                            shift,
-                                            alt,
+                                            shift: op_shift,
+                                            alt: op_alt,
+                                        })
+                                        .and_capture(),
+                                    );
+                                } else if !op_shift && !op_alt {
+                                    return Some(
+                                        Action::publish(CanvasEvent::SelectClear).and_capture(),
+                                    );
+                                }
+                            }
+                        }
+                        CanvasTool::PathSelect => {
+                            let anchor = state.select_anchor_px.take();
+                            let cur = state.select_current_px.take();
+                            let (op_shift, _) = state.select_press_op_modifiers;
+                            state.select_press_op_modifiers = (false, false);
+                            if let (Some(a), Some(b), Some(vdata)) =
+                                (anchor, cur, self.active_vector_layer.as_ref())
+                            {
+                                let min_x = a[0].min(b[0]);
+                                let min_y = a[1].min(b[1]);
+                                let max_x = a[0].max(b[0]);
+                                let max_y = a[1].max(b[1]);
+                                if (max_x - min_x) >= 2.0 || (max_y - min_y) >= 2.0 {
+                                    let shape_ids: Vec<u64> = vdata
+                                        .shapes
+                                        .iter()
+                                        .filter(|s| {
+                                            let (nodes, _) = geometry_to_bezier_nodes(&s.geometry);
+                                            nodes.iter().any(|n| {
+                                                n.anchor[0] >= min_x
+                                                    && n.anchor[0] <= max_x
+                                                    && n.anchor[1] >= min_y
+                                                    && n.anchor[1] <= max_y
+                                            })
+                                        })
+                                        .map(|s| s.id)
+                                        .collect();
+                                    return Some(
+                                        Action::publish(CanvasEvent::VectorSelectMarquee {
+                                            shape_ids,
+                                            additive: op_shift,
+                                        })
+                                        .and_capture(),
+                                    );
+                                } else if !op_shift {
+                                    return Some(
+                                        Action::publish(CanvasEvent::VectorSelectMarquee {
+                                            shape_ids: Vec::new(),
+                                            additive: false,
                                         })
                                         .and_capture(),
                                     );
@@ -2158,17 +2752,175 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                     return Some(Action::publish(CanvasEvent::SampleColor([ix, iy])).and_capture());
                 }
             }
+            Event::Mouse(mouse::Event::CursorMoved { position })
+                if state.dragging_guide_id.is_some() =>
+            {
+                if let Some(gid) = state.dragging_guide_id
+                    && let Some([px, py]) = self.screen_to_image_px_unclamped(*position, bounds)
+                    && let Some(g) = self.guides.iter().find(|g| g.id == gid)
+                {
+                    let p = match g.axis {
+                        GuideAxis::Horizontal => py as f32,
+                        GuideAxis::Vertical => px as f32,
+                    };
+                    return Some(
+                        Action::publish(CanvasEvent::GuideMoved {
+                            id: gid,
+                            position_px: p.round(),
+                        })
+                        .and_capture(),
+                    );
+                }
+            }
             Event::Mouse(mouse::Event::CursorMoved { position }) if state.cropping => {
                 if let (Some(anchor), Some(cur)) = (
                     state.crop_anchor_uv,
                     self.screen_to_image_uv(*position, bounds),
-                ) && let Some(rect) = self.constrained_crop(anchor, cur)
-                {
-                    return Some(Action::publish(CanvasEvent::CropUpdated(rect)).and_capture());
+                ) {
+                    state.active_smart_guides.clear();
+                    let (fw, fh) = self.effective_doc_size().unwrap_or((100.0, 100.0));
+                    let doc_per_screen = self
+                        .fit_geometry(bounds)
+                        .map(|(_, _, drawn_w, _, w, _)| (w / drawn_w.max(1.0)).max(1e-4))
+                        .unwrap_or(1.0);
+                    let snap_tol = 6.0 * doc_per_screen;
+                    let rect = match (state.crop_drag_kind, state.crop_drag_start_rect) {
+                        (Some(CropDragKind::Move), Some(start)) => {
+                            let w = start[2] - start[0];
+                            let h = start[3] - start[1];
+                            let dx = cur[0] - anchor[0];
+                            let dy = cur[1] - anchor[1];
+                            let raw_u0 = (start[0] + dx).clamp(0.0, (1.0 - w).max(0.0));
+                            let raw_v0 = (start[1] + dy).clamp(0.0, (1.0 - h).max(0.0));
+                            let (sx, sgx) = self.snap_coord_px(
+                                raw_u0 * fw,
+                                GuideAxis::Vertical,
+                                snap_tol,
+                                fw,
+                                fh,
+                            );
+                            let (sy, sgy) = self.snap_coord_px(
+                                raw_v0 * fh,
+                                GuideAxis::Horizontal,
+                                snap_tol,
+                                fw,
+                                fh,
+                            );
+                            if let Some(l) = sgx {
+                                state.active_smart_guides.push(l);
+                            }
+                            if let Some(l) = sgy {
+                                state.active_smart_guides.push(l);
+                            }
+                            let u0 = (sx / fw).clamp(0.0, (1.0 - w).max(0.0));
+                            let v0 = (sy / fh).clamp(0.0, (1.0 - h).max(0.0));
+                            Some([u0, v0, u0 + w, v0 + h])
+                        }
+                        (Some(CropDragKind::Resize { dx_mask, dy_mask }), Some(start)) => {
+                            let min_u = 1.0 / fw;
+                            let min_v = 1.0 / fh;
+                            let mut u0 = start[0];
+                            let mut v0 = start[1];
+                            let mut u1 = start[2];
+                            let mut v1 = start[3];
+                            if dx_mask < 0 {
+                                let (sx, sg) = self.snap_coord_px(
+                                    cur[0] * fw,
+                                    GuideAxis::Vertical,
+                                    snap_tol,
+                                    fw,
+                                    fh,
+                                );
+                                if let Some(l) = sg {
+                                    state.active_smart_guides.push(l);
+                                }
+                                u0 = (sx / fw).clamp(0.0, (u1 - min_u).max(0.0));
+                            } else if dx_mask > 0 {
+                                let (sx, sg) = self.snap_coord_px(
+                                    cur[0] * fw,
+                                    GuideAxis::Vertical,
+                                    snap_tol,
+                                    fw,
+                                    fh,
+                                );
+                                if let Some(l) = sg {
+                                    state.active_smart_guides.push(l);
+                                }
+                                u1 = (sx / fw).clamp((u0 + min_u).min(1.0), 1.0);
+                            }
+                            if dy_mask < 0 {
+                                let (sy, sg) = self.snap_coord_px(
+                                    cur[1] * fh,
+                                    GuideAxis::Horizontal,
+                                    snap_tol,
+                                    fw,
+                                    fh,
+                                );
+                                if let Some(l) = sg {
+                                    state.active_smart_guides.push(l);
+                                }
+                                v0 = (sy / fh).clamp(0.0, (v1 - min_v).max(0.0));
+                            } else if dy_mask > 0 {
+                                let (sy, sg) = self.snap_coord_px(
+                                    cur[1] * fh,
+                                    GuideAxis::Horizontal,
+                                    snap_tol,
+                                    fw,
+                                    fh,
+                                );
+                                if let Some(l) = sg {
+                                    state.active_smart_guides.push(l);
+                                }
+                                v1 = (sy / fh).clamp((v0 + min_v).min(1.0), 1.0);
+                            }
+                            if (u1 - u0) >= min_u && (v1 - v0) >= min_v {
+                                Some([u0, v0, u1, v1])
+                            } else {
+                                None
+                            }
+                        }
+                        _ => {
+                            let (sx, sgx) = self.snap_coord_px(
+                                cur[0] * fw,
+                                GuideAxis::Vertical,
+                                snap_tol,
+                                fw,
+                                fh,
+                            );
+                            let (sy, sgy) = self.snap_coord_px(
+                                cur[1] * fh,
+                                GuideAxis::Horizontal,
+                                snap_tol,
+                                fw,
+                                fh,
+                            );
+                            if let Some(l) = sgx {
+                                state.active_smart_guides.push(l);
+                            }
+                            if let Some(l) = sgy {
+                                state.active_smart_guides.push(l);
+                            }
+                            self.constrained_crop(
+                                anchor,
+                                [(sx / fw).clamp(0.0, 1.0), (sy / fh).clamp(0.0, 1.0)],
+                            )
+                        }
+                    };
+                    if let Some(rect) = rect {
+                        return Some(Action::publish(CanvasEvent::CropUpdated(rect)).and_capture());
+                    }
                 }
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) if state.selecting => {
-                if let Some([px, py]) = self.screen_to_image_px(*position, bounds) {
+                let coords = if matches!(
+                    self.tool,
+                    CanvasTool::MarqueeRect | CanvasTool::MarqueeEllipse | CanvasTool::PathSelect
+                ) {
+                    self.screen_to_image_px_unclamped(*position, bounds)
+                } else {
+                    self.screen_to_image_px(*position, bounds)
+                };
+                if let Some([px, py]) = coords {
                     let pt = [px as f32, py as f32];
                     state.select_current_px = Some(pt);
                     if matches!(self.tool, CanvasTool::Lasso | CanvasTool::QuickSelect) {
@@ -2209,21 +2961,31 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                         }
                         return Some(Action::request_redraw());
                     }
-                } else if let Some([px, py]) = self.screen_to_image_px(*position, bounds) {
-                    let pt = [px as f32, py as f32];
-                    if state.bezier_dragging_handle
-                        && self.tool == CanvasTool::BezierPen
-                        && let Some(last) = state.bezier_nodes.last_mut()
-                    {
-                        let dx = pt[0] - last.anchor[0];
-                        let dy = pt[1] - last.anchor[1];
-                        if dx * dx + dy * dy > 4.0 {
-                            last.handle_out = Some(pt);
-                            last.handle_in = Some([last.anchor[0] - dx, last.anchor[1] - dy]);
+                } else {
+                    let coords = if matches!(
+                        self.tool,
+                        CanvasTool::DrawLine | CanvasTool::DrawRect | CanvasTool::DrawEllipse
+                    ) {
+                        self.screen_to_image_px_unclamped(*position, bounds)
+                    } else {
+                        self.screen_to_image_px(*position, bounds)
+                    };
+                    if let Some([px, py]) = coords {
+                        let pt = [px as f32, py as f32];
+                        if state.bezier_dragging_handle
+                            && self.tool == CanvasTool::BezierPen
+                            && let Some(last) = state.bezier_nodes.last_mut()
+                        {
+                            let dx = pt[0] - last.anchor[0];
+                            let dy = pt[1] - last.anchor[1];
+                            if dx * dx + dy * dy > 4.0 {
+                                last.handle_out = Some(pt);
+                                last.handle_in = Some([last.anchor[0] - dx, last.anchor[1] - dy]);
+                            }
                         }
+                        state.draw_current_px = Some(pt);
+                        return Some(Action::request_redraw());
                     }
-                    state.draw_current_px = Some(pt);
-                    return Some(Action::request_redraw());
                 }
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) if state.moving_layer => {
@@ -2238,6 +3000,36 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                             pt[1] = start[1];
                         } else {
                             pt[0] = start[0];
+                        }
+                    }
+                    state.active_smart_guides.clear();
+                    if let (Some(start), Some(tp), Some((fw, fh))) = (
+                        state.move_start_px,
+                        self.transform_preview.as_ref(),
+                        self.effective_doc_size(),
+                    ) {
+                        let doc_per_screen = self
+                            .fit_geometry(bounds)
+                            .map(|(_, _, drawn_w, _, w, _)| (w / drawn_w.max(1.0)).max(1e-4))
+                            .unwrap_or(1.0);
+                        let tol = 6.0 * doc_per_screen;
+                        let dx = pt[0] - start[0];
+                        let dy = pt[1] - start[1];
+                        let [bx0, by0] = tp.layer_offset;
+                        let [bw, bh] = tp.layer_size;
+                        let cur_cx = bx0 as f32 + (bw as f32) * 0.5 + dx;
+                        let cur_cy = by0 as f32 + (bh as f32) * 0.5 + dy;
+                        let (scx, sgx) =
+                            self.snap_coord_px(cur_cx, GuideAxis::Vertical, tol, fw, fh);
+                        let (scy, sgy) =
+                            self.snap_coord_px(cur_cy, GuideAxis::Horizontal, tol, fw, fh);
+                        pt[0] += scx - cur_cx;
+                        pt[1] += scy - cur_cy;
+                        if let Some(l) = sgx {
+                            state.active_smart_guides.push(l);
+                        }
+                        if let Some(l) = sgy {
+                            state.active_smart_guides.push(l);
                         }
                     }
                     state.move_current_px = Some(pt);
@@ -2319,19 +3111,25 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
         let (sel_preview_kind, sel_preview_rect) = if state.selecting
             && matches!(
                 self.tool,
-                CanvasTool::MarqueeRect | CanvasTool::MarqueeEllipse
+                CanvasTool::MarqueeRect | CanvasTool::MarqueeEllipse | CanvasTool::PathSelect
             )
             && let (Some(a), Some(b), Some((doc_w, doc_h))) = (
                 state.select_anchor_px,
                 state.select_current_px,
                 self.effective_doc_size(),
             ) {
+            let (p0, p1) = resolve_drag_box(
+                a,
+                b,
+                state.modifiers.shift() && state.select_geom_armed.0,
+                state.modifiers.alt() && state.select_geom_armed.1,
+            );
             let fw = doc_w.max(1.0);
             let fh = doc_h.max(1.0);
-            let u0 = (a[0].min(b[0]) / fw).clamp(0.0, 1.0);
-            let v0 = (a[1].min(b[1]) / fh).clamp(0.0, 1.0);
-            let u1 = (a[0].max(b[0]) / fw).clamp(0.0, 1.0);
-            let v1 = (a[1].max(b[1]) / fh).clamp(0.0, 1.0);
+            let u0 = (p0[0] / fw).clamp(0.0, 1.0);
+            let v0 = (p0[1] / fh).clamp(0.0, 1.0);
+            let u1 = (p1[0] / fw).clamp(0.0, 1.0);
+            let v1 = (p1[1] / fh).clamp(0.0, 1.0);
             let kind = if self.tool == CanvasTool::MarqueeEllipse {
                 2.0
             } else {
@@ -2366,8 +3164,11 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
             pan_x: self.pan_x,
             pan_y: self.pan_y,
             adjustments: self.adjustments,
+            adj_selection_only: self.adj_selection_only,
             dark_theme: self.dark_theme,
-            crop_rect: self.crop_rect,
+            crop_rect: self
+                .crop_rect
+                .or((self.tool == CanvasTool::Crop).then_some([0.0, 0.0, 0.0, 0.0])),
             quarter_turns: self.quarter_turns % 4,
             preview_angle_rad: self.preview_angle_rad,
             preview_fill: self.preview_fill,
@@ -2394,6 +3195,30 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
+        if let Some(gid) = state.dragging_guide_id
+            && let Some(g) = self.guides.iter().find(|g| g.id == gid)
+        {
+            return match g.axis {
+                GuideAxis::Horizontal => mouse::Interaction::ResizingVertically,
+                GuideAxis::Vertical => mouse::Interaction::ResizingHorizontally,
+            };
+        }
+        if self.tool == CanvasTool::Pointer
+            && cursor.is_over(bounds)
+            && let Some(pos) = cursor.position()
+            && let Some([px, py]) = self.screen_to_image_px_unclamped(pos, bounds)
+            && let Some((_, _, drawn_w, _, fw, _)) = self.fit_geometry(bounds)
+        {
+            let doc_per_screen = (fw / drawn_w.max(1.0)).max(1e-4);
+            if let Some(gid) = self.hit_test_guide(px as f32, py as f32, 6.0 * doc_per_screen)
+                && let Some(g) = self.guides.iter().find(|g| g.id == gid)
+            {
+                return match g.axis {
+                    GuideAxis::Horizontal => mouse::Interaction::ResizingVertically,
+                    GuideAxis::Vertical => mouse::Interaction::ResizingHorizontally,
+                };
+            }
+        }
         if state.dragging_split
             || (cursor
                 .position()
@@ -2467,6 +3292,28 @@ impl shader::Program<CanvasEvent> for ImageCanvasProgram {
                 }
             }
             mouse::Interaction::default()
+        } else if self.tool == CanvasTool::Crop
+            && let Some(rect) = self.crop_rect
+            && let Some(pos) = cursor.position()
+            && let Some(uv) = self.screen_to_image_uv(pos, bounds)
+        {
+            let tol = self
+                .fit_geometry(bounds)
+                .map(|(_, _, drawn_w, drawn_h, _, _)| {
+                    [12.0 / drawn_w.max(1.0), 12.0 / drawn_h.max(1.0)]
+                })
+                .unwrap_or([0.025, 0.025]);
+            match Self::hit_test_crop_handle(rect, uv, tol[0], tol[1]) {
+                Some(CropDragKind::Move) => mouse::Interaction::Grab,
+                Some(CropDragKind::Resize { dx_mask, dy_mask }) => match (dx_mask, dy_mask) {
+                    (-1, -1) | (1, 1) => mouse::Interaction::ResizingDiagonallyDown,
+                    (1, -1) | (-1, 1) => mouse::Interaction::ResizingDiagonallyUp,
+                    (0, _) => mouse::Interaction::ResizingVertically,
+                    (_, 0) => mouse::Interaction::ResizingHorizontally,
+                    _ => mouse::Interaction::Crosshair,
+                },
+                _ => mouse::Interaction::Crosshair,
+            }
         } else if self.crop_rect.is_some()
             || self.tool.is_selection()
             || matches!(
@@ -2669,6 +3516,152 @@ impl ImageCanvasProgram {
     ) -> (Vec<OverlayVertex>, Vec<OverlayVertex>) {
         let mut lines = Vec::new();
         let mut tris = Vec::new();
+
+        if let Some((fw, fh)) = self.effective_doc_size() {
+            // 1. Grid overlay
+            if self.show_grid && self.grid_spacing_px >= 4.0 {
+                let step = self.grid_spacing_px;
+                let divs = self.grid_subdivisions.clamp(1, 16);
+                let sub_step = (step / divs as f32).max(4.0);
+                let op = self.grid_opacity.clamp(0.1, 2.0);
+                let major_a = (0.16 * op).min(0.85);
+                let minor_a = (0.06 * op).min(0.55);
+                let major_col = if self.dark_theme {
+                    [1.0, 1.0, 1.0, major_a]
+                } else {
+                    [0.0, 0.0, 0.0, major_a]
+                };
+                let minor_col = if self.dark_theme {
+                    [1.0, 1.0, 1.0, minor_a]
+                } else {
+                    [0.0, 0.0, 0.0, minor_a]
+                };
+                let mut x = sub_step;
+                let mut idx = 1u32;
+                while x < fw && idx < 1024 {
+                    let is_major = idx.is_multiple_of(divs);
+                    let col = if is_major { major_col } else { minor_col };
+                    if let (Some(a), Some(b)) = (
+                        self.doc_px_to_ndc([x, 0.0], bounds),
+                        self.doc_px_to_ndc([x, fh], bounds),
+                    ) {
+                        lines.push(OverlayVertex::flat(a, col));
+                        lines.push(OverlayVertex::flat(b, col));
+                    }
+                    idx += 1;
+                    x = sub_step * idx as f32;
+                }
+                let mut y = sub_step;
+                let mut idy = 1u32;
+                while y < fh && idy < 1024 {
+                    let is_major = idy.is_multiple_of(divs);
+                    let col = if is_major { major_col } else { minor_col };
+                    if let (Some(a), Some(b)) = (
+                        self.doc_px_to_ndc([0.0, y], bounds),
+                        self.doc_px_to_ndc([fw, y], bounds),
+                    ) {
+                        lines.push(OverlayVertex::flat(a, col));
+                        lines.push(OverlayVertex::flat(b, col));
+                    }
+                    idy += 1;
+                    y = sub_step * idy as f32;
+                }
+            }
+
+            // 2. Guidelines overlay
+            if self.show_guides {
+                let guide_col = [0.10, 0.82, 1.0, 0.88];
+                for g in &self.guides {
+                    let (p0, p1) = match g.axis {
+                        GuideAxis::Horizontal => ([0.0, g.position_px], [fw, g.position_px]),
+                        GuideAxis::Vertical => ([g.position_px, 0.0], [g.position_px, fh]),
+                    };
+                    if let (Some(a), Some(b)) = (
+                        self.doc_px_to_ndc(p0, bounds),
+                        self.doc_px_to_ndc(p1, bounds),
+                    ) {
+                        lines.push(OverlayVertex::flat(a, guide_col));
+                        lines.push(OverlayVertex::flat(b, guide_col));
+                    }
+                }
+            }
+
+            if let Some((axis, pos_px)) = self.pending_guide_preview {
+                let preview_col = [0.20, 0.92, 1.0, 0.95];
+                let (p0, p1) = match axis {
+                    GuideAxis::Horizontal => ([0.0, pos_px], [fw, pos_px]),
+                    GuideAxis::Vertical => ([pos_px, 0.0], [pos_px, fh]),
+                };
+                if let (Some(a), Some(b)) = (
+                    self.doc_px_to_ndc(p0, bounds),
+                    self.doc_px_to_ndc(p1, bounds),
+                ) {
+                    lines.push(OverlayVertex::flat(a, preview_col));
+                    lines.push(OverlayVertex::flat(b, preview_col));
+                }
+            }
+
+            // 3. Active Smart Guides (during Move / Crop / Transform / Selection snap)
+            if !state.active_smart_guides.is_empty() {
+                let sg_col = [1.0, 0.25, 0.78, 0.95];
+                for sg in &state.active_smart_guides {
+                    let (p0, p1) = match sg.axis {
+                        GuideAxis::Horizontal => ([sg.start_px, sg.pos_px], [sg.end_px, sg.pos_px]),
+                        GuideAxis::Vertical => ([sg.pos_px, sg.start_px], [sg.pos_px, sg.end_px]),
+                    };
+                    if let (Some(a), Some(b)) = (
+                        self.doc_px_to_ndc(p0, bounds),
+                        self.doc_px_to_ndc(p1, bounds),
+                    ) {
+                        lines.push(OverlayVertex::flat(a, sg_col));
+                        lines.push(OverlayVertex::flat(b, sg_col));
+                    }
+                }
+            }
+
+            // 4. Crop 8 resize handles
+            if let Some([u0, v0, u1, v1]) = self.crop_rect {
+                let um = (u0 + u1) * 0.5;
+                let vm = (v0 + v1) * 0.5;
+                let handle_pts = [
+                    [u0 * fw, v0 * fh],
+                    [u1 * fw, v0 * fh],
+                    [u0 * fw, v1 * fh],
+                    [u1 * fw, v1 * fh],
+                    [um * fw, v0 * fh],
+                    [um * fw, v1 * fh],
+                    [u0 * fw, vm * fh],
+                    [u1 * fw, vm * fh],
+                ];
+                let [hx_ndc, hy_ndc] = self.screen_delta_to_ndc(4.0, 4.0, bounds);
+                let fill_col = [1.0, 1.0, 1.0, 0.95];
+                let edge_col = [0.08, 0.10, 0.14, 0.95];
+                for pt in handle_pts {
+                    if let Some(c) = self.doc_px_to_ndc(pt, bounds) {
+                        let rx = hx_ndc.abs();
+                        let ry = hy_ndc.abs();
+                        let tl = [c[0] - rx, c[1] + ry];
+                        let tr = [c[0] + rx, c[1] + ry];
+                        let br = [c[0] + rx, c[1] - ry];
+                        let bl = [c[0] - rx, c[1] - ry];
+                        tris.push(OverlayVertex::flat(tl, fill_col));
+                        tris.push(OverlayVertex::flat(tr, fill_col));
+                        tris.push(OverlayVertex::flat(br, fill_col));
+                        tris.push(OverlayVertex::flat(tl, fill_col));
+                        tris.push(OverlayVertex::flat(br, fill_col));
+                        tris.push(OverlayVertex::flat(bl, fill_col));
+                        lines.push(OverlayVertex::flat(tl, edge_col));
+                        lines.push(OverlayVertex::flat(tr, edge_col));
+                        lines.push(OverlayVertex::flat(tr, edge_col));
+                        lines.push(OverlayVertex::flat(br, edge_col));
+                        lines.push(OverlayVertex::flat(br, edge_col));
+                        lines.push(OverlayVertex::flat(bl, edge_col));
+                        lines.push(OverlayVertex::flat(bl, edge_col));
+                        lines.push(OverlayVertex::flat(tl, edge_col));
+                    }
+                }
+            }
+        }
 
         // Quick color-pick / Eyedropper pipette reticle anchored at the cursor hotspot
         if (self.is_quick_color_pick_active(state) || state.sampling)
@@ -2903,29 +3896,39 @@ impl ImageCanvasProgram {
             match self.tool {
                 CanvasTool::Gradient => {}
                 CanvasTool::DrawLine => {
-                    if let (Some(a), Some(b)) = (state.draw_anchor_px, state.draw_current_px)
-                        && let (Some(na), Some(nb)) =
-                            (self.doc_px_to_ndc(a, bounds), self.doc_px_to_ndc(b, bounds))
-                    {
-                        self.push_overlay_line_ndc(
-                            &mut lines,
-                            &mut tris,
-                            na,
-                            nb,
-                            rubber_color,
-                            1.2,
-                            bounds,
-                        );
-                        self.push_overlay_dot(&mut tris, a, 3.5, [0.2, 0.8, 1.0, 1.0], bounds);
-                        self.push_overlay_dot(&mut tris, b, 3.5, [1.0, 1.0, 1.0, 0.95], bounds);
+                    if let (Some(a), Some(b)) = (state.draw_anchor_px, state.draw_current_px) {
+                        let (la, lb) =
+                            resolve_drag_line(a, b, state.modifiers.shift(), state.modifiers.alt());
+                        if let (Some(na), Some(nb)) = (
+                            self.doc_px_to_ndc(la, bounds),
+                            self.doc_px_to_ndc(lb, bounds),
+                        ) {
+                            self.push_overlay_line_ndc(
+                                &mut lines,
+                                &mut tris,
+                                na,
+                                nb,
+                                rubber_color,
+                                1.2,
+                                bounds,
+                            );
+                            self.push_overlay_dot(&mut tris, la, 3.5, [0.2, 0.8, 1.0, 1.0], bounds);
+                            self.push_overlay_dot(
+                                &mut tris,
+                                lb,
+                                3.5,
+                                [1.0, 1.0, 1.0, 0.95],
+                                bounds,
+                            );
+                        }
                     }
                 }
                 CanvasTool::DrawRect => {
                     if let (Some(a), Some(b)) = (state.draw_anchor_px, state.draw_current_px) {
-                        let x0 = a[0].min(b[0]);
-                        let y0 = a[1].min(b[1]);
-                        let x1 = a[0].max(b[0]);
-                        let y1 = a[1].max(b[1]);
+                        let (p0, p1) =
+                            resolve_drag_box(a, b, state.modifiers.shift(), state.modifiers.alt());
+                        let [x0, y0] = p0;
+                        let [x1, y1] = p1;
                         let corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
                         for i in 0..4 {
                             if let (Some(na), Some(nb)) = (
@@ -2947,10 +3950,12 @@ impl ImageCanvasProgram {
                 }
                 CanvasTool::DrawEllipse => {
                     if let (Some(a), Some(b)) = (state.draw_anchor_px, state.draw_current_px) {
-                        let cx = (a[0] + b[0]) * 0.5;
-                        let cy = (a[1] + b[1]) * 0.5;
-                        let rx = (a[0] - b[0]).abs() * 0.5;
-                        let ry = (a[1] - b[1]).abs() * 0.5;
+                        let (p0, p1) =
+                            resolve_drag_box(a, b, state.modifiers.shift(), state.modifiers.alt());
+                        let cx = (p0[0] + p1[0]) * 0.5;
+                        let cy = (p0[1] + p1[1]) * 0.5;
+                        let rx = (p1[0] - p0[0]).abs() * 0.5;
+                        let ry = (p1[1] - p0[1]).abs() * 0.5;
                         const SEGS: usize = 32;
                         for s in 0..SEGS {
                             let t0 = (s as f32 / SEGS as f32) * std::f32::consts::TAU;
@@ -3956,5 +4961,166 @@ mod tests {
         )
         .and_then(|a| a.into_inner().0);
         assert!(matches!(esc_ev, Some(CanvasEvent::GradientDraftCancel)));
+    }
+
+    #[test]
+    fn resolve_drag_box_locks_square_and_centers_across_quadrants() {
+        // Free drag in negative quadrant
+        let (p0, p1) = resolve_drag_box([100.0, 100.0], [60.0, 80.0], false, false);
+        assert_eq!(p0, [60.0, 80.0]);
+        assert_eq!(p1, [100.0, 100.0]);
+
+        // Shift square lock in negative-x, positive-y quadrant
+        let (sq0, sq1) = resolve_drag_box([100.0, 100.0], [70.0, 150.0], true, false);
+        assert_eq!(sq0, [50.0, 100.0]);
+        assert_eq!(sq1, [100.0, 150.0]);
+
+        // Alt from center
+        let (c0, c1) = resolve_drag_box([100.0, 100.0], [130.0, 115.0], false, true);
+        assert_eq!(c0, [70.0, 85.0]);
+        assert_eq!(c1, [130.0, 115.0]);
+
+        // Shift + Alt square/circle from center
+        let (sc0, sc1) = resolve_drag_box([100.0, 100.0], [120.0, 140.0], true, true);
+        assert_eq!(sc0, [60.0, 60.0]);
+        assert_eq!(sc1, [140.0, 140.0]);
+    }
+
+    #[test]
+    fn marquee_shift_held_at_press_adds_free_rect_without_locking_square() {
+        let prog = ImageCanvasProgram {
+            frame: Some(dummy_frame(400, 400)),
+            tool: CanvasTool::MarqueeRect,
+            ..Default::default()
+        };
+        let bounds = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(400.0, 400.0));
+        let mut state = CanvasInteractionState {
+            modifiers: Modifiers::SHIFT,
+            ..Default::default()
+        };
+        let _ = shader::Program::update(
+            &prog,
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(iced::Point::new(50.0, 50.0)),
+        );
+        let _ = shader::Program::update(
+            &prog,
+            &mut state,
+            &Event::Mouse(mouse::Event::CursorMoved {
+                position: iced::Point::new(150.0, 90.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(iced::Point::new(150.0, 90.0)),
+        );
+        assert!(!state.select_geom_armed.0);
+        assert_eq!(state.select_press_op_modifiers, (true, false));
+        let act = shader::Program::update(
+            &prog,
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(iced::Point::new(150.0, 90.0)),
+        );
+        let dbg = format!("{act:?}");
+        assert!(dbg.contains("width: 100.0"));
+        assert!(dbg.contains("height: 40.0"));
+        assert!(dbg.contains("shift: true"));
+    }
+
+    #[test]
+    fn viewer_pointer_pans_instead_of_moving_layer() {
+        let prog = ImageCanvasProgram {
+            frame: Some(dummy_frame(800, 600)),
+            tool: CanvasTool::Pointer,
+            restrict_pan_to_hand: false,
+            ..Default::default()
+        };
+        let bounds = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let mut state = CanvasInteractionState::default();
+        let _ = shader::Program::update(
+            &prog,
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(iced::Point::new(100.0, 100.0)),
+        );
+        assert!(state.dragging);
+        assert!(!state.moving_layer);
+    }
+
+    #[test]
+    fn resolve_drag_line_snaps_angle_and_mirrors_from_center() {
+        let (a, b) = resolve_drag_line([100.0, 100.0], [150.0, 103.0], true, false);
+        assert_eq!(a, [100.0, 100.0]);
+        assert!((b[1] - 100.0).abs() < 1e-3);
+        assert!((b[0] - 150.0).abs() < 0.2);
+
+        let (ca, cb) = resolve_drag_line([100.0, 100.0], [140.0, 120.0], false, true);
+        assert_eq!(ca, [60.0, 80.0]);
+        assert_eq!(cb, [140.0, 120.0]);
+    }
+
+    #[test]
+    fn bezier_and_polygon_backspace_and_shift_z_redo_nodes() {
+        let mut prog = ImageCanvasProgram::default();
+        prog.frame = Some(CpuImageFrame {
+            key: "test".to_owned(),
+            revision: 1,
+            width: 200,
+            height: 200,
+            rgba: Arc::new(vec![255; 200 * 200 * 4]),
+        });
+        prog.tool = CanvasTool::BezierPen;
+        let bounds = Rectangle::new(iced::Point::ORIGIN, iced::Size::new(200.0, 200.0));
+        let mut st = CanvasInteractionState::default();
+
+        // Add 2 bezier nodes
+        st.bezier_nodes.push(VectorPathNode::corner([10.0, 10.0]));
+        st.bezier_nodes.push(VectorPathNode::corner([50.0, 60.0]));
+        st.drawing_shape = true;
+
+        // Backspace undoes node 2 into redo stack
+        let _ = shader::Program::update(
+            &prog,
+            &mut st,
+            &Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Backspace),
+                modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Backspace),
+                physical_key: iced::keyboard::key::Physical::Code(
+                    iced::keyboard::key::Code::Backspace,
+                ),
+                location: iced::keyboard::Location::Standard,
+                modifiers: Modifiers::empty(),
+                text: None,
+                repeat: false,
+            }),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+        assert_eq!(st.bezier_nodes.len(), 1);
+        assert_eq!(st.bezier_redo_nodes.len(), 1);
+
+        // Shift+Z redoes node 2 back
+        st.modifiers = Modifiers::SHIFT;
+        let _ = shader::Program::update(
+            &prog,
+            &mut st,
+            &Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Character("Z".into()),
+                modified_key: iced::keyboard::Key::Character("Z".into()),
+                physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::KeyZ),
+                location: iced::keyboard::Location::Standard,
+                modifiers: Modifiers::SHIFT,
+                text: None,
+                repeat: false,
+            }),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+        assert_eq!(st.bezier_nodes.len(), 2);
+        assert_eq!(st.bezier_nodes[1].anchor, [50.0, 60.0]);
+        assert!(st.bezier_redo_nodes.is_empty());
     }
 }

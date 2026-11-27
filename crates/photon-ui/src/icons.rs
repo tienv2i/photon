@@ -123,6 +123,17 @@ pub enum Icon {
     PanelsTopLeft,
     PathSelect,
     Text,
+    Ruler,
+    Guide,
+    Magnet,
+    AlignLeft,
+    AlignCenterH,
+    AlignRight,
+    AlignTop,
+    AlignMiddleV,
+    AlignBottom,
+    DistributeH,
+    DistributeV,
 }
 
 impl Icon {
@@ -482,6 +493,39 @@ impl Icon {
             Self::Text => {
                 r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>"##
             }
+            Self::Ruler => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.3 8.7L8.7 21.3a1 1 0 0 1-1.4 0L2.7 16.7a1 1 0 0 1 0-1.4L15.3 2.7a1 1 0 0 1 1.4 0l4.6 4.6a1 1 0 0 1 0 1.4z"/><path d="M7.5 10.5l2 2"/><path d="M10.5 7.5l2 2"/><path d="M13.5 4.5l2 2"/><path d="M4.5 13.5l2 2"/></svg>"##
+            }
+            Self::Guide => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="3" x2="8" y2="21"/><line x1="3" y1="14" x2="21" y2="14"/><circle cx="8" cy="14" r="2.2"/></svg>"##
+            }
+            Self::Magnet => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15V8a6 6 0 0 1 12 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2V8a2 2 0 0 0-2-2h0a2 2 0 0 0-2 2v7a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2z"/><path d="M6 12h3"/><path d="M15 12h3"/></svg>"##
+            }
+            Self::AlignLeft => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="4" x2="4" y2="20"/><rect x="8" y="6" width="12" height="4" rx="1"/><rect x="8" y="14" width="7" height="4" rx="1"/></svg>"##
+            }
+            Self::AlignCenterH => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="3" x2="12" y2="21"/><rect x="5" y="6" width="14" height="4" rx="1"/><rect x="7" y="14" width="10" height="4" rx="1"/></svg>"##
+            }
+            Self::AlignRight => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="20" y1="4" x2="20" y2="20"/><rect x="4" y="6" width="12" height="4" rx="1"/><rect x="9" y="14" width="7" height="4" rx="1"/></svg>"##
+            }
+            Self::AlignTop => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="4" x2="20" y2="4"/><rect x="6" y="8" width="4" height="12" rx="1"/><rect x="14" y="8" width="4" height="7" rx="1"/></svg>"##
+            }
+            Self::AlignMiddleV => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="7" width="4" height="10" rx="1"/></svg>"##
+            }
+            Self::AlignBottom => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="20" x2="20" y2="20"/><rect x="6" y="4" width="4" height="12" rx="1"/><rect x="14" y="9" width="4" height="7" rx="1"/></svg>"##
+            }
+            Self::DistributeH => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="4" x2="4" y2="20"/><line x1="20" y1="4" x2="20" y2="20"/><rect x="9" y="7" width="6" height="10" rx="1"/></svg>"##
+            }
+            Self::DistributeV => {
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="4" x2="20" y2="4"/><line x1="4" y1="20" x2="20" y2="20"/><rect x="7" y="9" width="10" height="6" rx="1"/></svg>"##
+            }
         }
     }
 }
@@ -549,6 +593,17 @@ mod tests {
             Icon::Paste,
             Icon::BookOpen,
             Icon::PanelsTopLeft,
+            Icon::Ruler,
+            Icon::Guide,
+            Icon::Magnet,
+            Icon::AlignLeft,
+            Icon::AlignCenterH,
+            Icon::AlignRight,
+            Icon::AlignTop,
+            Icon::AlignMiddleV,
+            Icon::AlignBottom,
+            Icon::DistributeH,
+            Icon::DistributeV,
         ];
         for icon in new_and_core_icons {
             let src = icon.svg_source();

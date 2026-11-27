@@ -30,7 +30,7 @@ pub use menus::{
     build_editor_add_layer_menu, build_editor_canvas_context_menu, build_editor_layer_context_menu,
     build_editor_plugins_menu_entries,
 };
-pub use messages::{EditorMenuKind, EditorMessage, EditorViewState};
+pub use messages::{CropRectField, EditorMenuKind, EditorMessage, EditorViewState, SnapTarget};
 pub use state::{
     DimGridAction, DimensionInputState, EditorUiState, crop_uv_to_signed, default_curves,
     format_hex, format_ratio_string, parse_hex_rgb, parse_ratio_str, rgb_to_color,

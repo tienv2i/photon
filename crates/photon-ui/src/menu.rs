@@ -1013,6 +1013,85 @@ pub fn with_context_menu_and_cascading_submenus<'a, M: Clone + 'a>(
         .into()
 }
 
+/// Overlay a menubar-anchored dropdown with zero or more cascading [`CascadingSubmenu`] panels.
+#[allow(clippy::too_many_arguments)]
+pub fn with_anchored_menu_and_submenus<'a, M: Clone + 'a>(
+    base: impl Into<Element<'a, M>>,
+    open: bool,
+    left_offset: f32,
+    top_offset: f32,
+    viewport_size: Size,
+    menu_width: f32,
+    estimated_height: f32,
+    menu: impl Into<Element<'a, M>>,
+    submenus: Vec<CascadingSubmenu<'a, M>>,
+    on_dismiss: M,
+) -> Element<'a, M> {
+    if !open {
+        return stack![base.into()]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+    }
+    let dismiss_below_bar = mouse_area(
+        container(iced::widget::space::horizontal())
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .on_press(on_dismiss.clone())
+    .on_right_press(on_dismiss);
+    let dismiss_layer = column![
+        Space::new()
+            .width(Length::Fill)
+            .height(Length::Fixed(top_offset.max(0.0))),
+        dismiss_below_bar,
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill);
+
+    let max_h = (viewport_size.height - top_offset - VIEWPORT_MARGIN).max(60.0);
+    let x = left_offset.clamp(
+        VIEWPORT_MARGIN,
+        (viewport_size.width - menu_width - VIEWPORT_MARGIN).max(VIEWPORT_MARGIN),
+    );
+    let primary = place_context_menu(
+        x,
+        top_offset.max(0.0),
+        viewport_size,
+        menu_width,
+        estimated_height.min(max_h),
+    );
+    let clamped_menu = clamped_menu_element(menu.into(), estimated_height, max_h, max_h);
+    let positioned_menu = position_menu_layer(clamped_menu, primary);
+
+    let mut layers = vec![base.into(), dismiss_layer.into(), positioned_menu];
+    let mut prev = primary;
+    for (level_idx, sub) in submenus.into_iter().enumerate() {
+        let placement = place_submenu(
+            prev,
+            sub.width,
+            sub.estimated_height,
+            sub.parent_row_offset_y,
+            sub.parent_row_height,
+            level_idx,
+            viewport_size,
+        );
+        let clamped_sub = clamped_menu_element(
+            sub.content,
+            sub.estimated_height,
+            max_h,
+            placement.available_height(viewport_size.height),
+        );
+        layers.push(position_menu_layer(clamped_sub, placement));
+        prev = placement;
+    }
+
+    stack(layers)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
 /// Overlay a cursor-anchored context menu whose origin clamps dynamically against the live
 /// `responsive` layout bounds (preventing stale window-size assumptions).
 #[allow(clippy::too_many_arguments)]

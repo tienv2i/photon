@@ -81,6 +81,8 @@ pub struct Core {
     active_editor_tab_id: Option<u64>,
     next_editor_tab_id: u64,
     focus_request_seq: u64,
+    pending_recovery_count: usize,
+    last_recovery_sync_revs: HashMap<u64, u64>,
     next_original_revision: u64,
     pixel_clipboard: Option<EditorPixelClipboard>,
     pub(crate) plugin_registry: PluginRegistry,
@@ -196,6 +198,11 @@ impl Core {
             UiText::new("ready")
         };
 
+        let pending_recovery_count = if viewer_ephemeral {
+            0
+        } else {
+            crate::recovery::count_recoverable_tabs(&paths)
+        };
         let mut core = Self {
             identity,
             paths,
@@ -227,6 +234,8 @@ impl Core {
             active_editor_tab_id: None,
             next_editor_tab_id: 1,
             focus_request_seq: 0,
+            pending_recovery_count,
+            last_recovery_sync_revs: HashMap::new(),
             next_original_revision: 1,
             pixel_clipboard: None,
             plugin_registry,
@@ -479,6 +488,15 @@ impl Core {
                         quick_mask_active: doc.selection().quick_mask_active,
                         can_reselect: doc.selection().can_reselect(),
                         selection_revision: doc.selection_revision,
+                        saved_selections: doc
+                            .selection()
+                            .saved_selections
+                            .iter()
+                            .map(|s| photon_protocol::SavedSelectionSummary {
+                                id: s.id,
+                                name: s.name.clone(),
+                            })
+                            .collect(),
                     },
                     active_vector_data: doc.stack().active_layer().vector_data.clone(),
                     active_text_data: doc.stack().active_layer().text_data.clone(),
@@ -487,6 +505,7 @@ impl Core {
             editor_tabs,
             active_editor_tab_id: self.active_editor_tab_id,
             focus_request_seq: self.focus_request_seq,
+            pending_recovery_count: self.pending_recovery_count,
             status: self.status.clone(),
             safe_mode: self.safe_mode,
             active_tasks: self
@@ -1489,6 +1508,8 @@ impl Core {
                 blend_mode,
                 offset_x,
                 offset_y,
+                clipped_to_below,
+                lock_alpha,
             } => self.apply_layer_op(LayerOperation::SetProps {
                 id: *id,
                 name: name.clone(),
@@ -1498,9 +1519,39 @@ impl Core {
                 blend_mode: *blend_mode,
                 offset_x: *offset_x,
                 offset_y: *offset_y,
+                clipped_to_below: *clipped_to_below,
+                lock_alpha: *lock_alpha,
             }),
+            Command::EditorLayerToggleClippingMask { id } => {
+                let lid = {
+                    let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                    id.unwrap_or(doc.stack().active_layer_id)
+                };
+                self.apply_layer_op(LayerOperation::ToggleClippingMask { id: lid })
+            }
+            Command::EditorLayerMoveMultiple { ids, dx, dy } => {
+                self.apply_layer_op(LayerOperation::MoveMultiple {
+                    ids: ids.clone(),
+                    dx: *dx,
+                    dy: *dy,
+                })
+            }
+            Command::EditorLayerDeleteMultiple { ids } => {
+                self.apply_layer_op(LayerOperation::DeleteMultiple { ids: ids.clone() })
+            }
+            Command::EditorLayerDuplicateMultiple { ids } => {
+                self.apply_layer_op(LayerOperation::DuplicateMultiple { ids: ids.clone() })
+            }
             Command::EditorLayerMergeDown { id } => {
                 self.apply_layer_op(LayerOperation::MergeDown { id: *id })
+            }
+            Command::EditorLayerMergeSelected { ids } => {
+                self.apply_layer_op(LayerOperation::MergeSelected { ids: ids.clone() })
+            }
+            Command::EditorLayerMergeVisible => self.apply_layer_op(LayerOperation::MergeVisible),
+            Command::EditorLayerStampVisible => self.apply_layer_op(LayerOperation::StampVisible),
+            Command::EditorLayerFromSelection { cut } => {
+                self.apply_layer_op(LayerOperation::FromSelection { cut: *cut })
             }
             Command::EditorLayerFlatten => self.apply_layer_op(LayerOperation::Flatten),
             Command::EditorSetCanvasBackground { color, transparent } => {
@@ -1646,6 +1697,25 @@ impl Core {
                 doc.crop_to_selection().map_err(map_image_err)?;
                 Ok((None, None))
             }
+            Command::EditorSaveSelection {
+                name,
+                target_id,
+                op,
+            } => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.save_selection(name.clone(), *target_id, *op);
+                Ok((None, None))
+            }
+            Command::EditorLoadSelection { id, op, invert } => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.load_selection(*id, *op, *invert);
+                Ok((None, None))
+            }
+            Command::EditorDeleteSavedSelection { id } => {
+                let doc = self.editor.as_mut().ok_or_else(no_doc_err)?;
+                doc.delete_saved_selection(*id);
+                Ok((None, None))
+            }
             Command::EditorAddVectorLayer { name, data } => {
                 self.apply_layer_op(LayerOperation::AddVectorLayer {
                     name: name.clone(),
@@ -1771,6 +1841,145 @@ impl Core {
                 shape_ids: shape_ids.clone(),
                 spec: *spec,
             }),
+            Command::EditorAlignObjects {
+                op,
+                target,
+                layer_ids,
+                shape_ids,
+            } => {
+                let selection_bounds = self.editor.as_ref().and_then(|doc| {
+                    doc.stack()
+                        .selection
+                        .bounds
+                        .map(|[x0, y0, x1, y1]| [x0 as f32, y0 as f32, x1 as f32, y1 as f32])
+                });
+                self.apply_layer_op(LayerOperation::AlignObjects {
+                    op: *op,
+                    target: *target,
+                    layer_ids: layer_ids.clone(),
+                    shape_ids: shape_ids.clone(),
+                    selection_bounds,
+                })
+            }
+            Command::EditorDistributeObjects {
+                op,
+                layer_ids,
+                shape_ids,
+                fixed_gap_px,
+            } => self.apply_layer_op(LayerOperation::DistributeObjects {
+                op: *op,
+                layer_ids: layer_ids.clone(),
+                shape_ids: shape_ids.clone(),
+                fixed_gap_px: *fixed_gap_px,
+            }),
+            Command::EditorVectorBoolean {
+                op,
+                layer_id,
+                shape_ids,
+            } => {
+                let lid = {
+                    let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                    layer_id.unwrap_or(doc.stack().active_layer_id)
+                };
+                self.apply_layer_op(LayerOperation::VectorBoolean {
+                    layer_id: lid,
+                    shape_ids: shape_ids.clone(),
+                    op: *op,
+                })
+            }
+            Command::EditorVectorKnife {
+                layer_id,
+                line_start,
+                line_end,
+            } => {
+                let lid = {
+                    let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                    layer_id.unwrap_or(doc.stack().active_layer_id)
+                };
+                self.apply_layer_op(LayerOperation::VectorKnife {
+                    layer_id: lid,
+                    line_start: *line_start,
+                    line_end: *line_end,
+                })
+            }
+            Command::EditorSliceExport {
+                mode,
+                output_dir,
+                prefix,
+                format,
+            } => {
+                let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
+                let flat = photon_image::composite_stack(doc.stack());
+                let (w, h) = flat.dimensions();
+                let out_dir = std::path::PathBuf::from(output_dir);
+                std::fs::create_dir_all(&out_dir).map_err(|e| {
+                    ProtocolError::new("io_error", format!("create slice dir failed: {e}"))
+                })?;
+                let stem = if prefix.trim().is_empty() {
+                    "slice"
+                } else {
+                    prefix.trim()
+                };
+                let ext = match format.to_ascii_lowercase().as_str() {
+                    "jpg" | "jpeg" => "jpg",
+                    "webp" => "webp",
+                    _ => "png",
+                };
+                let mut count = 0_u32;
+                match mode {
+                    photon_protocol::SliceMode::Grid { rows, cols } => {
+                        let r = (*rows).max(1);
+                        let c = (*cols).max(1);
+                        for ri in 0..r {
+                            let y0 = (ri * h) / r;
+                            let y1 = ((ri + 1) * h) / r;
+                            let sh = y1.saturating_sub(y0).max(1);
+                            for ci in 0..c {
+                                let x0 = (ci * w) / c;
+                                let x1 = ((ci + 1) * w) / c;
+                                let sw = x1.saturating_sub(x0).max(1);
+                                let sub =
+                                    image::imageops::crop_imm(&*flat, x0, y0, sw, sh).to_image();
+                                let out_path = out_dir.join(format!(
+                                    "{stem}_r{:02}_c{:02}.{ext}",
+                                    ri + 1,
+                                    ci + 1
+                                ));
+                                sub.save(&out_path).map_err(|e| {
+                                    ProtocolError::new(
+                                        "io_error",
+                                        format!("save slice failed: {e}"),
+                                    )
+                                })?;
+                                count += 1;
+                            }
+                        }
+                    }
+                    photon_protocol::SliceMode::Strip { strip_height } => {
+                        let sh_max = (*strip_height).max(16);
+                        let mut y = 0_u32;
+                        let mut idx = 1_u32;
+                        while y < h {
+                            let sh = (h - y).min(sh_max);
+                            let sub = image::imageops::crop_imm(&*flat, 0, y, w, sh).to_image();
+                            let out_path = out_dir.join(format!("{stem}_{idx:03}.{ext}"));
+                            sub.save(&out_path).map_err(|e| {
+                                ProtocolError::new("io_error", format!("save slice failed: {e}"))
+                            })?;
+                            y += sh;
+                            idx += 1;
+                            count += 1;
+                        }
+                    }
+                }
+                Ok((
+                    Some(UiText::with(
+                        "op_slice_exported",
+                        [("count", count.to_string())],
+                    )),
+                    None,
+                ))
+            }
             Command::EditorVectorBlend { layer_id, spec } => {
                 let lid = {
                     let doc = self.editor.as_ref().ok_or_else(no_doc_err)?;
@@ -2173,6 +2382,10 @@ impl Core {
                 let saved = doc
                     .save_to(None)
                     .map_err(|e| ProtocolError::new("save_error", e.to_string()))?;
+                if let Some(tab_id) = self.active_editor_tab_id {
+                    crate::recovery::remove_tab_recovery(&self.paths, tab_id);
+                    self.last_recovery_sync_revs.remove(&tab_id);
+                }
                 Ok((
                     Some(UiText::with(
                         "editor_saved",
@@ -2187,6 +2400,10 @@ impl Core {
                     .save_to(Some(Path::new(path)))
                     .map_err(|e| ProtocolError::new("save_error", e.to_string()))?;
                 self.editor_source_is_virtual = false;
+                if let Some(tab_id) = self.active_editor_tab_id {
+                    crate::recovery::remove_tab_recovery(&self.paths, tab_id);
+                    self.last_recovery_sync_revs.remove(&tab_id);
+                }
                 Ok((
                     Some(UiText::with(
                         "editor_saved",
@@ -2229,6 +2446,90 @@ impl Core {
             }
             Command::EditorReorderTab { tab_id, new_index } => {
                 self.reorder_editor_tab(*tab_id, *new_index)?;
+                Ok((None, None))
+            }
+            Command::EditorRecoverySync => {
+                let dir = crate::recovery::recovery_dir(&self.paths);
+                let mut jobs = Vec::new();
+                for slot in &self.editor_tabs {
+                    let doc_opt = if Some(slot.id) == self.active_editor_tab_id {
+                        self.editor.as_ref().or(slot.doc.as_ref())
+                    } else {
+                        slot.doc.as_ref()
+                    };
+                    let Some(doc) = doc_opt else { continue };
+                    if !doc.modified() {
+                        continue;
+                    }
+                    if self.last_recovery_sync_revs.get(&slot.id) == Some(&doc.pixel_revision) {
+                        continue;
+                    }
+                    self.last_recovery_sync_revs
+                        .insert(slot.id, doc.pixel_revision);
+                    let name = doc
+                        .source_path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Untitled")
+                        .to_owned();
+                    let src_path = doc.source_path.to_string_lossy().into_owned();
+                    let save_path = doc.save_path.to_string_lossy().into_owned();
+                    let stack = doc.stack().clone();
+                    jobs.push((slot.id, name, src_path, save_path, stack));
+                }
+                if !jobs.is_empty() {
+                    std::thread::spawn(move || {
+                        for (tab_id, name, src_path, save_path, stack) in jobs {
+                            let _ = crate::recovery::write_tab_recovery(
+                                &dir, tab_id, &name, &src_path, &save_path, &stack,
+                            );
+                        }
+                    });
+                }
+                Ok((None, None))
+            }
+            Command::EditorRecoveryRestore => {
+                let recovered = crate::recovery::take_recoverable_tabs(&self.paths);
+                self.pending_recovery_count = 0;
+                if recovered.is_empty() {
+                    return Ok((None, None));
+                }
+                let count = recovered.len();
+                for (meta, mut doc) in recovered {
+                    if !meta.source_path.is_empty() {
+                        doc.source_path = PathBuf::from(&meta.source_path);
+                    }
+                    if !meta.save_path.is_empty() {
+                        doc.save_path = PathBuf::from(&meta.save_path);
+                    }
+                    let is_virtual =
+                        doc.save_path.as_os_str().is_empty() || !doc.save_path.is_file();
+                    self.park_active_editor_tab();
+                    let tab_id = self.next_editor_tab_id;
+                    self.next_editor_tab_id += 1;
+                    self.editor_tabs.push(EditorTabSlot {
+                        id: tab_id,
+                        doc: None,
+                        caption: None,
+                        source_is_virtual: is_virtual,
+                    });
+                    self.active_editor_tab_id = Some(tab_id);
+                    self.editor = Some(doc);
+                    self.editor_source_is_virtual = is_virtual;
+                }
+                self.workspace = Workspace::Editor;
+                Ok((
+                    Some(UiText::with(
+                        "recovery_restored",
+                        [("count", count.to_string())],
+                    )),
+                    None,
+                ))
+            }
+            Command::EditorRecoveryDiscard | Command::EditorRecoveryCleanup => {
+                crate::recovery::cleanup_all_recovery(&self.paths);
+                self.last_recovery_sync_revs.clear();
+                self.pending_recovery_count = 0;
                 Ok((None, None))
             }
             Command::FocusWindow => {
@@ -2459,20 +2760,15 @@ impl Core {
         };
         let closing_active = Some(id) == self.active_editor_tab_id;
         self.editor_tabs.remove(pos);
+        crate::recovery::remove_tab_recovery(&self.paths, id);
+        self.last_recovery_sync_revs.remove(&id);
         if closing_active {
             self.editor = None;
             self.editor_caption = None;
             self.editor_source_is_virtual = false;
             if self.editor_tabs.is_empty() {
                 self.active_editor_tab_id = None;
-                if self.workspace == Workspace::Editor {
-                    self.workspace = if self.viewer_images.is_empty() {
-                        Workspace::Browser
-                    } else {
-                        Workspace::Viewer
-                    };
-                    self.sync_session_prefs();
-                }
+                self.sync_session_prefs();
             } else {
                 let next_idx = pos.min(self.editor_tabs.len() - 1);
                 let next_id = self.editor_tabs[next_idx].id;
@@ -4404,6 +4700,8 @@ mod tests {
                     name: None,
                     visible: None,
                     locked: Some(true),
+                    clipped_to_below: None,
+                    lock_alpha: None,
                     opacity: None,
                     blend_mode: None,
                     offset_x: None,
@@ -4440,6 +4738,8 @@ mod tests {
                     name: None,
                     visible: None,
                     locked: Some(false),
+                    clipped_to_below: None,
+                    lock_alpha: None,
                     opacity: Some(0.8),
                     blend_mode: Some(photon_protocol::BlendMode::Multiply),
                     offset_x: None,
@@ -5381,7 +5681,7 @@ for line in sys.stdin:
         assert_eq!(core.meta().active_editor_tab_id, Some(id3));
         assert!(core.meta().editor.as_ref().unwrap().modified);
 
-        // Close last tab -> leaves Editor workspace.
+        // Close last tab -> stays in Editor workspace showing empty state.
         assert!(
             core.dispatch(photon_protocol::Envelope::new(
                 "close3",
@@ -5392,7 +5692,7 @@ for line in sys.stdin:
         );
         assert!(core.meta().editor_tabs.is_empty());
         assert!(core.meta().editor.is_none());
-        assert_eq!(core.workspace(), Workspace::Browser);
+        assert_eq!(core.workspace(), Workspace::Editor);
 
         // FocusWindow increments focus_request_seq.
         let prev_seq = core.meta().focus_request_seq;

@@ -17,8 +17,8 @@ pub(crate) fn default_window_state_for(id: DesktopDialogId) -> DialogWindowState
         DesktopDialogId::ConfirmUnsavedLeave => {
             DialogWindowState::new(480.0, 170.0).min_size(340.0, 150.0)
         }
-        DesktopDialogId::Resize => DialogWindowState::new(500.0, 400.0).min_size(380.0, 320.0),
-        DesktopDialogId::CanvasSize => DialogWindowState::new(460.0, 390.0).min_size(360.0, 310.0),
+        DesktopDialogId::Resize => DialogWindowState::new(500.0, 445.0).min_size(380.0, 360.0),
+        DesktopDialogId::CanvasSize => DialogWindowState::new(460.0, 435.0).min_size(360.0, 350.0),
         DesktopDialogId::Export => DialogWindowState::new(500.0, 335.0).min_size(380.0, 280.0),
         DesktopDialogId::ColorPicker => DialogWindowState::new(500.0, 390.0).min_size(440.0, 340.0),
         DesktopDialogId::BatchResize => DialogWindowState::new(580.0, 640.0)
@@ -73,6 +73,20 @@ pub(crate) fn default_window_state_for(id: DesktopDialogId) -> DialogWindowState
         DesktopDialogId::VectorBlend => DialogWindowState::new(400.0, 210.0).min_size(340.0, 180.0),
         DesktopDialogId::ExportVectorSvg => {
             DialogWindowState::new(460.0, 210.0).min_size(360.0, 180.0)
+        }
+        DesktopDialogId::SliceImage => DialogWindowState::new(440.0, 340.0).min_size(380.0, 290.0),
+        DesktopDialogId::RecoveryPrompt => {
+            DialogWindowState::new(420.0, 190.0).min_size(340.0, 170.0)
+        }
+        DesktopDialogId::SaveSelection => {
+            DialogWindowState::new(420.0, 280.0).min_size(360.0, 240.0)
+        }
+        DesktopDialogId::LoadSelection => {
+            DialogWindowState::new(420.0, 310.0).min_size(360.0, 260.0)
+        }
+        DesktopDialogId::NewGuide => DialogWindowState::new(380.0, 240.0).min_size(320.0, 200.0),
+        DesktopDialogId::GridSettings => {
+            DialogWindowState::new(420.0, 310.0).min_size(360.0, 260.0)
         }
     }
 }
@@ -502,7 +516,24 @@ pub(super) fn build_editor_adjustment_dialog<'a>(
     }
     body_items.push(tab_body);
     let body = column(body_items).spacing(10);
+    let live_preview_on = ui.adjust_live_preview;
     let footer = row![
+        with_tooltip_pos(
+            button::labeled(
+                tr(lang, "label-live-preview"),
+                Some(if live_preview_on {
+                    Icon::Eye
+                } else {
+                    Icon::EyeOff
+                }),
+                ButtonVariant::Tab {
+                    active: live_preview_on,
+                },
+                Some(Message::EditorToggleAdjustLivePreview),
+            ),
+            tr(lang, "label-live-preview"),
+            TooltipPosition::Top,
+        ),
         with_tooltip_pos(
             button::labeled(
                 tr(lang, "action-reset"),
@@ -1141,6 +1172,7 @@ pub(super) fn build_in_app_dialog<'a>(
             ];
             let selected_filter = filter_opts.iter().find(|o| o.value == *filter).copied();
             let mut body_col = column![
+                dimension_presets_picker(dims, lang, Message::ResizeDimAction),
                 dims.view(lang, Message::ResizeDimAction),
                 row![
                     column![
@@ -1192,7 +1224,7 @@ pub(super) fn build_in_app_dialog<'a>(
                     Some(Message::CloseDialog),
                 ),
                 button::labeled(
-                    tr(lang, "action-resize"),
+                    tr(lang, "action-apply"),
                     Some(Icon::Check),
                     ButtonVariant::Primary,
                     Some(Message::ConfirmResize),
@@ -1229,6 +1261,7 @@ pub(super) fn build_in_app_dialog<'a>(
                 .position(|a| a == anchor)
                 .unwrap_or(4);
             let mut body_col = column![
+                dimension_presets_picker(dims, lang, Message::CanvasSizeDimAction),
                 dims.view(lang, Message::CanvasSizeDimAction),
                 row![
                     column![
@@ -1980,6 +2013,613 @@ pub(super) fn build_in_app_dialog<'a>(
             lang,
             theme,
         ),
+        InAppDialog::SliceImage {
+            is_grid,
+            rows,
+            cols,
+            strip_height,
+            output_dir,
+            prefix,
+            format,
+            error,
+        } => {
+            let mode_row = row![
+                button::labeled(
+                    tr(lang, "slice-mode-grid"),
+                    None,
+                    if *is_grid {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Secondary
+                    },
+                    Some(Message::SliceImageModeChanged(true)),
+                ),
+                button::labeled(
+                    tr(lang, "slice-mode-strip"),
+                    None,
+                    if !*is_grid {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Secondary
+                    },
+                    Some(Message::SliceImageModeChanged(false)),
+                ),
+            ]
+            .spacing(8);
+
+            let dims_row: Element<'_, Message> = if *is_grid {
+                row![
+                    column![
+                        text(tr(lang, "slice-rows")).size(12),
+                        text_input("2", rows)
+                            .id(iced::widget::Id::new("photon.dialog.first_input"))
+                            .on_input(Message::SliceImageRowsChanged)
+                            .padding([6, 8]),
+                    ]
+                    .spacing(4)
+                    .width(Fill),
+                    column![
+                        text(tr(lang, "slice-cols")).size(12),
+                        text_input("2", cols)
+                            .on_input(Message::SliceImageColsChanged)
+                            .padding([6, 8]),
+                    ]
+                    .spacing(4)
+                    .width(Fill),
+                ]
+                .spacing(8)
+                .into()
+            } else {
+                column![
+                    text(tr(lang, "slice-strip-height")).size(12),
+                    text_input("1024", strip_height)
+                        .id(iced::widget::Id::new("photon.dialog.first_input"))
+                        .on_input(Message::SliceImageStripHeightChanged)
+                        .padding([6, 8]),
+                ]
+                .spacing(4)
+                .into()
+            };
+
+            let mut body = column![
+                mode_row,
+                dims_row,
+                column![
+                    text(tr(lang, "slice-output-dir")).size(12),
+                    text_input("/tmp/slices", output_dir)
+                        .on_input(Message::SliceImageOutputDirChanged)
+                        .padding([6, 8]),
+                ]
+                .spacing(4),
+                row![
+                    column![
+                        text(tr(lang, "slice-prefix")).size(12),
+                        text_input("slice", prefix)
+                            .on_input(Message::SliceImagePrefixChanged)
+                            .padding([6, 8]),
+                    ]
+                    .spacing(4)
+                    .width(Fill),
+                    column![
+                        text(tr(lang, "slice-format")).size(12),
+                        text_input("png", format)
+                            .on_input(Message::SliceImageFormatChanged)
+                            .padding([6, 8]),
+                    ]
+                    .spacing(4)
+                    .width(Length::Fixed(90.0)),
+                ]
+                .spacing(8),
+            ]
+            .spacing(10);
+
+            if let Some(err) = error {
+                body = body.push(text(err.clone()).size(12).style(|theme| {
+                    let t = PaletteTokens::for_theme(theme);
+                    text::Style {
+                        color: Some(t.danger),
+                    }
+                }));
+            }
+
+            let footer = row![
+                button::labeled(
+                    tr(lang, "action-cancel"),
+                    None,
+                    ButtonVariant::Secondary,
+                    Some(Message::CloseDialog),
+                ),
+                button::labeled(
+                    tr(lang, "action-export"),
+                    None,
+                    ButtonVariant::Primary,
+                    Some(Message::ConfirmSliceImage),
+                ),
+            ]
+            .spacing(8);
+
+            let spec = DialogSpec {
+                open: true,
+                title: tr(lang, "action-slice-image"),
+                width: 440.0,
+                body: body.into(),
+                footer: footer.into(),
+                on_close: Message::CloseDialog,
+                on_noop: Message::Noop,
+            };
+
+            dialog_spec_to_managed(id, spec, default_window_state_for(id), overlay, lang, theme)
+        }
+        InAppDialog::RecoveryPrompt { count } => {
+            let body = column![
+                text(tr_ui_text(
+                    lang,
+                    &UiText::with("dialog_recovery_body", [("count", count.to_string())]),
+                ))
+                .size(13)
+            ]
+            .spacing(8);
+            let footer = row![
+                button::labeled(
+                    tr(lang, "action-recovery-discard"),
+                    None,
+                    ButtonVariant::Secondary,
+                    Some(Message::DiscardRecoverySession),
+                ),
+                button::labeled(
+                    tr(lang, "action-recovery-restore"),
+                    None,
+                    ButtonVariant::Primary,
+                    Some(Message::RestoreRecoverySession),
+                ),
+            ]
+            .spacing(8);
+            let spec = DialogSpec {
+                open: true,
+                title: tr(lang, "dialog-recovery-title"),
+                width: 420.0,
+                body: body.into(),
+                footer: footer.into(),
+                on_close: Message::CloseDialog,
+                on_noop: Message::Noop,
+            };
+            dialog_spec_to_managed(id, spec, default_window_state_for(id), overlay, lang, theme)
+        }
+        InAppDialog::SaveSelection {
+            name,
+            target_id,
+            op,
+            error,
+        } => {
+            let saved = state
+                .snapshot
+                .meta
+                .editor
+                .as_ref()
+                .map(|ed| ed.selection.saved_selections.as_slice())
+                .unwrap_or(&[]);
+            let mut body_col = column![
+                text(tr(lang, "dialog-save-selection-name")).size(12),
+                text_input("Selection", name)
+                    .id(iced::widget::Id::new("photon.dialog.first_input"))
+                    .on_input(Message::SaveSelectionNameChanged)
+                    .on_submit(Message::ConfirmSaveSelection)
+                    .padding(6),
+            ]
+            .spacing(8);
+
+            if !saved.is_empty() {
+                let mut channel_btns = row![button::labeled(
+                    tr(lang, "label-new-channel"),
+                    None,
+                    if target_id.is_none() {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Secondary
+                    },
+                    Some(Message::SaveSelectionTargetChanged(None)),
+                )]
+                .spacing(6);
+                for ch in saved {
+                    channel_btns = channel_btns.push(button::labeled(
+                        ch.name.clone(),
+                        None,
+                        if *target_id == Some(ch.id) {
+                            ButtonVariant::Primary
+                        } else {
+                            ButtonVariant::Secondary
+                        },
+                        Some(Message::SaveSelectionTargetChanged(Some(ch.id))),
+                    ));
+                }
+                body_col = body_col
+                    .push(text(tr(lang, "dialog-save-selection-target")).size(12))
+                    .push(channel_btns);
+
+                if target_id.is_some() {
+                    let op_row = row![
+                        selection_op_btn(
+                            lang,
+                            "select-op-replace",
+                            SelectionBooleanOp::Replace,
+                            *op,
+                            Message::SaveSelectionOpChanged
+                        ),
+                        selection_op_btn(
+                            lang,
+                            "select-op-add",
+                            SelectionBooleanOp::Add,
+                            *op,
+                            Message::SaveSelectionOpChanged
+                        ),
+                        selection_op_btn(
+                            lang,
+                            "select-op-subtract",
+                            SelectionBooleanOp::Subtract,
+                            *op,
+                            Message::SaveSelectionOpChanged
+                        ),
+                        selection_op_btn(
+                            lang,
+                            "select-op-intersect",
+                            SelectionBooleanOp::Intersect,
+                            *op,
+                            Message::SaveSelectionOpChanged
+                        ),
+                    ]
+                    .spacing(6);
+                    body_col = body_col
+                        .push(text(tr(lang, "label-operation")).size(12))
+                        .push(op_row);
+                }
+            }
+            if let Some(err) = error {
+                body_col = body_col.push(text(err.clone()).size(12));
+            }
+            let footer = row![
+                button::labeled(
+                    tr(lang, "action-cancel"),
+                    None,
+                    ButtonVariant::Secondary,
+                    Some(Message::CloseDialog),
+                ),
+                button::labeled(
+                    tr(lang, "action-apply"),
+                    None,
+                    ButtonVariant::Primary,
+                    Some(Message::ConfirmSaveSelection),
+                ),
+            ]
+            .spacing(8);
+            dialog_spec_to_managed(
+                id,
+                DialogSpec {
+                    open: true,
+                    title: tr(lang, "dialog-save-selection-title"),
+                    width: 420.0,
+                    body: body_col.into(),
+                    footer: footer.into(),
+                    on_close: Message::CloseDialog,
+                    on_noop: Message::Noop,
+                },
+                default_window_state_for(id),
+                overlay,
+                lang,
+                theme,
+            )
+        }
+        InAppDialog::LoadSelection {
+            selected_id,
+            op,
+            invert,
+            error,
+        } => {
+            let saved = state
+                .snapshot
+                .meta
+                .editor
+                .as_ref()
+                .map(|ed| ed.selection.saved_selections.as_slice())
+                .unwrap_or(&[]);
+            let mut list_col = column![].spacing(4);
+            for ch in saved {
+                let active = *selected_id == Some(ch.id);
+                list_col = list_col.push(
+                    row![
+                        button::labeled(
+                            ch.name.clone(),
+                            None,
+                            if active {
+                                ButtonVariant::Primary
+                            } else {
+                                ButtonVariant::Secondary
+                            },
+                            Some(Message::LoadSelectionSelectedChanged(ch.id)),
+                        ),
+                        button::icon_only(
+                            Icon::Trash,
+                            ButtonVariant::Ghost,
+                            Some(Message::DeleteSavedSelection(ch.id)),
+                        ),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                );
+            }
+            let op_row = row![
+                selection_op_btn(
+                    lang,
+                    "select-op-replace",
+                    SelectionBooleanOp::Replace,
+                    *op,
+                    Message::LoadSelectionOpChanged
+                ),
+                selection_op_btn(
+                    lang,
+                    "select-op-add",
+                    SelectionBooleanOp::Add,
+                    *op,
+                    Message::LoadSelectionOpChanged
+                ),
+                selection_op_btn(
+                    lang,
+                    "select-op-subtract",
+                    SelectionBooleanOp::Subtract,
+                    *op,
+                    Message::LoadSelectionOpChanged
+                ),
+                selection_op_btn(
+                    lang,
+                    "select-op-intersect",
+                    SelectionBooleanOp::Intersect,
+                    *op,
+                    Message::LoadSelectionOpChanged
+                ),
+            ]
+            .spacing(6);
+            let invert_btn = button::labeled(
+                tr(lang, "action-select-invert"),
+                None,
+                if *invert {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Secondary
+                },
+                Some(Message::LoadSelectionInvertChanged(!*invert)),
+            );
+            let mut body_col = column![
+                text(tr(lang, "dialog-load-selection-channel")).size(12),
+                list_col,
+                text(tr(lang, "label-operation")).size(12),
+                op_row,
+                invert_btn,
+            ]
+            .spacing(8);
+            if let Some(err) = error {
+                body_col = body_col.push(text(err.clone()).size(12));
+            }
+            let footer = row![
+                button::labeled(
+                    tr(lang, "action-cancel"),
+                    None,
+                    ButtonVariant::Secondary,
+                    Some(Message::CloseDialog),
+                ),
+                button::labeled(
+                    tr(lang, "action-apply"),
+                    None,
+                    ButtonVariant::Primary,
+                    selected_id.map(|_| Message::ConfirmLoadSelection),
+                ),
+            ]
+            .spacing(8);
+            dialog_spec_to_managed(
+                id,
+                DialogSpec {
+                    open: true,
+                    title: tr(lang, "dialog-load-selection-title"),
+                    width: 420.0,
+                    body: body_col.into(),
+                    footer: footer.into(),
+                    on_close: Message::CloseDialog,
+                    on_noop: Message::Noop,
+                },
+                default_window_state_for(id),
+                overlay,
+                lang,
+                theme,
+            )
+        }
+        InAppDialog::NewGuide {
+            axis,
+            value_input,
+            unit_percent,
+            error,
+        } => {
+            let axis_row = row![
+                button::labeled(
+                    tr(lang, "guide-axis-horizontal"),
+                    None,
+                    if *axis == photon_canvas::GuideAxis::Horizontal {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Secondary
+                    },
+                    Some(Message::NewGuideAxisChanged(
+                        photon_canvas::GuideAxis::Horizontal,
+                    )),
+                ),
+                button::labeled(
+                    tr(lang, "guide-axis-vertical"),
+                    None,
+                    if *axis == photon_canvas::GuideAxis::Vertical {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Secondary
+                    },
+                    Some(Message::NewGuideAxisChanged(
+                        photon_canvas::GuideAxis::Vertical,
+                    )),
+                ),
+            ]
+            .spacing(8);
+            let pos_row = row![
+                text_input("50", value_input)
+                    .id(iced::widget::Id::new("photon.dialog.first_input"))
+                    .on_input(Message::NewGuideValueChanged)
+                    .on_submit(Message::ConfirmNewGuide)
+                    .padding(6)
+                    .width(Length::Fill),
+                button::labeled(
+                    "px",
+                    None,
+                    if !*unit_percent {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Secondary
+                    },
+                    Some(Message::NewGuideUnitChanged(false)),
+                ),
+                button::labeled(
+                    "%",
+                    None,
+                    if *unit_percent {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Secondary
+                    },
+                    Some(Message::NewGuideUnitChanged(true)),
+                ),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center);
+            let mut body_col = column![
+                text(tr(lang, "guide-orientation")).size(12),
+                axis_row,
+                text(tr(lang, "guide-position")).size(12),
+                pos_row,
+            ]
+            .spacing(8);
+            if let Some(err) = error {
+                body_col = body_col.push(text(err.clone()).size(12));
+            }
+            let footer = row![
+                button::labeled(
+                    tr(lang, "action-cancel"),
+                    None,
+                    ButtonVariant::Secondary,
+                    Some(Message::CloseDialog),
+                ),
+                button::labeled(
+                    tr(lang, "action-apply"),
+                    None,
+                    ButtonVariant::Primary,
+                    Some(Message::ConfirmNewGuide),
+                ),
+            ]
+            .spacing(8);
+            dialog_spec_to_managed(
+                id,
+                DialogSpec {
+                    open: true,
+                    title: tr(lang, "dialog-new-guide-title"),
+                    width: 380.0,
+                    body: body_col.into(),
+                    footer: footer.into(),
+                    on_close: Message::CloseDialog,
+                    on_noop: Message::Noop,
+                },
+                default_window_state_for(id),
+                overlay,
+                lang,
+                theme,
+            )
+        }
+        InAppDialog::GridSettings {
+            spacing_input,
+            subdivisions_input,
+            opacity_input,
+            show_grid,
+            snap_to_grid,
+            error,
+        } => {
+            let mut body_col = column![
+                text(tr(lang, "grid-spacing-px")).size(12),
+                text_input("64", spacing_input)
+                    .id(iced::widget::Id::new("photon.dialog.first_input"))
+                    .on_input(Message::GridSettingsSpacingChanged)
+                    .on_submit(Message::ConfirmGridSettings)
+                    .padding(6),
+                text(tr(lang, "grid-subdivisions")).size(12),
+                text_input("4", subdivisions_input)
+                    .on_input(Message::GridSettingsSubdivisionsChanged)
+                    .on_submit(Message::ConfirmGridSettings)
+                    .padding(6),
+                text(tr(lang, "grid-opacity-pct")).size(12),
+                text_input("100", opacity_input)
+                    .on_input(Message::GridSettingsOpacityChanged)
+                    .on_submit(Message::ConfirmGridSettings)
+                    .padding(6),
+                row![
+                    button::labeled(
+                        tr(lang, "menu-view-grid"),
+                        None,
+                        if *show_grid {
+                            ButtonVariant::Primary
+                        } else {
+                            ButtonVariant::Secondary
+                        },
+                        Some(Message::GridSettingsShowGridChanged(!*show_grid)),
+                    ),
+                    button::labeled(
+                        tr(lang, "grid-snap-to-grid"),
+                        Some(Icon::Magnet),
+                        if *snap_to_grid {
+                            ButtonVariant::Primary
+                        } else {
+                            ButtonVariant::Secondary
+                        },
+                        Some(Message::GridSettingsSnapChanged(!*snap_to_grid)),
+                    ),
+                ]
+                .spacing(8),
+            ]
+            .spacing(8);
+            if let Some(err) = error {
+                body_col = body_col.push(text(err.clone()).size(12));
+            }
+            let footer = row![
+                button::labeled(
+                    tr(lang, "action-cancel"),
+                    None,
+                    ButtonVariant::Secondary,
+                    Some(Message::CloseDialog),
+                ),
+                button::labeled(
+                    tr(lang, "action-apply"),
+                    None,
+                    ButtonVariant::Primary,
+                    Some(Message::ConfirmGridSettings),
+                ),
+            ]
+            .spacing(8);
+            dialog_spec_to_managed(
+                id,
+                DialogSpec {
+                    open: true,
+                    title: tr(lang, "dialog-grid-settings-title"),
+                    width: 420.0,
+                    body: body_col.into(),
+                    footer: footer.into(),
+                    on_close: Message::CloseDialog,
+                    on_noop: Message::Noop,
+                },
+                default_window_state_for(id),
+                overlay,
+                lang,
+                theme,
+            )
+        }
         InAppDialog::Alert { title, message, .. } => dialog_spec_to_managed(
             id,
             alert_dialog_spec(
@@ -1995,6 +2635,100 @@ pub(super) fn build_in_app_dialog<'a>(
             theme,
         ),
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SizePresetChoice {
+    w: u32,
+    h: u32,
+    label: &'static str,
+}
+
+impl std::fmt::Display for SizePresetChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label)
+    }
+}
+
+const COMMON_SIZE_PRESETS: &[SizePresetChoice] = &[
+    SizePresetChoice {
+        w: 1080,
+        h: 1080,
+        label: "1080×1080 (1:1 Square)",
+    },
+    SizePresetChoice {
+        w: 1080,
+        h: 1350,
+        label: "1080×1350 (4:5 Social Portrait)",
+    },
+    SizePresetChoice {
+        w: 1080,
+        h: 1920,
+        label: "1080×1920 (9:16 Story / Reel)",
+    },
+    SizePresetChoice {
+        w: 1280,
+        h: 720,
+        label: "1280×720 (HD 720p)",
+    },
+    SizePresetChoice {
+        w: 1920,
+        h: 1080,
+        label: "1920×1080 (Full HD)",
+    },
+    SizePresetChoice {
+        w: 3840,
+        h: 2160,
+        label: "3840×2160 (4K UHD)",
+    },
+    SizePresetChoice {
+        w: 800,
+        h: 1280,
+        label: "800×1280 (Webtoon Strip)",
+    },
+    SizePresetChoice {
+        w: 1600,
+        h: 2400,
+        label: "1600×2400 (Manga Page)",
+    },
+    SizePresetChoice {
+        w: 1240,
+        h: 1754,
+        label: "1240×1754 (A4 150 DPI)",
+    },
+    SizePresetChoice {
+        w: 2480,
+        h: 3508,
+        label: "2480×3508 (A4 300 DPI)",
+    },
+];
+
+fn dimension_presets_picker<'a>(
+    dims: &DimensionInputState,
+    lang: Language,
+    on_action: fn(DimGridAction) -> Message,
+) -> Element<'a, Message> {
+    let selected = COMMON_SIZE_PRESETS
+        .iter()
+        .find(|p| p.w == dims.width_px && p.h == dims.height_px)
+        .copied();
+    row![
+        text(tr(lang, "label-size-preset"))
+            .size(12)
+            .width(Length::Fixed(104.0)),
+        pick_list(COMMON_SIZE_PRESETS, selected, move |choice| {
+            on_action(DimGridAction::PresetDimensions(choice.w, choice.h))
+        })
+        .placeholder("Custom…")
+        .text_size(TEXT_SIZE_CONTROL)
+        .padding([5, 10])
+        .width(Fill)
+        .style(pick_list_style)
+        .menu_style(pick_list_menu_style),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 pub(super) fn resolve_desktop_plugins_dir() -> PathBuf {
@@ -2147,4 +2881,24 @@ pub(super) fn build_models_card_for_plugins<'a>(
     }
 
     col.into()
+}
+
+fn selection_op_btn<'a>(
+    lang: Language,
+    label_key: &str,
+    op: SelectionBooleanOp,
+    active: SelectionBooleanOp,
+    on_select: fn(SelectionBooleanOp) -> Message,
+) -> Element<'a, Message> {
+    button::labeled(
+        tr(lang, label_key),
+        None,
+        if active == op {
+            ButtonVariant::Primary
+        } else {
+            ButtonVariant::Secondary
+        },
+        Some(on_select(op)),
+    )
+    .into()
 }

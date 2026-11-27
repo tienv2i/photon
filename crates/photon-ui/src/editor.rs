@@ -828,6 +828,7 @@ pub fn dimension_ratio_grid<'a, M: Clone + 'a>(spec: DimensionRatioSpec<'a, M>) 
             }),
         row![
             text_input("", spec.width_str)
+                .id(iced::widget::Id::new("photon.dialog.first_input"))
                 .on_input(spec.on_width_change)
                 .padding([6, 8])
                 .size(TEXT_SIZE_CONTROL)
@@ -973,6 +974,8 @@ pub struct LayerRowSpec<'a, M> {
     pub mask_enabled: bool,
     pub mask_linked: bool,
     pub editing_mask: bool,
+    pub clipped_to_below: bool,
+    pub lock_alpha: bool,
     pub thumbnail: Option<iced_image::Handle>,
     pub mask_thumbnail: Option<iced_image::Handle>,
     pub renaming: Option<&'a str>,
@@ -1130,6 +1133,14 @@ pub fn layer_row<'a, M: Clone + 'a>(spec: LayerRowSpec<'a, M>) -> Element<'a, M>
     };
 
     let mut r = row![vis_btn].spacing(4).align_y(Alignment::Center);
+    if spec.clipped_to_below {
+        r = r.push(
+            container(text("↳").size(12).style(|theme| text::Style {
+                color: Some(PaletteTokens::for_theme(theme).accent),
+            }))
+            .padding([0, 2]),
+        );
+    }
 
     if spec.has_mask {
         let mask_inner: Element<'a, M> = if let Some(handle) = spec.mask_thumbnail {

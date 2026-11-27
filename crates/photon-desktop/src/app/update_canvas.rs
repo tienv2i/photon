@@ -180,8 +180,33 @@ pub(super) fn handle_editor_canvas_event(state: &mut PhotonGui, ev: CanvasEvent)
                     }
                     return Task::none();
                 }
+                CanvasEvent::SampleBgColor([px, py]) => {
+                    if let Some(frame) = &state.editor_frame
+                        && px < frame.width
+                        && py < frame.height
+                    {
+                        let idx = ((py as usize) * (frame.width as usize) + (px as usize)) * 4;
+                        if idx + 3 < frame.rgba.len() {
+                            let rgba = [
+                                frame.rgba[idx],
+                                frame.rgba[idx + 1],
+                                frame.rgba[idx + 2],
+                                frame.rgba[idx + 3],
+                            ];
+                            state.editor_ui.sampled_color = Some(rgba);
+                            state.editor_ui.bg_color = Some([rgba[0], rgba[1], rgba[2]]);
+                        }
+                    }
+                    return Task::none();
+                }
                 CanvasEvent::CompareSplitChanged(frac) => {
                     state.editor_ui.compare_split_x = frac.clamp(0.02, 0.98);
+                    return Task::none();
+                }
+                CanvasEvent::SelectClear => {
+                    if state.editor_ui.select_op == SelectionBooleanOp::Replace {
+                        return dispatch_to_core(state.core.clone(), Command::EditorDeselect);
+                    }
                     return Task::none();
                 }
                 CanvasEvent::SelectMarqueeCommit {
@@ -284,6 +309,9 @@ pub(super) fn handle_editor_canvas_event(state: &mut PhotonGui, ev: CanvasEvent)
                         state.core.clone(),
                         Command::EditorSelectShape { shape, op },
                     );
+                }
+                CanvasEvent::ViewportResized(w, h) => {
+                    state.editor_ui.canvas_viewport_size = Some([w, h]);
                 }
                 CanvasEvent::ResetFit => {
                     state.context_menu = None;
@@ -416,6 +444,22 @@ pub(super) fn handle_editor_canvas_event(state: &mut PhotonGui, ev: CanvasEvent)
                     return update(state, Message::EditorTransformCancel);
                 }
                 CanvasEvent::MoveLayerCommit { dx, dy } => {
+                    if state.editor_ui.selected_layer_ids.len() >= 2 {
+                        return dispatch_to_core(
+                            state.core.clone(),
+                            Command::EditorLayerMoveMultiple {
+                                ids: state.editor_ui.selected_layer_ids.clone(),
+                                dx,
+                                dy,
+                            },
+                        );
+                    }
+                    if let Some(tp) = &mut state.transform_preview {
+                        tp.spec.translate_x += dx;
+                        tp.spec.translate_y += dy;
+                        state.pending_preview_commit_rev =
+                            state.editor_frame.as_ref().map(|f| f.revision);
+                    }
                     return dispatch_to_core(
                         state.core.clone(),
                         Command::EditorTransformLayer {
@@ -431,19 +475,87 @@ pub(super) fn handle_editor_canvas_event(state: &mut PhotonGui, ev: CanvasEvent)
                 CanvasEvent::BrushRadiusChanged(r) => {
                     return update(state, Message::EditorSetBrushRadius(r));
                 }
+                CanvasEvent::ShapeStrokeWidthChanged(w) => {
+                    state.editor_ui.shape_stroke_width = w.clamp(1.0, 64.0);
+                    return Task::none();
+                }
+                CanvasEvent::GuideMoved { id, position_px } => {
+                    if let Some(g) = state.editor_ui.guides.iter_mut().find(|g| g.id == id) {
+                        g.position_px = position_px;
+                    }
+                    return Task::none();
+                }
+                CanvasEvent::GuideRemoved(id) => {
+                    state.editor_ui.guides.retain(|g| g.id != id);
+                    return Task::none();
+                }
+                CanvasEvent::CursorDocMoved(_) => return Task::none(),
+                CanvasEvent::VectorSelectMarquee {
+                    shape_ids,
+                    additive,
+                } => {
+                    state.editor_ui.selected_vector_node = None;
+                    let next_ids = if additive
+                        && let Some(vdata) = state
+                            .snapshot
+                            .meta
+                            .editor
+                            .as_ref()
+                            .and_then(|ed| ed.active_vector_data.as_ref())
+                    {
+                        let mut next = vdata.selected_shape_ids.clone();
+                        for sid in shape_ids {
+                            if !next.contains(&sid) {
+                                next.push(sid);
+                            }
+                        }
+                        next
+                    } else {
+                        shape_ids
+                    };
+                    return dispatch_to_core(
+                        state.core.clone(),
+                        Command::EditorVectorPathOp {
+                            layer_id: None,
+                            shape_id: next_ids.first().copied(),
+                            op: VectorPathOperation::SelectShapes {
+                                shape_ids: next_ids,
+                            },
+                        },
+                    );
+                }
                 CanvasEvent::VectorSelectShape {
                     shape_id,
                     node_index,
+                    additive,
                 } => {
                     state.editor_ui.selected_vector_node = node_index;
+                    let shape_ids = if additive
+                        && let Some(vdata) = state
+                            .snapshot
+                            .meta
+                            .editor
+                            .as_ref()
+                            .and_then(|ed| ed.active_vector_data.as_ref())
+                    {
+                        let mut next = vdata.selected_shape_ids.clone();
+                        if let Some(pos) = next.iter().position(|&id| id == shape_id) {
+                            if next.len() > 1 {
+                                next.remove(pos);
+                            }
+                        } else {
+                            next.push(shape_id);
+                        }
+                        next
+                    } else {
+                        vec![shape_id]
+                    };
                     return dispatch_to_core(
                         state.core.clone(),
                         Command::EditorVectorPathOp {
                             layer_id: None,
                             shape_id: Some(shape_id),
-                            op: VectorPathOperation::SelectShapes {
-                                shape_ids: vec![shape_id],
-                            },
+                            op: VectorPathOperation::SelectShapes { shape_ids },
                         },
                     );
                 }
@@ -638,7 +750,11 @@ pub(super) fn handle_viewer_canvas_event(
                 ];
                 dispatch_viewer_translate_region(state, path, region)
             }
-            other => update(state, Message::Canvas(other)),
+            other @ (CanvasEvent::PanBy { .. }
+            | CanvasEvent::ZoomBy { .. }
+            | CanvasEvent::ResetFit
+            | CanvasEvent::CompareSplitChanged(_)) => update(state, Message::Canvas(other)),
+            _ => Task::none(),
         },
 
         _ => unreachable!(),

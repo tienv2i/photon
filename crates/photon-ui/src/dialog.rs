@@ -399,6 +399,7 @@ where
     }
     body_col = body_col.push(
         text_input(&spec.placeholder, &spec.value)
+            .id(iced::widget::Id::new("photon.dialog.first_input"))
             .on_input(spec.on_input)
             .on_submit(spec.on_confirm.clone())
             .padding([8, 10])

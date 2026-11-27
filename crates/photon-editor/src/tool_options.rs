@@ -214,15 +214,39 @@ fn build_tool_options_card<'a>(
 ) -> Option<Element<'a, EditorMessage>> {
     let ui = &state.editor_ui;
 
-    if let Some(uv) = state.crop_uv {
-        let (cx, cy, cw, ch) = crop_uv_to_signed(uv, ed.width, ed.height);
+    if ui.tool == EditorTool::Crop || state.crop_uv.is_some() {
+        let (cx, cy, cw, ch) = state
+            .crop_uv
+            .map(|uv| crop_uv_to_signed(uv, ed.width, ed.height))
+            .unwrap_or((0, 0, 0, 0));
+        let has_crop = state.crop_uv.is_some() && cw >= 1 && ch >= 1;
+        let crop_input = |label: &'static str, val: String, field: CropRectField| {
+            let mut input = iced::widget::text_input("0", &val)
+                .on_input(move |s| EditorMessage::SetCropField(field, s))
+                .size(12)
+                .padding([4, 6])
+                .width(Fill);
+            if field == CropRectField::X {
+                input = input.id(iced::widget::Id::new("photon.tool.first_input"));
+            }
+            row![text(label).size(11).width(Length::Fixed(16.0)), input]
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .width(Fill)
+        };
         return Some(section_card(
             tr(lang, "action-crop"),
             column![
-                kv_row(
-                    tr(lang, "label-dimensions"),
-                    format!("{cw} × {ch} @ ({cx}, {cy})")
-                ),
+                row![
+                    crop_input("X", cx.to_string(), CropRectField::X),
+                    crop_input("Y", cy.to_string(), CropRectField::Y),
+                ]
+                .spacing(6),
+                row![
+                    crop_input("W", cw.to_string(), CropRectField::W),
+                    crop_input("H", ch.to_string(), CropRectField::H),
+                ]
+                .spacing(6),
                 row![
                     button::labeled(
                         "Free",
@@ -282,7 +306,7 @@ fn build_tool_options_card<'a>(
                             tr(lang, "action-apply-crop"),
                             Some(Icon::Check),
                             ButtonVariant::Primary,
-                            Some(EditorMessage::ApplyCrop),
+                            has_crop.then_some(EditorMessage::ApplyCrop),
                         )
                         .width(Fill),
                         tr(lang, "action-apply-crop"),
@@ -589,9 +613,43 @@ fn build_tool_options_card<'a>(
                 .into()
             }))
             .spacing(4);
+            let no_border_active = ui.shape_fill_mode == ShapeFillMode::Fill;
+            let no_fill_active = ui.shape_fill_mode == ShapeFillMode::Stroke;
+            let no_border_next = if no_border_active {
+                ShapeFillMode::StrokeAndFill
+            } else {
+                ShapeFillMode::Fill
+            };
+            let no_fill_next = if no_fill_active {
+                ShapeFillMode::StrokeAndFill
+            } else {
+                ShapeFillMode::Stroke
+            };
+            let quick_none_row = row![
+                button::labeled(
+                    tr(lang, "shape-no-border"),
+                    None,
+                    ButtonVariant::Tab {
+                        active: no_border_active,
+                    },
+                    Some(EditorMessage::EditorSetShapeFillMode(no_border_next)),
+                )
+                .width(Fill),
+                button::labeled(
+                    tr(lang, "shape-no-fill"),
+                    None,
+                    ButtonVariant::Tab {
+                        active: no_fill_active,
+                    },
+                    Some(EditorMessage::EditorSetShapeFillMode(no_fill_next)),
+                )
+                .width(Fill),
+            ]
+            .spacing(4);
             body = body
                 .push(text(tr(lang, "label-shape-fill-mode")).size(11))
                 .push(fill_row)
+                .push(quick_none_row)
                 .push(slider_stepper_control(
                     tr(lang, "label-stroke-width"),
                     ui.shape_stroke_width,
@@ -996,6 +1054,10 @@ fn build_tool_options_card<'a>(
         EditorTool::Pointer if ed.active_text_data.is_some() => {
             Some(text_ui::build_text_tool_options(state, ed, lang))
         }
+        EditorTool::Pointer => Some(section_card(
+            tr(lang, "tool-pointer"),
+            vector_ui::build_align_distribute_controls(state, lang),
+        )),
         _ => None,
     }
 }

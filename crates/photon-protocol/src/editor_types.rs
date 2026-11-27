@@ -578,6 +578,10 @@ pub struct LayerSummary {
     pub mask_linked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect: Option<LayerEffect>,
+    #[serde(default)]
+    pub clipped_to_below: bool,
+    #[serde(default)]
+    pub lock_alpha: bool,
 }
 
 /// Boolean combination mode for pixel selections (Photoshop + Krita).
@@ -865,6 +869,61 @@ impl PluginInfo {
         }
         &self.name
     }
+}
+
+/// Alignment operation for multiple vector shapes or layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AlignOp {
+    Left,
+    CenterH,
+    Right,
+    Top,
+    CenterV,
+    Bottom,
+}
+
+/// Distribution / even-spacing operation for multiple vector shapes or layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DistributeOp {
+    Left,
+    CenterH,
+    Right,
+    Top,
+    CenterV,
+    Bottom,
+    /// Equalize horizontal gaps between consecutive objects.
+    SpaceH,
+    /// Equalize vertical gaps between consecutive objects.
+    SpaceV,
+}
+
+/// Reference bounds used by [`AlignOp`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AlignTarget {
+    #[default]
+    Selection,
+    Canvas,
+}
+
+/// Boolean pathfinder operation on 2+ vector shapes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorBooleanOp {
+    Union,
+    Subtract,
+    Intersect,
+    Exclude,
+}
+
+/// Image slicing mode for `EditorSliceExport`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SliceMode {
+    Grid { rows: u32, cols: u32 },
+    Strip { strip_height: u32 },
 }
 
 #[cfg(test)]

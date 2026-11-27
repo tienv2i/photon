@@ -33,6 +33,7 @@ pub struct ImageQuadPrimitive {
     pub pan_x: f32,
     pub pan_y: f32,
     pub adjustments: ColorAdjustments,
+    pub adj_selection_only: bool,
     pub dark_theme: bool,
     pub crop_rect: Option<[f32; 4]>,
     pub quarter_turns: u8,
@@ -104,7 +105,7 @@ pub(crate) struct Uniforms {
     pub transform_pivot: [f32; 2],
     pub transform_cos_sin: [f32; 2],
     pub transform_has_base: f32,
-    pub _pad2: f32,
+    pub adj_selection_only: f32,
     pub _pad3: [f32; 2],
     pub gradient_line: [f32; 4],
     pub gradient_params: [f32; 4],
@@ -224,7 +225,7 @@ struct Uniforms {
     transform_pivot: vec2<f32>,
     transform_cos_sin: vec2<f32>,
     transform_has_base: f32,
-    _pad2: f32,
+    adj_selection_only: f32,
     _pad3: vec2<f32>,
     gradient_line: vec4<f32>,
     gradient_params: vec4<f32>,
@@ -542,7 +543,12 @@ fn sample_processed_image(
     }
 
     let adj_rgb = apply_curve_lut(apply_color_and_light(texel.rgb));
-    return mix(backdrop, adj_rgb, texel.a);
+    var final_rgb = adj_rgb;
+    if (u.adj_selection_only > 0.5 && u.has_selection > 0.5) {
+        let sel_w = clamp(sample_sel_mask_at(primary_uv), 0.0, 1.0);
+        final_rgb = mix(texel.rgb, adj_rgb, sel_w);
+    }
+    return mix(backdrop, final_rgb, texel.a);
 }
 
 // Stage 2: Apply crisp pixel-exact overlays (divider, crop, quick mask, marching ants via Nearest sel_sampler,
@@ -677,7 +683,12 @@ fn apply_crisp_overlays(
     if (u.crop_active > 0.5) {
         let c0 = u.crop_rect.xy;
         let c1 = u.crop_rect.zw;
-        let inside = img_uv.x >= c0.x && img_uv.x <= c1.x && img_uv.y >= c0.y && img_uv.y <= c1.y;
+        let has_box = c1.x > c0.x && c1.y > c0.y;
+        let inside = has_box
+            && img_uv.x >= c0.x
+            && img_uv.x <= c1.x
+            && img_uv.y >= c0.y
+            && img_uv.y <= c1.y;
         if (!inside) {
             out_rgb = out_rgb * 0.35;
         } else {
@@ -1727,7 +1738,7 @@ impl Primitive for ImageQuadPrimitive {
             transform_pivot,
             transform_cos_sin,
             transform_has_base,
-            _pad2: 0.0,
+            adj_selection_only: if self.adj_selection_only { 1.0 } else { 0.0 },
             _pad3: [0.0; 2],
             gradient_line,
             gradient_params,

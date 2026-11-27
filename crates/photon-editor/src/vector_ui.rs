@@ -5,9 +5,10 @@ use iced::{Alignment, Element, Fill};
 use photon_i18n::tr;
 use photon_panels::{kv_row, section_card};
 use photon_protocol::{
-    CanvasAnchor, Command, DrawShapeKind, EditorState, Language, ShapeFillMode, TransformEachSpec,
-    VectorBlendSpec, VectorGeometry, VectorLayerData, VectorNodeMode, VectorPathNode,
-    VectorPathOperation, VectorShape, VectorStroke,
+    AlignOp, AlignTarget, CanvasAnchor, Command, DistributeOp, DrawShapeKind, EditorState,
+    Language, ShapeFillMode, TransformEachSpec, VectorBlendSpec, VectorBooleanOp, VectorGeometry,
+    VectorLayerData, VectorNodeMode, VectorPathNode, VectorPathOperation, VectorShape,
+    VectorStroke,
 };
 use photon_ui::button::{self, ButtonVariant};
 use photon_ui::dialog::DialogSpec;
@@ -138,6 +139,110 @@ pub fn build_editor_vector_menu_entries<'a>(
                 }),
             )
             .enabled(has_vector_shape),
+        ),
+        MenuEntry::Separator,
+        MenuEntry::Header(tr(lang, "label-pathfinder")),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "pathfinder-union"),
+                EditorMessage::Dispatch(Command::EditorVectorBoolean {
+                    op: VectorBooleanOp::Union,
+                    layer_id: None,
+                    shape_ids: Vec::new(),
+                }),
+            )
+            .enabled(has_two_shapes),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "pathfinder-subtract"),
+                EditorMessage::Dispatch(Command::EditorVectorBoolean {
+                    op: VectorBooleanOp::Subtract,
+                    layer_id: None,
+                    shape_ids: Vec::new(),
+                }),
+            )
+            .enabled(has_two_shapes),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "pathfinder-intersect"),
+                EditorMessage::Dispatch(Command::EditorVectorBoolean {
+                    op: VectorBooleanOp::Intersect,
+                    layer_id: None,
+                    shape_ids: Vec::new(),
+                }),
+            )
+            .enabled(has_two_shapes),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "pathfinder-exclude"),
+                EditorMessage::Dispatch(Command::EditorVectorBoolean {
+                    op: VectorBooleanOp::Exclude,
+                    layer_id: None,
+                    shape_ids: Vec::new(),
+                }),
+            )
+            .enabled(has_two_shapes),
+        ),
+        MenuEntry::Separator,
+        MenuEntry::Header(tr(lang, "label-align-distribute")),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "align-obj-left"),
+                EditorMessage::EditorAlignObjects(AlignOp::Left),
+            )
+            .enabled(has_vector_shape),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "align-obj-center-h"),
+                EditorMessage::EditorAlignObjects(AlignOp::CenterH),
+            )
+            .enabled(has_vector_shape),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "align-obj-right"),
+                EditorMessage::EditorAlignObjects(AlignOp::Right),
+            )
+            .enabled(has_vector_shape),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "align-obj-top"),
+                EditorMessage::EditorAlignObjects(AlignOp::Top),
+            )
+            .enabled(has_vector_shape),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "align-obj-center-v"),
+                EditorMessage::EditorAlignObjects(AlignOp::CenterV),
+            )
+            .enabled(has_vector_shape),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "align-obj-bottom"),
+                EditorMessage::EditorAlignObjects(AlignOp::Bottom),
+            )
+            .enabled(has_vector_shape),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "distribute-space-h"),
+                EditorMessage::EditorDistributeObjects(DistributeOp::SpaceH),
+            )
+            .enabled(has_two_shapes),
+        ),
+        MenuEntry::Item(
+            MenuItem::new(
+                tr(lang, "distribute-space-v"),
+                EditorMessage::EditorDistributeObjects(DistributeOp::SpaceV),
+            )
+            .enabled(has_two_shapes),
         ),
         MenuEntry::Separator,
         MenuEntry::Item(
@@ -544,6 +649,72 @@ pub fn build_path_select_tool_options<'a>(
 
     body = body
         .push(rule::horizontal(1).style(hairline_rule_style))
+        .push(text(tr(lang, "label-pathfinder")).size(11))
+        .push(
+            row![
+                button::labeled(
+                    tr(lang, "pathfinder-union"),
+                    None,
+                    ButtonVariant::Secondary,
+                    (vdata.shapes.len() >= 2).then_some(EditorMessage::Dispatch(
+                        Command::EditorVectorBoolean {
+                            op: VectorBooleanOp::Union,
+                            layer_id: None,
+                            shape_ids: Vec::new(),
+                        }
+                    )),
+                )
+                .width(Fill),
+                button::labeled(
+                    tr(lang, "pathfinder-subtract"),
+                    None,
+                    ButtonVariant::Secondary,
+                    (vdata.shapes.len() >= 2).then_some(EditorMessage::Dispatch(
+                        Command::EditorVectorBoolean {
+                            op: VectorBooleanOp::Subtract,
+                            layer_id: None,
+                            shape_ids: Vec::new(),
+                        }
+                    )),
+                )
+                .width(Fill),
+            ]
+            .spacing(4),
+        )
+        .push(
+            row![
+                button::labeled(
+                    tr(lang, "pathfinder-intersect"),
+                    None,
+                    ButtonVariant::Secondary,
+                    (vdata.shapes.len() >= 2).then_some(EditorMessage::Dispatch(
+                        Command::EditorVectorBoolean {
+                            op: VectorBooleanOp::Intersect,
+                            layer_id: None,
+                            shape_ids: Vec::new(),
+                        }
+                    )),
+                )
+                .width(Fill),
+                button::labeled(
+                    tr(lang, "pathfinder-exclude"),
+                    None,
+                    ButtonVariant::Secondary,
+                    (vdata.shapes.len() >= 2).then_some(EditorMessage::Dispatch(
+                        Command::EditorVectorBoolean {
+                            op: VectorBooleanOp::Exclude,
+                            layer_id: None,
+                            shape_ids: Vec::new(),
+                        }
+                    )),
+                )
+                .width(Fill),
+            ]
+            .spacing(4),
+        )
+        .push(rule::horizontal(1).style(hairline_rule_style))
+        .push(build_align_distribute_controls(state, lang))
+        .push(rule::horizontal(1).style(hairline_rule_style))
         .push(
             row![
                 button::labeled(
@@ -586,6 +757,118 @@ pub fn build_path_select_tool_options<'a>(
         );
 
     section_card(tr(lang, "tool-path-select"), body)
+}
+
+/// Build the Align (6 directions) & Distribute (even spacing + centers) controls
+/// used in `Move (V)` and `Path Select (A)` Tool Options.
+pub fn build_align_distribute_controls<'a>(
+    state: EditorViewState<'a>,
+    lang: Language,
+) -> Element<'a, EditorMessage> {
+    let ui = &state.editor_ui;
+    let target_row = row![
+        button::labeled(
+            tr(lang, "align-target-selection"),
+            None,
+            ButtonVariant::Tab {
+                active: ui.align_target == AlignTarget::Selection,
+            },
+            Some(EditorMessage::EditorSetAlignTarget(AlignTarget::Selection)),
+        )
+        .width(Fill),
+        button::labeled(
+            tr(lang, "align-target-canvas"),
+            None,
+            ButtonVariant::Tab {
+                active: ui.align_target == AlignTarget::Canvas,
+            },
+            Some(EditorMessage::EditorSetAlignTarget(AlignTarget::Canvas)),
+        )
+        .width(Fill),
+    ]
+    .spacing(4);
+
+    let align_btn = |label: String, icon: Icon, op: AlignOp| -> Element<'a, EditorMessage> {
+        button::labeled(
+            label,
+            Some(icon),
+            ButtonVariant::Secondary,
+            Some(EditorMessage::EditorAlignObjects(op)),
+        )
+        .width(Fill)
+        .into()
+    };
+    let dist_btn = |label: String, icon: Icon, op: DistributeOp| -> Element<'a, EditorMessage> {
+        button::labeled(
+            label,
+            Some(icon),
+            ButtonVariant::Secondary,
+            Some(EditorMessage::EditorDistributeObjects(op)),
+        )
+        .width(Fill)
+        .into()
+    };
+
+    column![
+        text(tr(lang, "label-align-distribute")).size(11),
+        target_row,
+        row![
+            align_btn(tr(lang, "align-obj-left"), Icon::AlignLeft, AlignOp::Left),
+            align_btn(
+                tr(lang, "align-center-short"),
+                Icon::AlignCenterH,
+                AlignOp::CenterH
+            ),
+            align_btn(
+                tr(lang, "align-obj-right"),
+                Icon::AlignRight,
+                AlignOp::Right
+            ),
+        ]
+        .spacing(4),
+        row![
+            align_btn(tr(lang, "align-obj-top"), Icon::AlignTop, AlignOp::Top),
+            align_btn(
+                tr(lang, "align-middle-short"),
+                Icon::AlignMiddleV,
+                AlignOp::CenterV
+            ),
+            align_btn(
+                tr(lang, "align-obj-bottom"),
+                Icon::AlignBottom,
+                AlignOp::Bottom
+            ),
+        ]
+        .spacing(4),
+        row![
+            dist_btn(
+                tr(lang, "distribute-space-h"),
+                Icon::DistributeH,
+                DistributeOp::SpaceH
+            ),
+            dist_btn(
+                tr(lang, "distribute-space-v"),
+                Icon::DistributeV,
+                DistributeOp::SpaceV
+            ),
+        ]
+        .spacing(4),
+        row![
+            dist_btn(
+                tr(lang, "distribute-center-h"),
+                Icon::DistributeH,
+                DistributeOp::CenterH
+            ),
+            dist_btn(
+                tr(lang, "distribute-center-v"),
+                Icon::DistributeV,
+                DistributeOp::CenterV
+            ),
+        ]
+        .spacing(4),
+    ]
+    .spacing(6)
+    .into()
 }
 
 /// Build the `Transform Each` dialog (`Scale W/H %`, `Move X/Y`, `Rotate°`, `Reflect X/Y`,

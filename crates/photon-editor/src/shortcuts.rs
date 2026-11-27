@@ -80,6 +80,26 @@ impl KeyChord {
     }
 
     #[must_use]
+    pub const fn ctrl_shift_alt(ch: char) -> Self {
+        Self {
+            ctrl: true,
+            shift: true,
+            alt: true,
+            key: ShortcutKey::Char(ch),
+        }
+    }
+
+    #[must_use]
+    pub const fn ctrl_alt(ch: char) -> Self {
+        Self {
+            ctrl: true,
+            shift: false,
+            alt: true,
+            key: ShortcutKey::Char(ch),
+        }
+    }
+
+    #[must_use]
     pub const fn named(key: ShortcutNamedKey) -> Self {
         Self {
             ctrl: false,
@@ -117,6 +137,7 @@ pub enum EditorShortcutAction {
     ToolZoom,
     ToolLiquify,
     SwapForegroundBackground,
+    ResetDefaultColors,
     ToggleQuickMask,
     BrushSizeDecrease,
     BrushSizeIncrease,
@@ -148,13 +169,20 @@ pub enum EditorShortcutAction {
     // --- Layer Operations ---
     NewLayer,
     DuplicateLayer,
+    LayerViaCut,
     MergeDown,
+    StampVisible,
+    ToggleClippingMask,
 
     // --- Viewport Zoom ---
     ZoomIn,
     ZoomOut,
     ZoomFit,
     ZoomActual,
+    ToggleRulers,
+    ToggleGrid,
+    ToggleGuides,
+    ToggleSnap,
 }
 
 /// Declarative entry in [`EDITOR_SHORTCUT_TABLE`].
@@ -305,6 +333,12 @@ pub const EDITOR_SHORTCUT_TABLE: &[ShortcutEntry] = &[
         description: "Swap Foreground / Background Colors",
     },
     ShortcutEntry {
+        chord: KeyChord::key('d'),
+        action: EditorShortcutAction::ResetDefaultColors,
+        display: "D",
+        description: "Reset Default Colors (Black / White)",
+    },
+    ShortcutEntry {
         chord: KeyChord::key('q'),
         action: EditorShortcutAction::ToggleQuickMask,
         display: "Q",
@@ -354,16 +388,46 @@ pub const EDITOR_SHORTCUT_TABLE: &[ShortcutEntry] = &[
         description: "Close Active Tab",
     },
     ShortcutEntry {
-        chord: KeyChord::ctrl('r'),
+        chord: KeyChord::ctrl_alt('i'),
         action: EditorShortcutAction::ImageSize,
-        display: "Ctrl+R",
+        display: "Ctrl+Alt+I",
         description: "Image Size",
+    },
+    ShortcutEntry {
+        chord: KeyChord::ctrl_alt('c'),
+        action: EditorShortcutAction::CanvasSize,
+        display: "Ctrl+Alt+C",
+        description: "Canvas Size",
     },
     ShortcutEntry {
         chord: KeyChord::ctrl_shift('r'),
         action: EditorShortcutAction::CanvasSize,
         display: "Ctrl+Shift+R",
         description: "Canvas Size",
+    },
+    ShortcutEntry {
+        chord: KeyChord::ctrl('r'),
+        action: EditorShortcutAction::ToggleRulers,
+        display: "Ctrl+R",
+        description: "Show / Hide Rulers",
+    },
+    ShortcutEntry {
+        chord: KeyChord::ctrl('\''),
+        action: EditorShortcutAction::ToggleGrid,
+        display: "Ctrl+'",
+        description: "Show / Hide Grid",
+    },
+    ShortcutEntry {
+        chord: KeyChord::ctrl(';'),
+        action: EditorShortcutAction::ToggleGuides,
+        display: "Ctrl+;",
+        description: "Show / Hide Guides",
+    },
+    ShortcutEntry {
+        chord: KeyChord::ctrl_shift(';'),
+        action: EditorShortcutAction::ToggleSnap,
+        display: "Ctrl+Shift+;",
+        description: "Enable / Disable Snap",
     },
     // --- Edit / Selection / Transform ---
     ShortcutEntry {
@@ -476,10 +540,28 @@ pub const EDITOR_SHORTCUT_TABLE: &[ShortcutEntry] = &[
         description: "Duplicate Layer / Layer via Copy",
     },
     ShortcutEntry {
+        chord: KeyChord::ctrl_shift('j'),
+        action: EditorShortcutAction::LayerViaCut,
+        display: "Ctrl+Shift+J",
+        description: "Layer via Cut",
+    },
+    ShortcutEntry {
         chord: KeyChord::ctrl('e'),
         action: EditorShortcutAction::MergeDown,
         display: "Ctrl+E",
         description: "Merge Down",
+    },
+    ShortcutEntry {
+        chord: KeyChord::ctrl_shift_alt('e'),
+        action: EditorShortcutAction::StampVisible,
+        display: "Ctrl+Shift+Alt+E",
+        description: "Stamp Visible",
+    },
+    ShortcutEntry {
+        chord: KeyChord::ctrl_alt('g'),
+        action: EditorShortcutAction::ToggleClippingMask,
+        display: "Ctrl+Alt+G",
+        description: "Create / Release Clipping Mask",
     },
     // --- Viewport Zoom ---
     ShortcutEntry {
@@ -643,6 +725,7 @@ mod tests {
             ('z', EditorShortcutAction::ToolZoom),
             ('j', EditorShortcutAction::ToolHealingBrush),
             ('x', EditorShortcutAction::SwapForegroundBackground),
+            ('d', EditorShortcutAction::ResetDefaultColors),
             ('q', EditorShortcutAction::ToggleQuickMask),
             ('[', EditorShortcutAction::BrushSizeDecrease),
             (']', EditorShortcutAction::BrushSizeIncrease),

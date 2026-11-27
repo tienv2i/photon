@@ -16,6 +16,15 @@ pub struct SelectionSnapshot {
     pub bounds: Option<[u32; 4]>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedSelectionChannel {
+    pub id: u64,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub alpha: Arc<Vec<u8>>,
+}
+
 /// Non-destructive 8-bit grayscale pixel selection mask matching canvas dimensions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectionMask {
@@ -25,6 +34,8 @@ pub struct SelectionMask {
     pub bounds: Option<[u32; 4]>,
     pub reselect: Option<SelectionSnapshot>,
     pub quick_mask_active: bool,
+    pub saved_selections: Vec<SavedSelectionChannel>,
+    pub next_saved_id: u64,
 }
 
 impl SelectionMask {
@@ -36,6 +47,8 @@ impl SelectionMask {
             bounds: None,
             reselect: None,
             quick_mask_active: false,
+            saved_selections: Vec::new(),
+            next_saved_id: 1,
         }
     }
 
@@ -48,6 +61,8 @@ impl SelectionMask {
             bounds,
             reselect: None,
             quick_mask_active: false,
+            saved_selections: Vec::new(),
+            next_saved_id: 1,
         }
     }
 
@@ -98,19 +113,93 @@ impl SelectionMask {
             buf.resize(len, 0);
         }
         for (dst, &src) in buf.iter_mut().zip(incoming.iter()) {
-            let o = *dst as u16;
-            let n = src as u16;
-            *dst = match op {
-                SelectionBooleanOp::Replace => src,
-                SelectionBooleanOp::Add => (*dst).max(src),
-                SelectionBooleanOp::Subtract => ((o * (255 - n) + 127) / 255) as u8,
-                SelectionBooleanOp::Intersect => ((o * n + 127) / 255) as u8,
-                SelectionBooleanOp::SymmetricDiff => (*dst).abs_diff(src),
-            };
+            *dst = combine_alpha(*dst, src, op);
         }
         self.recompute_bounds();
     }
 
+    pub fn save_selection(
+        &mut self,
+        name: String,
+        target_id: Option<u64>,
+        op: SelectionBooleanOp,
+    ) -> u64 {
+        let trimmed = name.trim();
+        if let Some(tid) = target_id
+            && let Some(existing) = self
+                .saved_selections
+                .iter_mut()
+                .find(|s| s.id == tid && s.width == self.width && s.height == self.height)
+        {
+            if op == SelectionBooleanOp::Replace {
+                existing.alpha = Arc::clone(&self.alpha);
+            } else {
+                let buf = Arc::make_mut(&mut existing.alpha);
+                for (dst, &src) in buf.iter_mut().zip(self.alpha.iter()) {
+                    *dst = combine_alpha(*dst, src, op);
+                }
+            }
+            if !trimmed.is_empty() {
+                existing.name = trimmed.to_string();
+            }
+            return existing.id;
+        }
+        let id = self.next_saved_id.max(1);
+        self.next_saved_id = id + 1;
+        let resolved_name = if trimmed.is_empty() {
+            format!("Selection {id}")
+        } else {
+            trimmed.to_string()
+        };
+        self.saved_selections.push(SavedSelectionChannel {
+            id,
+            name: resolved_name,
+            width: self.width,
+            height: self.height,
+            alpha: Arc::clone(&self.alpha),
+        });
+        id
+    }
+
+    pub fn load_selection(&mut self, id: u64, op: SelectionBooleanOp, invert: bool) -> bool {
+        let Some(channel) = self
+            .saved_selections
+            .iter()
+            .find(|s| s.id == id && s.width == self.width && s.height == self.height)
+            .cloned()
+        else {
+            return false;
+        };
+        if invert {
+            let inverted: Vec<u8> = channel.alpha.iter().map(|&a| 255 - a).collect();
+            self.combine(&inverted, op);
+        } else {
+            self.combine(&channel.alpha, op);
+        }
+        true
+    }
+
+    pub fn delete_saved_selection(&mut self, id: u64) -> bool {
+        let before = self.saved_selections.len();
+        self.saved_selections.retain(|s| s.id != id);
+        self.saved_selections.len() != before
+    }
+}
+
+#[inline]
+fn combine_alpha(old: u8, new: u8, op: SelectionBooleanOp) -> u8 {
+    let o = old as u16;
+    let n = new as u16;
+    match op {
+        SelectionBooleanOp::Replace => new,
+        SelectionBooleanOp::Add => old.max(new),
+        SelectionBooleanOp::Subtract => ((o * (255 - n) + 127) / 255) as u8,
+        SelectionBooleanOp::Intersect => ((o * n + 127) / 255) as u8,
+        SelectionBooleanOp::SymmetricDiff => old.abs_diff(new),
+    }
+}
+
+impl SelectionMask {
     pub fn select_all(&mut self) {
         let len = (self.width as usize).saturating_mul(self.height as usize);
         let buf = Arc::make_mut(&mut self.alpha);
@@ -217,6 +306,8 @@ impl SelectionMask {
             bounds,
             reselect: None,
             quick_mask_active: self.quick_mask_active,
+            saved_selections: Vec::new(),
+            next_saved_id: 1,
         }
     }
 
@@ -256,6 +347,8 @@ impl SelectionMask {
             bounds,
             reselect: None,
             quick_mask_active: self.quick_mask_active,
+            saved_selections: Vec::new(),
+            next_saved_id: 1,
         }
     }
 
@@ -287,6 +380,8 @@ impl SelectionMask {
             bounds,
             reselect: None,
             quick_mask_active: self.quick_mask_active,
+            saved_selections: Vec::new(),
+            next_saved_id: 1,
         }
     }
 
@@ -311,6 +406,8 @@ impl SelectionMask {
             bounds,
             reselect: None,
             quick_mask_active: self.quick_mask_active,
+            saved_selections: Vec::new(),
+            next_saved_id: 1,
         }
     }
 }

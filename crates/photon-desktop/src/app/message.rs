@@ -12,6 +12,11 @@ pub enum Message {
     WakeWindowSettle(window::Id),
     WindowMonitorSizeCheck(window::Id, Option<Size>, bool),
     WindowClosed(window::Id),
+    WindowCloseRequested(window::Id),
+    RequestAppExit,
+    RecoverySyncTick,
+    RestoreRecoverySession,
+    DiscardRecoverySession,
     WindowResized(window::Id, Size),
     WindowRescaled(window::Id, f32),
     PersistWindowSize(u64, u32, u32),
@@ -54,12 +59,23 @@ pub enum Message {
     ConfirmCanvasSize,
     ToggleCropMode,
     SetCropPreset(Option<f32>),
+    SetCropField(photon_editor::CropRectField, String),
     ApplyCrop,
     CancelCrop,
     DismissToast(Option<u64>),
     ToggleMenu(ActiveMenu),
     HoverMenu(ActiveMenu),
+    SetMenuSubmenu(&'static str),
     CloseMenu,
+    OpenSliceImageDialog,
+    SliceImageModeChanged(bool),
+    SliceImageRowsChanged(String),
+    SliceImageColsChanged(String),
+    SliceImageStripHeightChanged(String),
+    SliceImageOutputDirChanged(String),
+    SliceImagePrefixChanged(String),
+    SliceImageFormatChanged(String),
+    ConfirmSliceImage,
     OpenShortcutsDialog,
     ToggleBrowserShowHidden,
     ToolGroupPressed(EditorToolGroup),
@@ -255,6 +271,7 @@ pub enum Message {
     SetShadows(f32),
     ApplyColorAdjustments,
     EditorToggleApplyToSelection(bool),
+    EditorToggleAdjustLivePreview,
     DenoiseDialogSelectionOnlyChanged(bool),
     EditorResetPendingAdjustments,
     EditorSelectTool(EditorTool),
@@ -336,6 +353,29 @@ pub enum Message {
     DenoiseDialogDetailChanged(f32),
     DenoiseDialogTargetChanged(ApplyTarget),
     ConfirmDenoiseDialog,
+    OpenSaveSelectionDialog,
+    SaveSelectionNameChanged(String),
+    SaveSelectionTargetChanged(Option<u64>),
+    SaveSelectionOpChanged(SelectionBooleanOp),
+    ConfirmSaveSelection,
+    OpenLoadSelectionDialog,
+    LoadSelectionSelectedChanged(u64),
+    LoadSelectionOpChanged(SelectionBooleanOp),
+    LoadSelectionInvertChanged(bool),
+    DeleteSavedSelection(u64),
+    ConfirmLoadSelection,
+    OpenNewGuideDialog,
+    NewGuideAxisChanged(photon_canvas::GuideAxis),
+    NewGuideValueChanged(String),
+    NewGuideUnitChanged(bool),
+    ConfirmNewGuide,
+    OpenGridSettingsDialog,
+    GridSettingsSpacingChanged(String),
+    GridSettingsSubdivisionsChanged(String),
+    GridSettingsOpacityChanged(String),
+    GridSettingsShowGridChanged(bool),
+    GridSettingsSnapChanged(bool),
+    ConfirmGridSettings,
     EditorSetTransformSpec(LayerTransformSpec),
     EditorTransformFramesLoaded(Option<EditorTransformFrames>),
     EditorTransformCommit,
@@ -785,6 +825,7 @@ pub(super) fn map_editor_message(msg: EditorMessage) -> Message {
         EditorMessage::EditorApplyRotateAngle => Message::EditorApplyRotateAngle,
         EditorMessage::ToggleCropMode => Message::ToggleCropMode,
         EditorMessage::SetCropPreset(p) => Message::SetCropPreset(p),
+        EditorMessage::SetCropField(f, v) => Message::SetCropField(f, v),
         EditorMessage::ApplyCrop => Message::ApplyCrop,
         EditorMessage::CancelCrop => Message::CancelCrop,
         EditorMessage::BeginDragEditorPanel(p) => Message::BeginDragEditorPanel(p),
@@ -859,7 +900,24 @@ pub(super) fn map_editor_message(msg: EditorMessage) -> Message {
         | EditorMessage::ExportVectorSvgPathChanged(_)
         | EditorMessage::ConfirmExportVectorSvg
         | EditorMessage::EditorSetTextDraft(_)
-        | EditorMessage::EditorAddOrUpdateTextLayer(_)) => Message::EditorVectorText(other),
+        | EditorMessage::EditorAddOrUpdateTextLayer(_)
+        | EditorMessage::EditorSetAlignTarget(_)
+        | EditorMessage::EditorAlignObjects(_)
+        | EditorMessage::EditorDistributeObjects(_)
+        | EditorMessage::EditorToggleLayerMultiSelect(_)
+        | EditorMessage::EditorLayerRowClicked(_)
+        | EditorMessage::EditorBeginDragLayer(_)
+        | EditorMessage::EditorDropLayer(_)
+        | EditorMessage::ToggleRulers
+        | EditorMessage::ToggleGrid
+        | EditorMessage::SetGridSpacing(_)
+        | EditorMessage::SetGridSettings { .. }
+        | EditorMessage::ToggleGuides
+        | EditorMessage::ToggleLockGuides
+        | EditorMessage::ClearGuides
+        | EditorMessage::AddGuide(_, _)
+        | EditorMessage::SetPendingGuidePreview(_)
+        | EditorMessage::ToggleSnap(_)) => Message::EditorVectorText(other),
     }
 }
 

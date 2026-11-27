@@ -58,6 +58,23 @@ pub struct EditorViewState<'a> {
     pub active_menu: Option<EditorMenuKind>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapTarget {
+    Master,
+    Guides,
+    Grid,
+    Canvas,
+    Layers,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CropRectField {
+    X,
+    Y,
+    W,
+    H,
+}
+
 #[derive(Debug, Clone)]
 pub enum EditorMessage {
     Noop,
@@ -67,7 +84,9 @@ pub enum EditorMessage {
     HoverMenu(EditorMenuKind),
     ToggleWorkspacePanels,
     RequestEditorLeaveToBrowser,
-    RequestEditorLeave { close_editor: bool },
+    RequestEditorLeave {
+        close_editor: bool,
+    },
     OpenBrowserWindow,
     OpenViewerWindow,
     Canvas(photon_canvas::CanvasEvent),
@@ -126,6 +145,7 @@ pub enum EditorMessage {
     EditorApplyRotateAngle,
     ToggleCropMode,
     SetCropPreset(Option<f32>),
+    SetCropField(CropRectField, String),
     ApplyCrop,
     CancelCrop,
     BeginDragEditorPanel(EditorRightPanel),
@@ -137,7 +157,9 @@ pub enum EditorMessage {
     CloseEditorToolsPanel,
     DockSplitterDrag(DockSplitterKind, f32),
     DockSplitterRelease(DockSplitterKind, f32),
-    OpenLayerContextMenu { layer_id: u64 },
+    OpenLayerContextMenu {
+        layer_id: u64,
+    },
     EditorStartLayerRename(u64, String),
     EditorLayerRenameChanged(String),
     EditorCommitLayerRename,
@@ -189,13 +211,20 @@ pub enum EditorMessage {
     OpenManagePlugins,
     ReloadPlugins,
     RunPlugin(String),
-    EditorCopyPixels { merged: bool },
+    EditorCopyPixels {
+        merged: bool,
+    },
     EditorCutPixels,
-    EditorPastePixels { into_selection: bool },
+    EditorPastePixels {
+        into_selection: bool,
+    },
     ZoomStep(f32),
     ZoomFit,
     ZoomActual,
-    CanvasPanTo { pan_x: f32, pan_y: f32 },
+    CanvasPanTo {
+        pan_x: f32,
+        pan_y: f32,
+    },
     SetAntiAliasingMode(CanvasAntiAliasingMode),
     SetViewportDenoiseMode(ViewportDenoiseMode),
     EditorSetApplyTarget(ApplyTarget),
@@ -237,6 +266,13 @@ pub enum EditorMessage {
     OpenFileDialog,
     EditorSetVectorMode(bool),
     EditorSetShapeCornerRadius(f32),
+    EditorSetAlignTarget(photon_protocol::AlignTarget),
+    EditorAlignObjects(photon_protocol::AlignOp),
+    EditorDistributeObjects(photon_protocol::DistributeOp),
+    EditorToggleLayerMultiSelect(u64),
+    EditorLayerRowClicked(u64),
+    EditorBeginDragLayer(u64),
+    EditorDropLayer(u64),
     EditorSelectVectorNode(Option<usize>),
     EditorSetVectorSimplifyTolerance(f32),
     EditorSetVectorSmoothTension(f32),
@@ -253,4 +289,18 @@ pub enum EditorMessage {
     ConfirmExportVectorSvg,
     EditorSetTextDraft(photon_protocol::TextLayerData),
     EditorAddOrUpdateTextLayer(photon_protocol::TextLayerData),
+    ToggleRulers,
+    ToggleGrid,
+    SetGridSpacing(f32),
+    SetGridSettings {
+        spacing_px: f32,
+        subdivisions: u32,
+        opacity: f32,
+    },
+    ToggleGuides,
+    ToggleLockGuides,
+    ClearGuides,
+    AddGuide(photon_canvas::GuideAxis, f32),
+    SetPendingGuidePreview(Option<(photon_canvas::GuideAxis, f32)>),
+    ToggleSnap(SnapTarget),
 }

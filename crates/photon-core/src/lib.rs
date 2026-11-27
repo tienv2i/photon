@@ -5,6 +5,7 @@ pub mod ai;
 pub mod batch;
 pub mod core;
 pub mod file_ops;
+pub mod recovery;
 pub mod replay;
 pub mod runtime;
 pub mod translate;

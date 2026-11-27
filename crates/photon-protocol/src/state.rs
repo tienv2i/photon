@@ -124,6 +124,14 @@ pub struct EditorTabSummary {
     pub active: bool,
 }
 
+/// Summary of a named selection channel saved in the Editor document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSelectionSummary {
+    pub id: u64,
+    pub name: String,
+}
+
 /// Summary of the Editor's active pixel selection mask.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -134,6 +142,8 @@ pub struct EditorSelectionSummary {
     pub quick_mask_active: bool,
     pub can_reselect: bool,
     pub selection_revision: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saved_selections: Vec<SavedSelectionSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -207,6 +217,8 @@ pub struct UiStateMeta {
     pub active_editor_tab_id: Option<u64>,
     #[serde(default)]
     pub focus_request_seq: u64,
+    #[serde(default)]
+    pub pending_recovery_count: usize,
     pub status: UiText,
     pub safe_mode: bool,
     pub active_tasks: Vec<TaskSnapshot>,

@@ -706,6 +706,32 @@ pub(super) fn handle_state_updated(
             {
                 tasks.push(Task::done(Message::WakeWindow(win_id)));
             }
+            if !state.recovery_prompted
+                && state.snapshot.meta.pending_recovery_count > 0
+                && state.dialog.is_none()
+            {
+                state.recovery_prompted = true;
+                state.dialog = Some(InAppDialog::RecoveryPrompt {
+                    count: state.snapshot.meta.pending_recovery_count,
+                });
+                open_dialog_window(state, DesktopDialogId::RecoveryPrompt);
+            }
+            if let Some(closing_id) = state.exit_closing_tab_id {
+                if !state
+                    .snapshot
+                    .meta
+                    .editor_tabs
+                    .iter()
+                    .any(|t| t.id == closing_id)
+                {
+                    state.exit_closing_tab_id = None;
+                    if state.pending_exit && state.dialog.is_none() {
+                        tasks.push(update(state, Message::RequestAppExit));
+                    }
+                }
+            } else if state.pending_exit && state.dialog.is_none() {
+                tasks.push(update(state, Message::RequestAppExit));
+            }
             Task::batch(tasks)
         }
 
@@ -753,6 +779,9 @@ pub(super) fn handle_command_completed(
         Message::CommandCompleted(Ok(resp)) => {
             let lang = state.snapshot.meta.language;
             if !resp.ok {
+                state.pending_exit = false;
+                state.exit_closing_tab_id = None;
+                state.pending_preview_commit_rev = None;
                 if resp
                     .error
                     .as_ref()
@@ -939,6 +968,12 @@ pub(super) fn editor_status_summary(state: &PhotonGui, lang: Language) -> String
 }
 
 pub(super) fn open_dialog_window(state: &mut PhotonGui, id: DesktopDialogId) {
+    if id != DesktopDialogId::Settings && state.settings_open {
+        state.settings_open = false;
+        state.settings_confirm_factory_reset = false;
+        state.dialog_manager.close(&DesktopDialogId::Settings);
+    }
+    state.pending_focus_widget = Some("photon.dialog.first_input");
     state.active_dialog_window = state
         .last_active_window
         .filter(|wid| state.windows.contains_key(wid))
@@ -1003,6 +1038,12 @@ pub(super) fn dialog_id_for_in_app(dialog: &InAppDialog) -> DesktopDialogId {
         InAppDialog::TransformEach { .. } => DesktopDialogId::TransformEach,
         InAppDialog::VectorBlend { .. } => DesktopDialogId::VectorBlend,
         InAppDialog::ExportVectorSvg { .. } => DesktopDialogId::ExportVectorSvg,
+        InAppDialog::SliceImage { .. } => DesktopDialogId::SliceImage,
+        InAppDialog::RecoveryPrompt { .. } => DesktopDialogId::RecoveryPrompt,
+        InAppDialog::SaveSelection { .. } => DesktopDialogId::SaveSelection,
+        InAppDialog::LoadSelection { .. } => DesktopDialogId::LoadSelection,
+        InAppDialog::NewGuide { .. } => DesktopDialogId::NewGuide,
+        InAppDialog::GridSettings { .. } => DesktopDialogId::GridSettings,
         InAppDialog::Alert { id, .. } => *id,
     }
 }

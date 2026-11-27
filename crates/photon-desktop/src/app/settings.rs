@@ -780,7 +780,68 @@ pub(super) fn build_settings_editor_tab(state: &PhotonGui) -> Element<'_, Messag
         .spacing(8),
     );
 
-    column![files_card, canvas_card].spacing(8).into()
+    let subdivisions = state.editor_ui.grid_subdivisions;
+    let opacity = state.editor_ui.grid_opacity;
+    let grid_card = collapsible_card(
+        state,
+        "editor.grid",
+        tr(lang, "settings-section-grid"),
+        column![
+            setting_row(
+                tr(lang, "grid-spacing-px"),
+                settings_dropdown(
+                    vec![
+                        (16u32, "16 px".to_string()),
+                        (32u32, "32 px".to_string()),
+                        (64u32, "64 px".to_string()),
+                        (128u32, "128 px".to_string()),
+                        (256u32, "256 px".to_string()),
+                    ],
+                    state.editor_ui.grid_spacing_px.round() as u32,
+                    move |px| {
+                        Message::Editor(EditorMessage::SetGridSettings {
+                            spacing_px: px as f32,
+                            subdivisions,
+                            opacity,
+                        })
+                    },
+                ),
+            ),
+            setting_row(
+                tr(lang, "grid-subdivisions"),
+                settings_dropdown(
+                    vec![
+                        (1u32, "1".to_string()),
+                        (2u32, "2".to_string()),
+                        (4u32, "4".to_string()),
+                        (8u32, "8".to_string()),
+                    ],
+                    subdivisions,
+                    move |divs| {
+                        Message::Editor(EditorMessage::SetGridSettings {
+                            spacing_px: state.editor_ui.grid_spacing_px,
+                            subdivisions: divs,
+                            opacity,
+                        })
+                    },
+                ),
+            ),
+            setting_row(
+                tr(lang, "settings-grid-customize"),
+                button::labeled(
+                    tr(lang, "menu-view-grid-settings"),
+                    Some(Icon::Settings),
+                    ButtonVariant::Secondary,
+                    Some(Message::OpenGridSettingsDialog),
+                ),
+            ),
+        ]
+        .spacing(8),
+    );
+
+    column![files_card, canvas_card, grid_card]
+        .spacing(8)
+        .into()
 }
 
 fn build_settings_quick_access_body(state: &PhotonGui) -> Element<'_, Message> {

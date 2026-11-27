@@ -12,7 +12,7 @@ options=('!lto')
 build() {
   local src_root="${_srcdir:-$startdir/../../..}"
   cd "$src_root"
-  cargo build --release -p photon-desktop -p photon-cli
+  cargo build --release -p photon-desktop -p photon-app-manager -p photon-app-viewer -p photon-app-editor -p photon-cli
 }
 
 package() {

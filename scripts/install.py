@@ -2,10 +2,10 @@
 """System / user-local installer and uninstaller for Photon desktop integration.
 
 Installs:
-- `photon` and `photonctl` binaries into `<prefix>/bin`
-- Browser desktop entry (`io.github.tienv2i.Photon.desktop` -> `photon %U`)
-- Standalone Viewer desktop entry (`io.github.tienv2i.Photon.Viewer.desktop` -> `photon --viewer-window %F`)
-- Editor desktop entry (`io.github.tienv2i.Photon.Editor.desktop` -> `photon edit %f`)
+- `photon`, `photon-manager`, `photon-viewer`, `photon-editor`, and `photonctl` binaries into `<prefix>/bin`
+- Browser desktop entry (`io.github.tienv2i.Photon.desktop` -> `photon-manager %U`)
+- Standalone Viewer desktop entry (`io.github.tienv2i.Photon.Viewer.desktop` -> `photon-viewer %F`)
+- Editor desktop entry (`io.github.tienv2i.Photon.Editor.desktop` -> `photon-editor %F`)
 - Image MIME type associations (Viewer + Editor; `--set-default` makes the Viewer the default handler)
 - AppStream metadata & hicolor SVG + PNG icons
 """
@@ -178,6 +178,9 @@ def install_targets(prefix: pathlib.Path) -> dict[str, pathlib.Path]:
     share = prefix / "share"
     targets = {
         "photon": prefix / "bin" / "photon",
+        "photon-manager": prefix / "bin" / "photon-manager",
+        "photon-viewer": prefix / "bin" / "photon-viewer",
+        "photon-editor": prefix / "bin" / "photon-editor",
         "photonctl": prefix / "bin" / "photonctl",
         "browser desktop": share / "applications" / f"{APP_ID}.desktop",
         "standalone viewer desktop": share / "applications" / f"{APP_ID}.Viewer.desktop",
@@ -247,7 +250,20 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
     stage.mkdir(parents=True, exist_ok=True)
 
     if not skip_build:
-        cargo_cmd = ["cargo", "build", "-p", "photon-desktop", "-p", "photon-cli"]
+        cargo_cmd = [
+            "cargo",
+            "build",
+            "-p",
+            "photon-desktop",
+            "-p",
+            "photon-app-manager",
+            "-p",
+            "photon-app-viewer",
+            "-p",
+            "photon-app-editor",
+            "-p",
+            "photon-cli",
+        ]
         if not dev:
             cargo_cmd.append("--release")
         print("+", " ".join(cargo_cmd))
@@ -255,9 +271,9 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
             return 1
 
     profile_dir = ROOT / "target" / ("debug" if dev else "release")
-    photon_bin = profile_dir / "photon"
+    desktop_bins = ("photon", "photon-manager", "photon-viewer", "photon-editor")
     ctl_bin = profile_dir / "photonctl"
-    if not photon_bin.is_file() or not ctl_bin.is_file():
+    if any(not (profile_dir / name).is_file() for name in desktop_bins) or not ctl_bin.is_file():
         print(f"error: built binaries missing in {profile_dir}", file=sys.stderr)
         return 1
 
@@ -310,20 +326,25 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
         sources[f"icon {role} svg"] = (PACKAGING / f"{icon_name}.svg", "644")
 
     targets = install_targets(prefix)
-    if dev:
-        libexec_bin = prefix / "libexec" / "photon"
-        wrapper = stage / "photon-wrapper.sh"
-        wrapper.write_text(
-            "#!/bin/sh\n"
-            'export PHOTON_PROFILE="${PHOTON_PROFILE:-prod}"\n'
-            f'exec "{libexec_bin}" "$@"\n',
-            encoding="utf-8",
-        )
-        targets["photon libexec"] = libexec_bin
-        sources["photon libexec"] = (photon_bin, "755")
-        sources["photon"] = (wrapper, "755")
-    else:
-        sources["photon"] = (photon_bin, "755")
+    for bin_name in desktop_bins:
+        built_bin = profile_dir / bin_name
+        if dev:
+            libexec_bin = prefix / "libexec" / bin_name
+            wrapper = stage / f"{bin_name}-wrapper.sh"
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                'export PHOTON_PROFILE="${PHOTON_PROFILE:-prod}"\n'
+                f'exec "{libexec_bin}" "$@"\n',
+                encoding="utf-8",
+            )
+            targets[f"{bin_name} libexec"] = libexec_bin
+            sources[f"{bin_name} libexec"] = (built_bin, "755")
+            sources[bin_name] = (wrapper, "755")
+        else:
+            stale_libexec = prefix / "libexec" / bin_name
+            if stale_libexec.exists() or stale_libexec.is_symlink():
+                run(maybe_privileged(["rm", "-f", str(stale_libexec)], needs_root))
+            sources[bin_name] = (built_bin, "755")
 
     for icon_name, role in ICON_ROLES.items():
         svg_src = PACKAGING / f"{icon_name}.svg"
@@ -351,12 +372,12 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
     for key, (src, _) in sources.items():
         print(f"  {key:22} -> {targets[key]}")
     print("Registered MIME handlers:")
-    print(f"  Browser: {targets['browser desktop']} (Exec: photon %U)")
+    print(f"  Browser: {targets['browser desktop']} (Exec: photon-manager %U)")
     print(
         f"  Viewer:  {targets['standalone viewer desktop']} "
-        "(Exec: photon --viewer-window %F)"
+        "(Exec: photon-viewer %F)"
     )
-    print(f"  Editor:  {targets['editor desktop']} (Exec: photon edit %f)")
+    print(f"  Editor:  {targets['editor desktop']} (Exec: photon-editor %F)")
     if not set_default_viewer:
         print(
             "Default image handler unchanged. Set Photon Viewer as default e.g. with:\n"
@@ -369,9 +390,10 @@ def cmd_install(prefix: pathlib.Path, *, dev: bool, skip_build: bool, set_defaul
 def cmd_uninstall(prefix: pathlib.Path) -> int:
     needs_root = not is_writable_prefix(prefix)
     targets = install_targets(prefix)
-    libexec_bin = prefix / "libexec" / "photon"
-    if libexec_bin.exists():
-        targets["photon libexec"] = libexec_bin
+    for bin_name in ("photon", "photon-manager", "photon-viewer", "photon-editor"):
+        libexec_bin = prefix / "libexec" / bin_name
+        if libexec_bin.exists():
+            targets[f"{bin_name} libexec"] = libexec_bin
 
     removed = 0
     for key, dst in targets.items():

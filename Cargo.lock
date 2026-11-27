@@ -870,6 +870,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "comp-file-browser"
+version = "0.0.5-beta"
+dependencies = [
+ "regex-automata",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1626,6 +1633,81 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "fw-dialogs"
+version = "0.0.5-beta"
+dependencies = [
+ "iced",
+ "rfd",
+ "zbus",
+]
+
+[[package]]
+name = "fw-ipc"
+version = "0.0.5-beta"
+dependencies = [
+ "fw-protocol",
+ "fw-runtime",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fw-panels"
+version = "0.0.5-beta"
+dependencies = [
+ "fw-ui",
+ "iced",
+]
+
+[[package]]
+name = "fw-protocol"
+version = "0.0.5-beta"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fw-runtime"
+version = "0.0.5-beta"
+dependencies = [
+ "fw-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "fw-shell"
+version = "0.0.5-beta"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "fw-storage"
+version = "0.0.5-beta"
+dependencies = [
+ "fw-protocol",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "fw-ui"
+version = "0.0.5-beta"
+dependencies = [
+ "fw-dialogs",
+ "iced",
 ]
 
 [[package]]
@@ -3597,41 +3679,42 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "photon-app-editor"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
  "photon-desktop",
 ]
 
 [[package]]
 name = "photon-app-manager"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
  "photon-desktop",
 ]
 
 [[package]]
 name = "photon-app-viewer"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
  "photon-desktop",
 ]
 
 [[package]]
 name = "photon-browser"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
+ "comp-file-browser",
+ "fw-dialogs",
+ "fw-panels",
+ "fw-ui",
  "iced",
- "photon-dialogs",
  "photon-i18n",
- "photon-panels",
  "photon-protocol",
- "photon-ui",
  "regex-automata",
 ]
 
 [[package]]
 name = "photon-canvas"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
  "iced",
  "image",
@@ -3640,7 +3723,7 @@ dependencies = [
 
 [[package]]
 name = "photon-cli"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
  "clap",
  "photon-core",
@@ -3654,8 +3737,10 @@ dependencies = [
 
 [[package]]
 name = "photon-core"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
+ "fw-protocol",
+ "fw-runtime",
  "image",
  "photon-i18n",
  "photon-image",
@@ -3672,25 +3757,26 @@ dependencies = [
 
 [[package]]
 name = "photon-desktop"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
  "arboard",
  "clap",
+ "fw-dialogs",
+ "fw-panels",
+ "fw-shell",
+ "fw-ui",
  "iced",
  "image",
  "libc",
  "photon-browser",
  "photon-canvas",
  "photon-core",
- "photon-dialogs",
  "photon-editor",
  "photon-i18n",
  "photon-image",
  "photon-ipc",
- "photon-panels",
  "photon-protocol",
  "photon-storage",
- "photon-ui",
  "photon-viewer",
  "regex-automata",
  "serde",
@@ -3700,30 +3786,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "photon-dialogs"
-version = "0.0.4-beta"
-dependencies = [
- "iced",
- "rfd",
- "zbus",
-]
-
-[[package]]
 name = "photon-editor"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
+ "fw-dialogs",
+ "fw-panels",
+ "fw-ui",
  "iced",
  "photon-canvas",
- "photon-dialogs",
  "photon-i18n",
- "photon-panels",
  "photon-protocol",
- "photon-ui",
 ]
 
 [[package]]
 name = "photon-i18n"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
  "fluent-templates",
  "photon-protocol",
@@ -3732,7 +3809,7 @@ dependencies = [
 
 [[package]]
 name = "photon-image"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
  "flate2",
  "image",
@@ -3751,8 +3828,11 @@ dependencies = [
 
 [[package]]
 name = "photon-ipc"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
+ "fw-ipc",
+ "fw-protocol",
+ "fw-runtime",
  "photon-core",
  "photon-protocol",
  "photon-storage",
@@ -3763,16 +3843,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "photon-panels"
-version = "0.0.4-beta"
-dependencies = [
- "iced",
- "photon-ui",
-]
-
-[[package]]
 name = "photon-plugins"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
  "image",
  "photon-protocol",
@@ -3783,8 +3855,9 @@ dependencies = [
 
 [[package]]
 name = "photon-protocol"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
+ "fw-protocol",
  "schemars",
  "serde",
  "serde_json",
@@ -3792,34 +3865,25 @@ dependencies = [
 
 [[package]]
 name = "photon-storage"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
+ "fw-protocol",
+ "fw-storage",
  "photon-protocol",
  "serde",
  "serde_json",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "photon-ui"
-version = "0.0.4-beta"
-dependencies = [
- "iced",
- "photon-dialogs",
 ]
 
 [[package]]
 name = "photon-viewer"
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 dependencies = [
+ "fw-panels",
+ "fw-ui",
  "iced",
  "photon-canvas",
  "photon-i18n",
- "photon-panels",
  "photon-protocol",
- "photon-ui",
 ]
 
 [[package]]

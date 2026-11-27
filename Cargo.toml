@@ -1,48 +1,60 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/photon-protocol",
-    "crates/photon-storage",
-    "crates/photon-i18n",
-    "crates/photon-image",
-    "crates/photon-core",
-    "crates/photon-plugins",
-    "crates/photon-dialogs",
-    "crates/photon-ipc",
-    "crates/photon-ui",
-    "crates/photon-panels",
-    "crates/photon-canvas",
-    "crates/photon-browser",
-    "crates/photon-viewer",
-    "crates/photon-editor",
-    "crates/photon-cli",
-    "crates/photon-desktop",
-    "crates/photon-app-manager",
-    "crates/photon-app-viewer",
-    "crates/photon-app-editor",
+    "crates/framework/fw-protocol",
+    "crates/framework/fw-storage",
+    "crates/framework/fw-runtime",
+    "crates/framework/fw-ipc",
+    "crates/framework/fw-shell",
+    "crates/framework/fw-ui",
+    "crates/framework/fw-panels",
+    "crates/framework/fw-dialogs",
+    "crates/components/comp-file-browser",
+    "crates/apps/photon/photon-protocol",
+    "crates/apps/photon/photon-storage",
+    "crates/apps/photon/photon-i18n",
+    "crates/apps/photon/photon-image",
+    "crates/apps/photon/photon-core",
+    "crates/apps/photon/photon-plugins",
+    "crates/apps/photon/photon-ipc",
+    "crates/apps/photon/photon-canvas",
+    "crates/apps/photon/photon-browser",
+    "crates/apps/photon/photon-viewer",
+    "crates/apps/photon/photon-editor",
+    "crates/apps/photon/photon-cli",
+    "crates/apps/photon/photon-desktop",
+    "crates/apps/photon/photon-app-manager",
+    "crates/apps/photon/photon-app-viewer",
+    "crates/apps/photon/photon-app-editor",
 ]
 
 [workspace.package]
-version = "0.0.4-beta"
+version = "0.0.5-beta"
 edition = "2024"
 license = "MIT"
 rust-version = "1.88"
 
 [workspace.dependencies]
-photon-protocol = { path = "crates/photon-protocol" }
-photon-storage = { path = "crates/photon-storage" }
-photon-i18n = { path = "crates/photon-i18n" }
-photon-image = { path = "crates/photon-image" }
-photon-core = { path = "crates/photon-core" }
-photon-plugins = { path = "crates/photon-plugins" }
-photon-dialogs = { path = "crates/photon-dialogs" }
-photon-ipc = { path = "crates/photon-ipc" }
-photon-ui = { path = "crates/photon-ui" }
-photon-panels = { path = "crates/photon-panels" }
-photon-canvas = { path = "crates/photon-canvas" }
-photon-browser = { path = "crates/photon-browser" }
-photon-viewer = { path = "crates/photon-viewer" }
-photon-editor = { path = "crates/photon-editor" }
+fw-protocol = { path = "crates/framework/fw-protocol" }
+fw-storage = { path = "crates/framework/fw-storage" }
+fw-runtime = { path = "crates/framework/fw-runtime" }
+fw-ipc = { path = "crates/framework/fw-ipc" }
+fw-shell = { path = "crates/framework/fw-shell" }
+fw-ui = { path = "crates/framework/fw-ui" }
+fw-panels = { path = "crates/framework/fw-panels" }
+fw-dialogs = { path = "crates/framework/fw-dialogs" }
+comp-file-browser = { path = "crates/components/comp-file-browser" }
+photon-protocol = { path = "crates/apps/photon/photon-protocol" }
+photon-storage = { path = "crates/apps/photon/photon-storage" }
+photon-i18n = { path = "crates/apps/photon/photon-i18n" }
+photon-image = { path = "crates/apps/photon/photon-image" }
+photon-core = { path = "crates/apps/photon/photon-core" }
+photon-plugins = { path = "crates/apps/photon/photon-plugins" }
+photon-ipc = { path = "crates/apps/photon/photon-ipc" }
+photon-canvas = { path = "crates/apps/photon/photon-canvas" }
+photon-browser = { path = "crates/apps/photon/photon-browser" }
+photon-viewer = { path = "crates/apps/photon/photon-viewer" }
+photon-editor = { path = "crates/apps/photon/photon-editor" }
 
 arboard = "3"
 clap = { version = "4", features = ["derive", "env"] }

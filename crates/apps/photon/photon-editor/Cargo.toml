@@ -1,0 +1,15 @@
+[package]
+name = "photon-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+iced = { workspace = true }
+photon-canvas = { workspace = true }
+fw-dialogs = { workspace = true }
+photon-i18n = { workspace = true }
+fw-panels = { workspace = true }
+photon-protocol = { workspace = true }
+fw-ui = { workspace = true }

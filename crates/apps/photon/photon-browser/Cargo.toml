@@ -1,0 +1,16 @@
+[package]
+name = "photon-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+comp-file-browser = { workspace = true }
+iced = { workspace = true }
+fw-dialogs = { workspace = true }
+photon-i18n = { workspace = true }
+fw-panels = { workspace = true }
+photon-protocol = { workspace = true }
+fw-ui = { workspace = true }
+regex-automata = "0.4"

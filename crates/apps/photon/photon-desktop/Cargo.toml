@@ -1,0 +1,40 @@
+[package]
+name = "photon-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "photon_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "photon"
+path = "src/main.rs"
+
+[dependencies]
+arboard = { workspace = true }
+clap = { workspace = true }
+fw-shell = { workspace = true }
+iced = { workspace = true }
+image = { workspace = true }
+libc = { workspace = true }
+photon-core = { workspace = true }
+fw-dialogs = { workspace = true }
+photon-i18n = { workspace = true }
+photon-image = { workspace = true }
+photon-ipc = { workspace = true }
+fw-panels = { workspace = true }
+photon-protocol = { workspace = true }
+photon-canvas = { workspace = true }
+photon-browser = { workspace = true }
+photon-viewer = { workspace = true }
+photon-editor = { workspace = true }
+photon-storage = { workspace = true }
+fw-ui = { workspace = true }
+regex-automata = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

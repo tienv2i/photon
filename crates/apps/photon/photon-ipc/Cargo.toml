@@ -1,0 +1,18 @@
+[package]
+name = "photon-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fw-ipc = { workspace = true }
+fw-protocol = { workspace = true }
+fw-runtime = { workspace = true }
+photon-core = { workspace = true }
+photon-protocol = { workspace = true }
+photon-storage = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

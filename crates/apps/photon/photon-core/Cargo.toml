@@ -1,0 +1,24 @@
+[package]
+name = "photon-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fw-protocol = { workspace = true }
+fw-runtime = { workspace = true }
+image = { workspace = true }
+photon-image = { workspace = true }
+photon-plugins = { workspace = true }
+photon-protocol = { workspace = true }
+photon-storage = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+photon-i18n = { workspace = true }
+photon-ipc = { workspace = true }

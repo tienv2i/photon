@@ -4653,7 +4653,84 @@ pub fn view(state: &PhotonGui, window_id: window::Id) -> Element<'_, Message> {
         backend.to_owned()
     };
     let status = status_bar(status_left, right_meta);
-    let shell_col = column![top_bar, container(body).height(Fill).width(Fill), status];
+    let viewer_status_overlaps = if ws == Workspace::Viewer {
+        let v_state = state.viewer_view_state(true);
+        let (left_img_size, right_img_size) = match state.viewer_mode {
+            ViewerViewMode::Single => {
+                let sz = state
+                    .viewer_frame
+                    .as_ref()
+                    .map(|f| (f.width, f.height))
+                    .or_else(|| {
+                        state
+                            .snapshot
+                            .meta
+                            .viewer_path
+                            .as_deref()
+                            .and_then(|p| state.image_sizes.get(p).copied())
+                    });
+                (sz, None)
+            }
+            ViewerViewMode::Double => {
+                let (left_slot, right_slot) = photon_viewer::dual_spread_slots(v_state);
+                let l_sz = state
+                    .viewer_frame
+                    .as_ref()
+                    .map(|f| (f.width, f.height))
+                    .or_else(|| left_slot.and_then(|(_, p)| state.image_sizes.get(p).copied()));
+                let r_sz = state
+                    .viewer_pair_frame
+                    .as_ref()
+                    .map(|f| (f.width, f.height))
+                    .or_else(|| right_slot.and_then(|(_, p)| state.image_sizes.get(p).copied()));
+                (l_sz, r_sz)
+            }
+            ViewerViewMode::Webtoon => (None, None),
+        };
+        let filmstrip_visible = state.viewer_mode != ViewerViewMode::Webtoon
+            && state.snapshot.viewer_images.len() > 1
+            && state.viewer_filmstrip_open;
+        let vp_w = state.window_size.width.max(1.0);
+        let vp_h = (state.window_size.height - 48.0).max(1.0);
+        photon_viewer::viewer_status_bar_overlaps(
+            state.viewer_mode,
+            left_img_size,
+            right_img_size,
+            f32::from(state.viewer_manga_page_gap),
+            state.viewer_quarter_turns,
+            state.zoom,
+            state.pan_x,
+            state.pan_y,
+            vp_w,
+            vp_h,
+            28.0,
+            filmstrip_visible,
+        )
+    } else {
+        false
+    };
+    let status_hovered = state
+        .last_cursor
+        .is_some_and(|p| p.y >= (state.window_size.height - 32.0).max(0.0));
+    let shell_col = if viewer_status_overlaps {
+        let content: Element<'_, Message> = if status_hovered {
+            iced::widget::stack![
+                container(body).height(Fill).width(Fill),
+                container(status)
+                    .width(Fill)
+                    .height(Fill)
+                    .align_y(iced::alignment::Vertical::Bottom),
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into()
+        } else {
+            container(body).height(Fill).width(Fill).into()
+        };
+        column![top_bar, content]
+    } else {
+        column![top_bar, container(body).height(Fill).width(Fill), status]
+    };
 
     let shell = container(shell_col.height(Fill).width(Fill))
         .width(Fill)

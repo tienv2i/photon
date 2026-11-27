@@ -73,6 +73,69 @@ pub fn viewer_edge_nav_overlap(
     (left_overlaps, right_overlaps)
 }
 
+/// Returns `true` when the displayed image's bottom edge overlaps the bottom status-bar
+/// strip (`[vp_h - status_h, vp_h]`) in Viewer mode.
+#[allow(clippy::too_many_arguments)]
+pub fn viewer_status_bar_overlaps(
+    viewer_mode: ViewerViewMode,
+    left_size: Option<(u32, u32)>,
+    right_size: Option<(u32, u32)>,
+    dual_gap_px: f32,
+    quarter_turns: u8,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
+    vp_w: f32,
+    vp_h: f32,
+    status_h: f32,
+    filmstrip_open: bool,
+) -> bool {
+    if filmstrip_open {
+        return false;
+    }
+    if viewer_mode == ViewerViewMode::Webtoon {
+        return true;
+    }
+    let vp_w = vp_w.max(1.0);
+    let vp_h = vp_h.max(1.0);
+    let status_h = status_h.max(0.0);
+    let Some((lw, lh)) = left_size.filter(|(w, h)| *w > 0 && *h > 0) else {
+        return false;
+    };
+    let (img_top, img_bottom) = match viewer_mode {
+        ViewerViewMode::Single => {
+            let (_left, top, _drawn_w, drawn_h, _, _) = viewer_fit_geometry(
+                lw as f32,
+                lh as f32,
+                quarter_turns,
+                zoom,
+                pan_x,
+                pan_y,
+                vp_w,
+                vp_h,
+            );
+            (top, top + drawn_h)
+        }
+        ViewerViewMode::Double => {
+            let valid_right = right_size.filter(|(w, h)| *w > 0 && *h > 0);
+            let geom = viewer_double_fit_geometries(
+                (lw, lh),
+                valid_right,
+                dual_gap_px,
+                quarter_turns,
+                zoom,
+                pan_x,
+                pan_y,
+                vp_w,
+                vp_h,
+            );
+            (geom.spread_top, geom.spread_top + geom.drawn_h)
+        }
+        ViewerViewMode::Webtoon => return true,
+    };
+    img_bottom > (vp_h - status_h) && img_top < vp_h
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct EdgeNavButtonProgram {
     pub(crate) is_next: bool,

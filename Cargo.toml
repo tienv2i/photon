@@ -52,7 +52,6 @@ photon-protocol = { path = "crates/apps/photon/photon-protocol" }
 photon-storage = { path = "crates/apps/photon/photon-storage" }
 photon-i18n = { path = "crates/apps/photon/photon-i18n" }
 photon-image = { path = "crates/apps/photon/photon-image" }
-photon-plugins = { path = "crates/apps/photon/photon-plugins" }
 photon-ipc = { path = "crates/apps/photon/photon-ipc" }
 photon-canvas = { path = "crates/apps/photon/photon-canvas" }
 photon-browser = { path = "crates/apps/photon/photon-browser" }
